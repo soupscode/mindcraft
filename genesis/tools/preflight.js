@@ -91,7 +91,7 @@ function checkPackages() {
     }
     checkNativePackages();
     const node_major = Number(process.versions.node.split('.')[0]);
-    record('packages', `node ${process.versions.node}`, node_major >= 20, node_major >= 20 ? '' : 'Node 20 or newer is needed');
+    record('packages', `node ${process.versions.node}`, node_major >= 22, node_major >= 22 ? '' : 'Node 22 or newer is needed');
     return true;
 }
 

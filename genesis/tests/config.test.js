@@ -380,8 +380,15 @@ test('packages: genesis/package.json lists the clients the adapters import, and 
     const root = readJson(path.join(REPO_ROOT, 'package.json'));
     for (const name of Object.keys(pkg.dependencies)) assert.equal(root.dependencies[name], undefined, 'the root package.json was changed');
     const dockerfile = readFileSync(path.join(GENESIS, 'Dockerfile'), 'utf8');
-    assert.match(dockerfile, /COPY genesis\/package\.json \.\/genesis\/package\.json\nRUN npm install --prefix genesis/);
-    assert.ok(dockerfile.indexOf('npm install --prefix genesis') < dockerfile.indexOf('COPY . .'));
+    // installed with npm ci from the committed lockfiles (decided), on the Node 22 image (decided)
+    assert.match(dockerfile, /COPY genesis\/package\.json genesis\/package-lock\.json \.\/genesis\/\nRUN npm ci --prefix genesis/);
+    assert.ok(dockerfile.indexOf('npm ci --prefix genesis') < dockerfile.indexOf('COPY . .'));
+    assert.match(dockerfile, /^FROM node:22-/m);
+    assert.doesNotMatch(dockerfile, /npm install/, 'an npm install in the image ignores the lockfile');
+    for (const lock of [path.join(REPO_ROOT, 'package-lock.json'), path.join(GENESIS, 'package-lock.json')]) {
+        assert.ok(readFileSync(lock, 'utf8').length > 0, `${lock} is not committed`);
+    }
+    assert.equal(readJson(path.join(REPO_ROOT, 'package-lock.json')).packages['node_modules/mineflayer'].version, '4.33.0');
     assert.match(readFileSync(path.join(REPO_ROOT, '.dockerignore'), 'utf8'), /^genesis\/node_modules$/m);
 });
 

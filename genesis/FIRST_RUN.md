@@ -121,8 +121,7 @@ dc -f genesis/compose.agents.yaml run --rm agents node genesis/tools/preflight.j
 ```
 
 **Check:** the last line is `Genesis pre-flight: <n> passed, 0 failed.`
-**Send:** the whole output of both commands. (The build prints `EBADENGINE` warnings for
-mineflayer and minecraft-protocol, which ask for Node 22: expected, see "Known unverified".)
+**Send:** the whole output of both commands.
 
 ```
 dc -f genesis/compose.agents.yaml run --rm agents node genesis/tools/place_world.js --at X Y Z --seed SEED --out ./bots/genesis.world.json
@@ -323,7 +322,7 @@ and go back to step 5 (the same seed gives the same land; `place_world.js` needs
 
 No Redis, Postgres, dashboard or alerter: agents, Minecraft server and Ollama only. PowerShell.
 
-1. Install **Node 20 LTS**, **Java 21** (Temurin) and **Git**. Check: `node -v`, `java -version`, `git --version`.
+1. Install **Node 22 LTS**, **Java 21** (Temurin) and **Git**. Check: `node -v`, `java -version`, `git --version`.
 2. Clone and install:
    ```
    git clone --branch main https://github.com/soupscode/mindcraft.git C:\genesis\repo
@@ -406,7 +405,7 @@ The runbook was written before the code. What exists differs here:
 | C2: `OLLAMA_HOST` `0.0.0.0:11434` | Bind the desktop's LAN address (`DESKTOP_IP:11434`). Also pull the embedding model (`embeddinggemma`); without it agents fall back to word overlap. |
 | C5: launcher sends `desktop_available` / `desktop_leaving` | Not built. Without it the broker finds the model by probing every 15 seconds, and treats two failed probes as away. |
 | D4: channel open; off-site heartbeat | ntfy (decided). No heartbeat in Genesis (decided). |
-| E1 log: "bot image to use Node 20 LTS" | Still Node 20, but mineflayer 4.33.0 and minecraft-protocol declare Node 22 or newer (npm warns). See below. |
+| E1 log: "bot image to use Node 20 LTS" | The images use Node 22 (decided 16 Nov): mineflayer 4.33.0 and minecraft-protocol declare Node 22 or newer, and the pre-flight ran on 22. Installs use `npm ci` with committed lockfiles. |
 | Not in the runbook | `mineflayer` is pinned to 4.33.0 in `package.json` (its patch does not apply to newer versions). The agents image removes the `libstdc++` bundled with the prebuilt `canvas`. `node genesis/tools/preflight.js` checks an install. |
 
 ---
@@ -434,8 +433,8 @@ Never run, most likely to fail first:
 3. **The Docker images.** None was built (no Docker daemon). `docker compose config` passes for
    all three files. In `compose.minecraft.yaml` the image tag `java21` is marked UNVERIFIED; the
    variable names were read in the image's documentation.
-4. **Node 20.** The images use Node 20; mineflayer 4.33.0 and minecraft-protocol 1.68 declare
-   `node >=22`. No Node-22-only code was found in them, but nothing was run on Node 20.
+4. **`npm ci` inside the images.** The lockfiles were written on Linux with Node 22 and match
+   their `package.json` files, but no image was built with them.
 5. **The whitelist in offline mode:** that `whitelist add <name>` over RCON stores the id an
    offline-mode login gets. If agents are refused (exit code 66), send `whitelist.json`.
 6. **Paper's own limits** on bots: movement checks, spam limits, the firewall rule of B5.
