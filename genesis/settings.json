@@ -11,6 +11,15 @@
     "init_message": "",
     "load_memory": true,
 
+    "genesis_events": {
+        "enabled": false,
+        "redis_url": "redis://REDIS_HOST:6379",
+        "stream": "genesis:events",
+        "stream_per_agent": false,
+        "stream_maxlen": 20000,
+        "buffer_size": 2000
+    },
+
     "allow_insecure_coding": false,
     "pathfinding_no_dig": true,
     "blocked_actions": [

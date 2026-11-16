@@ -1,7 +1,10 @@
 // Genesis: typed errors for model (LLM) failures, and the one place that logs them.
 // Model clients throw these instead of returning placeholder text such as
 // "No response data.", so a failure can never be mistaken for a model reply.
-// No dependencies, so it can be imported from upstream files and from tests.
+// Depends only on Node built-ins and other Genesis files, so it can be imported from
+// upstream files and from tests.
+
+import { emitEvent } from '../events/agent_emit.js';
 
 export class ModelError extends Error {
     constructor(message, details = {}) {
@@ -30,8 +33,9 @@ export function isModelError(err) {
 }
 
 // Writes exactly one JSON line describing a model failure and returns the record.
-// Stand-in until the event bus exists: this is the only thing that happens with a
-// model failure. It is not chatted, not added to history, not saved to memory.
+// With the genesis_events setting on, the same record also goes out as one agent.failure
+// event (kind "model"). Nothing else happens with a model failure: it is not chatted,
+// not added to history, not saved to memory.
 export function logModelFailure(err, context = {}) {
     const record = {
         ts: new Date().toISOString(),
@@ -49,5 +53,7 @@ export function logModelFailure(err, context = {}) {
         elapsed_ms: err?.elapsed_ms ?? null,
     };
     console.error(JSON.stringify(record));
+    const { ts, level, event, agent, ...details } = record; // the envelope carries time and agent
+    emitEvent('agent.failure', { kind: 'model', ...details }, { severity: 'error' });
     return record;
 }

@@ -1,4 +1,5 @@
 import assert from 'assert';
+import { skillStarted } from '../../genesis/events/agent_emit.js';
 
 export class ActionManager {
     constructor(agent) {
@@ -62,6 +63,7 @@ export class ActionManager {
 
     async _executeAction(actionLabel, actionFn, timeout = 10) {
         let TIMEOUT;
+        let skill_event; // emits skill.started / skill.result. does nothing unless the genesis_events setting is on
         try {
             if (this.last_action_time > 0) {
                 let time_diff = Date.now() - this.last_action_time;
@@ -98,6 +100,7 @@ export class ActionManager {
             this.timedout = false; // a timeout of an earlier action must not mark this one
             this.currentActionLabel = actionLabel;
             this.currentActionFn = actionFn;
+            skill_event = skillStarted(actionLabel, actionFn?.args);
 
             // timeout in minutes
             if (timeout > 0) {
@@ -125,7 +128,7 @@ export class ActionManager {
             }
 
             // return action status report
-            return actionResult(returned !== false, output, interrupted, timedout, true);
+            return skill_event.result(actionResult(returned !== false, output, interrupted, timedout, true));
         } catch (err) {
             this.executing = false;
             this.currentActionLabel = '';
@@ -148,7 +151,8 @@ export class ActionManager {
             if (!interrupted) {
                 this.agent.bot.emit('idle');
             }
-            return actionResult(false, message, interrupted, false, false);
+            const result = actionResult(false, message, interrupted, false, false);
+            return skill_event ? skill_event.result(result) : result;
         }
     }
 
