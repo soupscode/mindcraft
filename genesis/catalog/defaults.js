@@ -64,5 +64,7 @@ export const CATALOG_DEFAULTS = Object.freeze({
     ledger_fresh_ms: 5 * 60 * 1000, // a chest is not walked to just to be looked into again within this time
     free_slots_needed: 3,   // gather_blocks and harvest_replant
     max_options: 16,        // how many options one offer holds at most
-    per_skill: { travel: 5, gather_blocks: 3, craft_item: 3, store_items: 2, fetch_items: 2, harvest_replant: 1, build_blueprint: 1, smelt_item: 2 },
+    per_skill: { travel: 5, gather_blocks: 3, craft_item: 3, store_items: 2, fetch_items: 2, harvest_replant: 1, build_blueprint: 1, smelt_item: 2, give_items: 2 },
+    handoff_distance: 16,   // proposed: within this many blocks items are handed over directly, further away they go through the shared chest
+    handoff_chest: 'shared',
 });

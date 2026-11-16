@@ -116,6 +116,8 @@ export function describeTrigger(trigger) {
         case 'agent_request': return `${clip(detail.from ?? 'another agent', 20)} asks: "${clip(detail.text ?? '', PROMPT_LIMITS.operator_message)}"`;
         case 'operator_message': return `the operator${detail.from ? ` (${clip(detail.from, 20)})` : ''} says: "${clip(detail.text ?? '', PROMPT_LIMITS.operator_message)}"`;
         case 'model_returned': return 'the planner is back; you were working from your routine.';
+        case 'request_declined': return `${clip(detail.to ?? 'the other agent', 20)} declined your request${detail.item ? ` for ${detail.count ?? ''} ${clip(detail.item, 30)}`.replace('  ', ' ') : ''}.`;
+        case 'request_expired': return `${clip(detail.to ?? 'the other agent', 20)} did not answer your request${detail.item ? ` for ${detail.count ?? ''} ${clip(detail.item, 30)}`.replace('  ', ' ') : ''} in time.`;
         default: return 'it is time to choose what to do next.';
     }
 }

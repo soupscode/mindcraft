@@ -19,6 +19,8 @@ export const UPSTREAM_OPS = Object.freeze({
     tillAndSow:        { file: 'src/agent/library/skills.js', line: 1589, args: ['x', 'y', 'z', 'seedType'], timeout_min: 3, places_blocks: false },
     placeBlock:        { file: 'src/agent/library/skills.js', line: 613,  args: ['blockType', 'x', 'y', 'z'], timeout_min: 3, places_blocks: true },
     smeltItem:         { file: 'src/agent/library/skills.js', line: 143,  args: ['itemName', 'num'], timeout_min: 10, places_blocks: false },
+    // the direct hand-over of items to another agent (genesis/relay): walks up to the player and tosses the items
+    giveToPlayer:      { file: 'src/agent/library/skills.js', line: 1000, args: ['itemType', 'username', 'num'], timeout_min: 3, places_blocks: false },
 });
 
 export const OP_NAMES = Object.freeze(Object.keys(UPSTREAM_OPS));
@@ -66,6 +68,10 @@ const LOG_REASONS = [
     [/nothing to place on/, 'nothing_to_place_on', 'skills.js:751'],
     [/Failed to place/, 'place_failed', 'skills.js:788'],
     [/Skipping block at/, 'block_gone', 'skills.js:606'],
+    [/You cannot give items to yourself/, 'self_handoff', 'skills.js:1012'],
+    [/Could not find [A-Za-z0-9_]{3,16}\.$/m, 'recipient_not_near', 'skills.js:1017'],
+    [/it was never received|too close\./, 'not_received', 'skills.js:1042, 1067'],
+    [/You do not have any \S+ to discard/, 'not_held', 'skills.js:861'],
     [/Unable to reach|Pathfinding stopped|Missing coordinates/, 'not_reached', 'skills.js:1208, 1222, 1241, 1245'],
     [/!!Code threw exception!!/, 'skill_error', 'src/agent/action_manager.js'],
 ];

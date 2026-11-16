@@ -20,7 +20,7 @@
 //
 // Depends only on other files of genesis/catalog.
 
-import { TEMPLATES } from './templates.js';
+import { TEMPLATES, HANDOFF_TEMPLATES } from './templates.js';
 import { OP_NAMES, COMMON_FAILURES } from './ops.js';
 import {
     CATALOG_DEFAULTS, GATHER_TYPES, CROPS, CRAFT_ITEMS, NATURAL_BLOCKS, NATURAL_SUFFIXES, KEEP_ITEMS, KEEP_SUFFIXES,
@@ -51,7 +51,8 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, 
             try { contested_hook({ ...claim }); } catch { /* the listener's problem */ }
         },
     };
-    const by_name = new Map(TEMPLATES.map((template) => [template.name, template]));
+    const offered_templates = [...TEMPLATES, ...HANDOFF_TEMPLATES]; // the eight, and the hand-over that only a commitment brings up
+    const by_name = new Map(offered_templates.map((template) => [template.name, template]));
 
     const full = (state) => ({ avoid: [], now: null, ...state, zones, blueprints });
 
@@ -86,7 +87,7 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, 
     }
 
     function collect(state, options) {
-        for (const template of TEMPLATES) {
+        for (const template of offered_templates) {
             let taken = 0;
             let candidates;
             try { candidates = template.candidates(state, ctx); } catch { candidates = []; }
@@ -126,6 +127,8 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, 
             }
             return options;
         },
+        // true for what an agent keeps for itself (tools, armour, torches, food): never given away
+        keeps: (item) => ctx.keep(item),
         // Who is told about contested claims (one listener; null for none).
         setContestedHook(fn) { contested_hook = typeof fn === 'function' ? fn : null; },
         // A goal ended, however it ended: the template gives back what it held (a reservation). Never throws.

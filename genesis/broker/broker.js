@@ -10,6 +10,10 @@
 //   - when the desktop leaves, the call in flight is cancelled and its request goes back
 //     into the queue; nothing is sent until the gate is AVAILABLE again
 //   - every call is recorded
+//   - small(): one small call of another kind than planning (the spoken line of an agent
+//     message, genesis/relay). It has its own budget per agent and its own token limit, and it
+//     never waits and never delays a message: with the gate shut, a call in flight or its
+//     budget spent it answers at once with the reason, and the caller uses its template
 //
 // Everything outside is injected:
 //   model         { name, chat({ messages, format, signal, timeout_ms }) -> Promise<{ content, prompt_tokens, completion_tokens, model }>,
@@ -39,6 +43,15 @@ export const BROKER_DEFAULTS = Object.freeze({
     probe_interval_ms: 15 * 1000,
 });
 
+// The small calls (chat lines). Proposed starting values.
+export const SMALL_CALL_DEFAULTS = Object.freeze({
+    max_calls: 30,                  // lines the model writes per agent per real hour; after that the template is used
+    window_ms: 60 * 60 * 1000,
+    min_gap_ms: 0,                  // no pause between an agent's lines
+    timeout_ms: 15 * 1000,          // a line that takes longer is given up
+    max_tokens: 60,                 // the reply's own token limit
+});
+
 const ABORTED = Symbol('aborted');
 
 function whenAborted(signal) {
@@ -50,7 +63,7 @@ function whenAborted(signal) {
 
 export function createPlannerBroker({
     model, clock, calls, buildContext, deliver = () => {}, emit = () => {}, signals = null, ids = null,
-    gate: gate_options = {}, budget: budget_options = {}, ...options
+    gate: gate_options = {}, budget: budget_options = {}, small: small_options = {}, ...options
 } = {}) {
     const config = { ...BROKER_DEFAULTS };
     for (const key of Object.keys(BROKER_DEFAULTS)) {
@@ -59,13 +72,17 @@ export function createPlannerBroker({
     const nextId = ids ?? createUlidFactory({ now: clock.now });
     const queue = createRequestQueue();
     const budget = createBudget(budget_options);
+    const small_config = { ...SMALL_CALL_DEFAULTS, ...small_options };
+    const small_budget = createBudget({ max_calls: small_config.max_calls, window_ms: small_config.window_ms, min_gap_ms: small_config.min_gap_ms });
     const gate = createModelGate({ probe: () => model.probe(), clock, emit, ...gate_options });
     const stats = {
         submitted: 0, replaced: 0, calls: 0, valid: 0, invalid: 0, refused: 0, cancelled: 0, requeued: 0,
         timeouts: 0, errors: 0, record_failures: 0,
+        small_calls: 0, small_valid: 0, small_invalid: 0, small_refused: 0, small_busy: 0, small_failed: 0,
     };
 
     let in_flight = null;   // { request, controller, cancelled, done } of the one call being made
+    let small_in_flight = null; // { controller, cancelled, done } of the one small call being made (never at the same time as a planning call)
     let wake_timer = null;  // set while every waiting request is inside its 90 seconds
     let probe_timer = null;
     let running = false;
@@ -107,7 +124,7 @@ export function createPlannerBroker({
 
     // Starts the next call if one may start now.
     function pump() {
-        if (!running || in_flight || !gate.isAvailable()) return;
+        if (!running || in_flight || small_in_flight || !gate.isAvailable()) return;
         clearWake();
         const now = clock.now();
         let wake_at = null;
@@ -265,12 +282,85 @@ export function createPlannerBroker({
     // flight and wait until its request is back in the queue.
     gate.onLeave(async (reason) => {
         clearWake();
+        const line = small_in_flight;
+        if (line) {
+            line.cancelled = reason;
+            line.controller.abort();
+            await line.done;
+        }
         const job = in_flight;
         if (!job) return;
         job.cancelled = reason;
         job.controller?.abort();
         await job.done;
     });
+
+    // One small call. Resolves (never rejects) to
+    //   { ok: true, content, call_id }                    the model's raw reply, which `validate` accepted
+    //   { ok: false, reason, call_id? }                   reason: model_away | model_busy | budget_exhausted |
+    //                                                     invalid_reply | timeout | model_error | cancelled
+    //   agent      whose budget the call counts against
+    //   trigger    what the call record says the call was for, e.g. { kind: 'chat_line', detail: { msg_id } }
+    //   validate   (raw text) -> true when the reply may be used
+    function small({ agent, trigger = { kind: 'small' }, messages, format, validate = () => true, max_tokens = small_config.max_tokens, timeout_ms = small_config.timeout_ms } = {}) {
+        if (typeof agent !== 'string' || agent.length === 0 || !Array.isArray(messages)) return Promise.resolve({ ok: false, reason: 'bad_request' });
+        if (!gate.isAvailable()) return Promise.resolve({ ok: false, reason: 'model_away' });
+        if (in_flight || small_in_flight) { stats.small_busy++; return Promise.resolve({ ok: false, reason: 'model_busy' }); }
+        const started = clock.now();
+        const verdict = small_budget.check(agent, started);
+        if (!verdict.ok) { stats.small_refused++; return Promise.resolve({ ok: false, reason: 'budget_exhausted', retry_at: iso(verdict.retry_at) }); }
+        const spent = small_budget.spend(agent, started);
+        const call_id = nextId();
+        const job = { controller: new AbortController(), cancelled: null, done: null };
+        small_in_flight = job;
+        stats.small_calls++;
+        let timed_out = false;
+        const timer = clock.setTimeout(() => { timed_out = true; job.controller.abort(); }, timeout_ms);
+        const base = {
+            call_id, request_id: null, agent, trigger, context: messages.map((message) => String(message.content ?? '')).join('\n'),
+            options_offered: [], attempt: 1, queue_wait_ms: 0, model: model.name ?? null, started_at: iso(started),
+        };
+        job.done = (async () => {
+            let response;
+            try {
+                response = await Promise.race([
+                    Promise.resolve().then(() => model.chat({ messages, format, signal: job.controller.signal, timeout_ms, max_tokens })),
+                    whenAborted(job.controller.signal),
+                ]);
+            } catch (err) {
+                const latency_ms = clock.now() - started;
+                if (job.cancelled) {
+                    small_budget.refund(spent); // the desktop left: this call does not count
+                    save({ ...base, latency_ms, outcome: 'cancelled', errors: [`cancelled: ${job.cancelled}`] });
+                    return { ok: false, reason: 'cancelled', call_id };
+                }
+                stats.small_failed++;
+                small_budget.finish(spent, clock.now());
+                const errors = [timed_out ? `no reply within ${timeout_ms} ms` : (err === ABORTED ? 'aborted' : `${err?.name ?? 'Error'}: ${err?.message ?? err}`)];
+                save({ ...base, latency_ms, outcome: timed_out ? 'timeout' : 'error', errors });
+                return { ok: false, reason: timed_out ? 'timeout' : 'model_error', call_id };
+            } finally {
+                clock.clearTimeout(timer);
+            }
+            const ended = clock.now();
+            small_budget.finish(spent, ended);
+            const raw = typeof response?.content === 'string' ? response.content : null;
+            let valid = false;
+            try { valid = raw !== null && validate(raw) === true; } catch { valid = false; }
+            save({
+                ...base, latency_ms: ended - started, raw_output: raw, valid, outcome: valid ? 'ok' : 'invalid',
+                errors: valid ? [] : ['the reply was not used'], prompt_tokens: response?.prompt_tokens, completion_tokens: response?.completion_tokens,
+                model: response?.model ?? model.name ?? null,
+            });
+            if (valid) { stats.small_valid++; return { ok: true, content: raw, call_id }; }
+            stats.small_invalid++;
+            return { ok: false, reason: 'invalid_reply', call_id, content: raw };
+        })().finally(() => {
+            if (small_in_flight === job) small_in_flight = null;
+            pump();
+        });
+        return job.done;
+    }
     gate.onAvailable(() => pump());
 
     function scheduleProbe() {
@@ -315,6 +405,8 @@ export function createPlannerBroker({
             return { ok: true, request, replaced };
         },
         signal,
+        small,
+        smallBudget: small_budget,
         // Starts the health probes. probe_first: the broker does not know whether the desktop
         // is there when it starts, so by default it asks once, as if desktop_available had come.
         start({ probe_first = true } = {}) {

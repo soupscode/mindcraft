@@ -90,6 +90,12 @@ export function createBotView(bot, { world, mc, pf, Vec3, now = Date.now, ...opt
             if (!tools) return true;
             return bot.inventory.items().some((item) => tools[item.type]);
         },
+        // Where another agent stands, or null when it is not in sight (mineflayer only knows the
+        // entity of a player that is within the server's view distance of the bot).
+        agentPosition(name) {
+            const at = bot.players?.[name]?.entity?.position;
+            return at ? { x: at.x, y: at.y, z: at.z } : null;
+        },
         fuel() {
             const fuel = mc.getSmeltingFuel(bot);
             if (!fuel) return null;

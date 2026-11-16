@@ -13,6 +13,7 @@ import { createScaffoldTracker } from '../../executor/scaffold.js';
 import { createAgentRuntime } from '../../agent/runtime.js';
 import { createLedgerClient } from '../../catalog/ledger_client.js';
 import { createPlanningHost, createHostGoalStorage, socketGoalStorage } from '../../planning/host.js';
+import { startRelay } from '../../relay/server.js';
 
 // Two ends of one connection: what one end emits, the other end's handlers get (ack
 // callbacks included, as with socket.io).
@@ -45,8 +46,26 @@ export function socketPair() {
 export function stubModel(clock) {
     const model = {
         name: 'stub-model', requests: [], replies: [], probes: 0, probe_ok: true, delay_ms: 0,
+        // the small calls for a spoken line (genesis/relay): kept apart from the planning requests.
+        // `lines` queues answers: a line, a function (request, template) -> line, or an Error.
+        // By default the model says the plain version with a word of its own in front.
+        line_requests: [], lines: [], line_delay_ms: 0,
         async probe() { model.probes++; return model.probe_ok; },
         chat(request) {
+            if (request.format?.properties?.line) {
+                model.line_requests.push(request);
+                const template = /Plain version: (.*)$/m.exec(request.messages.at(-1).content)?.[1] ?? '';
+                let next = model.lines.length > 0 ? model.lines.shift() : `Well, ${template}`;
+                if (typeof next === 'function') next = next(request, template);
+                const answer = () => {
+                    if (next instanceof Error) throw next;
+                    return { content: JSON.stringify({ line: next }), prompt_tokens: 120, completion_tokens: 20, model: 'stub-model:latest' };
+                };
+                if (model.line_delay_ms <= 0) return Promise.resolve().then(answer);
+                return new Promise((resolve, reject) => {
+                    clock.setTimeout(() => { try { resolve(answer()); } catch (err) { reject(err); } }, model.line_delay_ms);
+                });
+            }
             model.requests.push(request);
             const offered = request.format.properties.goals.items.properties.option_id.enum;
             let next = model.replies.length > 0 ? model.replies.shift() : null;
@@ -68,7 +87,10 @@ export function stubModel(clock) {
 
 export const BLUEPRINTS = { get: (name) => (name === 'hut' ? HUT : null) };
 
-export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, world = null, inventories = {}, positions = {}, host: host_options = {}, runtime: runtime_options = {} } = {}) {
+// recovery: true gives every agent the watchdog and its ladder (the fake world's recovery moves).
+// relay: true (or the relay's settings) adds the message relay to the host, as the launcher does, and
+//   gives every agent its message desk; what an agent is told to say is kept in a.said.
+export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, world = null, inventories = {}, positions = {}, host: host_options = {}, runtime: runtime_options = {}, recovery = false, relay = false } = {}) {
     const town = { clock, calls: [], broker_events: [], agents: {} };
     town.world = world ?? campWorld(clock);
     town.zones = createZones(config);
@@ -81,6 +103,14 @@ export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, wo
     });
     town.broker = town.host.broker;
     town.files = fakeFiles();
+    town.messages = []; // every agent.message event of the relay
+    if (relay) {
+        town.relay_service = startRelay(relay === true ? {} : relay, {
+            agents, clock, emit: (type, data, opts) => { if (type === 'agent.message') town.messages.push({ type, data, ...opts }); },
+        });
+        town.relay = town.relay_service.relay;
+        town.relay_service.bind({ broker: town.broker, ledger: town.host.ledger, ledgerUpdated: () => town.host.ledgerUpdated() });
+    }
 
     // Starts (or restarts) the process of one agent.
     town.join = async (agent, { last_seq = 0 } = {}) => {
@@ -90,8 +120,16 @@ export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, wo
         }
         const { client, server } = socketPair();
         town.host.attach(server, { isAgentSocket: () => true });
-        const a = { agent, socket: client, events: [] };
-        a.emitter = createEmitter({ agent, send: (event) => a.events.push(event), last_seq, now: clock.now, warn: () => {}, progress_interval_ms: 0 });
+        town.relay_service?.attach(server, { isAgentSocket: (name) => name === agent });
+        const a = { agent, socket: client, server_socket: server, events: [], dead: false, said: [] };
+        a.emitter = createEmitter({ agent, send: (event) => { if (!a.dead) a.events.push(event); }, last_seq, now: clock.now, warn: () => {}, progress_interval_ms: 0 });
+        // the files as this process sees them: a process that was killed writes nothing any more
+        const files = {
+            write: async (...args) => (a.dead ? undefined : town.files.write(...args)),
+            rename: async (...args) => (a.dead ? undefined : town.files.rename(...args)),
+            read: async (...args) => (a.dead ? null : town.files.read(...args)),
+            remove: async (...args) => (a.dead ? undefined : town.files.remove(...args)),
+        };
         a.scaffold = createScaffoldTracker({ zones: town.zones });
         a.ops = town.world.ops(agent, { on_place: (pos, how) => { if (how !== 'skill') a.scaffold.placed(pos); } });
         // the agent's copy of the one chest ledger the host holds
@@ -102,7 +140,9 @@ export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, wo
             agent, zones: town.zones, catalog: createCatalog({ zones: town.zones, blueprints: BLUEPRINTS }),
             view: town.world.view(agent), ops: a.ops, scaffold: a.scaffold,
             goal_storage: socketGoalStorage({ socket: client, clock }),
-            checkpoints: createCheckpointStore({ files: town.files, dir: '/checkpoints', clock }),
+            checkpoints: createCheckpointStore({ files, dir: '/checkpoints', clock }),
+            ...(recovery ? { recovery_ops: town.world.recovery(agent) } : {}),
+            ...(relay ? { messaging: true } : {}),
             send: (event, ...args) => client.emit(event, ...args),
             emit: a.emitter.emit, getSeq: () => a.emitter.stats().seq, clock,
             ledger: a.ledger, onContestedClaim: (claim) => a.claims.push(claim),
@@ -112,6 +152,10 @@ export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, wo
         client.on('genesis-plan-queued', (message) => a.runtime.onPlanQueued(message));
         client.on('genesis-plan-result', (result) => { a.results.push(result); a.pending_results.push(a.runtime.onPlanResult(result)); });
         client.on('genesis-gate', (message) => a.runtime.onGate(message));
+        a.message_work = [];
+        client.on('genesis-msg', (message) => { a.message_work.push(a.runtime.onMessage(message)); });
+        client.on('genesis-msg-state', (update) => { a.message_work.push(a.runtime.onMessageState(update)); });
+        client.on('genesis-msg-speak', (said) => { a.said.push(said.line); });
         a.results = [];
         a.pending_results = [];
         a.eventsOf = (type) => a.events.filter((event) => event.type === type);
@@ -119,6 +163,19 @@ export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, wo
         a.changes = () => a.eventsOf('goal.changed').map((event) => event.data);
         a.started = await a.runtime.start();
         town.agents[agent] = a;
+        return a;
+    };
+    // The process of one agent ends at once (a crash, a kick, a restart): nothing of it writes,
+    // emits or sends any more, and the MindServer sees its connection close.
+    town.kill = (agent) => {
+        const a = town.agents[agent];
+        if (!a || a.dead) return a ?? null;
+        a.dead = true;
+        a.runtime.stop();
+        a.socket.connected = false;
+        a.server_socket.connected = false;
+        a.server_socket.fire('disconnect');
+        town.world.interrupt(agent);
         return a;
     };
     town.start = async ({ available = true } = {}) => {

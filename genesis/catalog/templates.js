@@ -14,7 +14,8 @@
 //                                       null (go on) | { skip: reason } | { fail: reason } |
 //                                       { permit: { dig: true } }   the step may tunnel (never in a zone)
 //                                       { intend: [pos] }           cells the step places on purpose
-//   after(step, result, args, state, ctx, baseline)   bookkeeping after a step; may return { fail: reason }
+//   after(step, result, args, state, ctx, baseline)   bookkeeping after a step; may return { fail: reason },
+//                                       or { ok: true } when the step did what it was for whatever the skill answered
 //   progress(args, state, ctx, baseline, plan) -> { done, total }
 //   release(args, state)                (optional) the goal ended, however it ended: give back what it held
 //                                       (fetch_items frees its reservation in the chest ledger)
@@ -646,6 +647,70 @@ const smelt_item = {
     progress: (args, state, ctx, baseline) => ({ done: Math.max(0, baseline.had - held(state, args.item)), total: args.count }),
 };
 
+// ---- give_items (the hand-over of an agent-to-agent commitment; not one of the eight) -------
+
+// Items go from one agent to another in two ways (decided: both): handed over directly when
+// the two are near each other, and through the shared chest otherwise. The option only
+// exists while there is something to give for: a request of another agent that waits for
+// this agent's answer (state.asks: choosing the option IS the accept), or a commitment this
+// agent has accepted (state.duties). Both lists hold { to, item, count }; the agent runtime
+// fills them (genesis/relay/desk.js), and without them nothing is ever offered.
+const sameGive = (args) => (entry) => entry.to === args.to && entry.item === args.item && entry.count === args.count;
+const nearEnough = (args, state, ctx) => {
+    const there = state.view.agentPosition?.(args.to) ?? null;
+    return there !== null && dist(state.view.position(), there) <= ctx.config.handoff_distance;
+};
+
+const give_items = {
+    name: 'give_items',
+    progress_unit: 'items handed over',
+    failures: ['no_commitment', 'not_held', 'unknown_chest', 'chest_unreachable', 'out_of_range', 'avoid_area', 'wrong_chest', 'no_chest', 'recipient_not_near', 'not_received'],
+    id: (args) => `give_items:${args.to}:${args.item}:${args.count}`,
+    parse(parts) {
+        const count = whole(parts[2] ?? '');
+        return parts.length === 3 && /^[A-Za-z0-9_]{3,16}$/.test(parts[0]) && ITEM.test(parts[1]) && count >= 1 && count <= 64
+            ? { to: parts[0], item: parts[1], count } : null;
+    },
+    candidates: (state) => [...(state.duties ?? []), ...(state.asks ?? [])].map(({ to, item, count }) => ({ to, item, count })),
+    check(args, state, ctx) {
+        if (args.to === state.agent) return 'no_commitment';
+        if (![...(state.duties ?? []), ...(state.asks ?? [])].some(sameGive(args))) return 'no_commitment';
+        if (held(state, args.item) < args.count) return 'not_held';
+        if (nearEnough(args, state, ctx)) return null;
+        return chestRefusal(state, ctx.config.handoff_chest, ctx);
+    },
+    title: (args) => clip(`Give ${args.count} ${args.item} to ${args.to}`),
+    describe: (args, state, ctx) => `Give ${args.count} ${args.item} to ${args.to}, who asked for them (${nearEnough(args, state, ctx) ? 'handed over directly' : `through the ${ctx.config.handoff_chest} chest`})`,
+    steps(args, state, ctx) {
+        if (nearEnough(args, state, ctx)) return [{ command: 'giveToPlayer', args: [args.item, args.to, args.count] }];
+        return [walkTo(state.zones.chest(ctx.config.handoff_chest), ctx), { command: 'putInChest', args: [args.item, args.count] }];
+    },
+    baseline: (args, state) => ({ had: held(state, args.item) }),
+    before(step, args, state, ctx) {
+        if (held(state, args.item) <= 0) return { fail: 'not_held' };
+        if (step.command === 'putInChest') return chestGuard(state, ctx.config.handoff_chest, ctx);
+        return null;
+    },
+    after(step, result, args, state, ctx, baseline) {
+        const gone = Math.max(0, baseline.had - held(state, args.item));
+        if (step.command === 'putInChest') {
+            if (gone > 0) state.ledger.add(ctx.config.handoff_chest, args.item, gone);
+            if (gone >= args.count) state.handedOver?.(args, { via: 'chest', chest: ctx.config.handoff_chest });
+            return null;
+        }
+        if (step.command === 'giveToPlayer' && gone >= args.count) {
+            // the items left the inventory towards the other agent: upstream only waits 3 seconds to
+            // see them picked up (skills.js lines 1047-1067), which is not what decides here
+            state.handedOver?.(args, { via: 'direct' });
+            return { ok: true };
+        }
+        return null;
+    },
+    progress: (args, state, ctx, baseline) => ({ done: Math.min(args.count, Math.max(0, baseline.had - held(state, args.item))), total: args.count }),
+};
+
 export const TEMPLATES = Object.freeze([travel, gather_blocks, craft_item, store_items, fetch_items, harvest_replant, build_blueprint, smelt_item]);
+// Templates beside the eight of the first catalog. They are only ever offered for a commitment.
+export const HANDOFF_TEMPLATES = Object.freeze([give_items]);
 export const TEMPLATE_NAMES = Object.freeze(TEMPLATES.map((template) => template.name));
 export { COMMON_FAILURES };

@@ -22,6 +22,16 @@ const KITS = 'kits';
 
 export const KIT_FOOD = Object.freeze({ item: 'bread', keep: 2, take: 4 });
 
+// The tools each role carries. Read by the Kit check phase below and by the re-equip after a
+// death (genesis/recovery/death.js): `suffix` is what the tool's name ends with, `craft` what
+// the routine makes when the kit chest has none.
+export const ROLE_KITS = Object.freeze({
+    Arthur: Object.freeze([{ suffix: '_axe', craft: ['stone_axe', 'wooden_axe'] }, { suffix: '_pickaxe', craft: ['stone_pickaxe', 'wooden_pickaxe'] }]),
+    Mira: Object.freeze([{ suffix: '_hoe', craft: ['stone_hoe', 'wooden_hoe'] }]),
+    Felix: Object.freeze([{ suffix: '_sword', craft: ['stone_sword', 'wooden_sword'] }]),
+    Nova: Object.freeze([]),
+});
+
 // The kit chest is read once per round, then a missing tool is fetched from it, or made,
 // and some food is taken along (upstream's auto-eat eats it, src/agent/agent.js lines 191-195).
 function kitCheck(tools) {
@@ -98,7 +108,7 @@ export const ROUTINES = Object.freeze({
         food: KIT_FOOD.item,
         range: 48,
         phases: [
-            kitCheck([{ suffix: '_axe', craft: ['stone_axe', 'wooden_axe'] }, { suffix: '_pickaxe', craft: ['stone_pickaxe', 'wooden_pickaxe'] }]),
+            kitCheck(ROLE_KITS.Arthur),
             gather('Gather', ['oak_log', 'birch_log', 'spruce_log', 'stone'], 2),
             {
                 name: 'Craft',
@@ -123,7 +133,7 @@ export const ROUTINES = Object.freeze({
         food: KIT_FOOD.item,
         range: 32,
         phases: [
-            kitCheck([{ suffix: '_hoe', craft: ['stone_hoe', 'wooden_hoe'] }]),
+            kitCheck(ROLE_KITS.Mira),
             {
                 name: 'Harvest',
                 max_goals: 4,
@@ -153,7 +163,7 @@ export const ROUTINES = Object.freeze({
         food: KIT_FOOD.item,
         range: 128,
         phases: [
-            kitCheck([{ suffix: '_sword', craft: ['stone_sword', 'wooden_sword'] }]),
+            kitCheck(ROLE_KITS.Felix),
             {
                 name: 'Patrol',
                 max_goals: 3,

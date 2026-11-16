@@ -13,6 +13,8 @@
 //       { kind: 'add' | 'remove', chest, item, n, at }      { kind: 'zero', chest, item, at }
 //   reserve(agent, { chest, item, count }) -> as genesis/catalog/ledger.js reserve()
 //   release(agent, { chest, item })   releaseAll(agent)
+//   transfer(holder, asker, { chest, item, count }) -> { ok: true, moved } | { ok: false, code }
+//                                                    the holder agreed to hand over what it reserved (genesis/relay)
 //   view(chest) -> { items, seen_at, seen_by }     reservations() -> [...]
 //   snapshot() -> { v, chests: { name: view }, reservations }      what a copy is filled from
 //   save() / restore(saved)                          what the ledger file holds (no reservations:
@@ -130,6 +132,22 @@ export function createSharedLedger({ clock = { now: Date.now }, onChange = () =>
             const before = reserved.length;
             reserved = reserved.filter((held) => held.holder !== agent);
             return reserved.length < before;
+        },
+        // The holder gives up to `count` of what it reserved to the asker: the reservation moves.
+        // Nothing moves when the holder has no reservation of that item in that chest (any more).
+        transfer(holder, asker, { chest, item, count } = {}) {
+            if (!NAME.test(String(chest ?? '')) || !ITEM.test(String(item ?? '')) || !(Number(count) > 0) || holder === asker) { stats.refused_ops++; return { ok: false, code: 'bad_request' }; }
+            const mine = live().find((held) => held.chest === chest && held.item === item && held.holder === holder);
+            if (!mine) return { ok: false, code: 'no_reservation' };
+            const now = clock.now();
+            const moved = Math.min(mine.count, Math.max(1, Math.floor(count)));
+            mine.count -= moved;
+            if (mine.count <= 0) reserved = reserved.filter((held) => held !== mine);
+            const theirs = reserved.find((held) => held.chest === chest && held.item === item && held.holder === asker);
+            if (theirs) { theirs.count += moved; theirs.expires_at = now + config.reservation_ms; }
+            else reserved.push({ chest, item, count: moved, holder: asker, at: now, expires_at: now + config.reservation_ms });
+            stats.transfers = (stats.transfers ?? 0) + 1;
+            return { ok: true, moved };
         },
         view(chest) {
             const slot = chests.get(chest);

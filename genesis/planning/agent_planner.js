@@ -14,7 +14,8 @@
 //   broker -> agent   genesis-gate          { state, reason }                            onGate
 //
 // Triggers: goal_complete, step_failed, reflex_interrupt, agent_request, operator_message,
-// and model_returned (the routine yields and the agent goes back to planning).
+// model_returned (the routine yields and the agent goes back to planning), and
+// request_declined / request_expired (what the agent asked of another agent came to nothing).
 // One request is pending per agent; a newer trigger replaces it (the broker keeps the place
 // in the line). Nothing here waits for the model: when no reply comes, the agent works on.
 //
@@ -45,7 +46,8 @@ export const PLANNER_CLIENT_DEFAULTS = Object.freeze({
 
 const GATE_AVAILABLE = 'AVAILABLE';
 // triggers that always replace the pending request (they carry something the planner must see)
-const URGENT = new Set(['operator_message', 'agent_request', 'step_failed', 'reflex_interrupt']);
+const URGENT = new Set(['operator_message', 'agent_request', 'step_failed', 'reflex_interrupt',
+    'request_declined', 'request_expired']); // the agent's own request to another agent came to nothing (genesis/relay/desk.js)
 
 export function createAgentPlanner({
     agent, send, clock, catalog, state, goals, describe = () => ({}), onGoals = () => {}, onGate = () => {},

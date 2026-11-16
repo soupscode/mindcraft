@@ -34,6 +34,15 @@
         "postgres_url": ""
     },
 
+    "genesis_recovery": {
+        "enabled": true
+    },
+
+    "genesis_relay": {
+        "enabled": true,
+        "model_lines": true
+    },
+
     "allow_insecure_coding": false,
     "pathfinding_no_dig": true,
     "blocked_actions": [

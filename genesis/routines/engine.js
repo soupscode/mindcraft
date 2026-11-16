@@ -19,6 +19,8 @@
 // Injected: catalog, zones, emit(type, data, opts), clock, the definition (genesis/routines/routines.js).
 // Depends only on other Genesis files.
 
+import { incidentData } from '../recovery/incidents.js';
+
 export const ROUTINE_RULES = Object.freeze({
     min_health: 10,
     min_food: 8,
@@ -203,11 +205,17 @@ export function createRoutine({ agent, definition, catalog, zones, clock, emit =
                     parked = true;
                     stats.incidents++;
                     // one incident, for the operator: the agent stays at home until the model is back
+                    // (it also carries the incident shape of genesis/recovery/incidents.js, so the Incidents view lists it)
                     emit('agent.failure', {
+                        ...incidentData({
+                            incident_id: `${agent}-deaths-${clock.now()}`, source: { type: 'agent', name: agent }, kind: 'incident', phase: 'escalated',
+                            is_failure: true, recovery: { step: 'park_home', attempt: deaths, max: rules.max_deaths, result: 'ok' },
+                            outcome: 'needs_operator', needs_operator: true,
+                        }),
                         kind: 'incident', error: 'parked_after_second_death',
                         message: `${agent} died ${deaths} times while the model was away and is parked at home until it returns.`,
                         deaths, death_point: point ? [Math.round(point.x), Math.round(point.y), Math.round(point.z)] : null,
-                        routine: definition.name, phase,
+                        routine: definition.name, routine_phase: phase, // `phase` is the incident's own: "escalated"
                     }, { severity: 'error', corr: null });
                 }
                 return 'parked';

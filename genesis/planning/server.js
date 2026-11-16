@@ -30,8 +30,15 @@ export function memoryCallStore(max = 500) {
 
 // planning: the genesis_planning setting
 // event_sink: where events go when the genesis_events setting is on (the hub's accept), or null
+// extensions: more services of the MindServer process that add their handlers to every
+//   connection, [(socket, helpers) -> void] (genesis/recovery/server.js, genesis/relay/server.js);
+//   upstream has one place for such a function, so they are joined here
+// onGate, host: handed to the planning host (genesis/planning/host.js)
 // Injectable for the tests: setSocketExtension, createModel, createPool, clock, files.
-export async function startPlanning(planning, { event_sink = null, setSocketExtension, createModel = createOllamaPlanner, createPool, clock, files = null, warn = console.warn } = {}) {
+export async function startPlanning(planning, {
+    event_sink = null, setSocketExtension, createModel = createOllamaPlanner, createPool, clock, files = null, warn = console.warn,
+    extensions = [], onGate = null, host: host_options = {},
+} = {}) {
     if (!setSocketExtension) ({ setSocketExtension } = await import('../../src/mindcraft/mindserver.js'));
     const log = (event, message) => warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event, message }));
 
@@ -62,9 +69,16 @@ export async function startPlanning(planning, { event_sink = null, setSocketExte
         goal_storage: createHostGoalStorage({ durable, warn: (message) => log('genesis_goal_storage', message) }),
         ledger,
         emit: emitter ? emitter.emit : () => {},
+        onGate,
         ...(clock ? { clock } : {}),
+        ...host_options,
     });
-    setSocketExtension((socket, helpers) => host.attach(socket, helpers));
+    setSocketExtension((socket, helpers) => {
+        host.attach(socket, helpers);
+        for (const extend of extensions) {
+            try { extend(socket, helpers); } catch (err) { log('genesis_socket_extension', String(err?.message ?? err)); }
+        }
+    });
     // the broker does not know whether the desktop is there: it asks once now, and keeps asking
     host.start().catch(() => {});
     host.ledger_file = ledger_file;

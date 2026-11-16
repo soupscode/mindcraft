@@ -57,6 +57,11 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
         hang: null,               // (call) -> true: the skill never returns (a process that is about to be killed)
         fail: null,               // (call) -> { output } to make a skill fail, { interrupted: true } to interrupt it
         scaffold: null,           // (call) -> [{ x, y, z, name, sticky? }] blocks the walk puts down
+        stall: null,              // (call) -> true: the skill gets nowhere; it ends when it is interrupted, or times out after stall_ms
+        stall_ms: 5 * 60 * 1000,
+        boxed: () => false,       // (agent) -> true: the agent is shut in; the recovery moves below get nowhere either
+        recoveries: [],           // every recovery move: { agent, name, at, ok?, ... }
+        on_restart: null,         // (agent, reason) -> void: the watchdog asked for a restart of the process
         ticks: () => start_tick + Math.floor((clock.now() - t0) / TICK_MS),
         set(x, y, z, name, more = {}) {
             if (name === 'air') { blocks.delete(key(x, y, z)); return null; }
@@ -86,8 +91,41 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
             body.food = 20;
             return at;
         },
-        view, ops,
+        // Stops whatever skill the agent is running (what upstream's action manager does when another action starts).
+        interrupt(name) {
+            const body = bodies.get(name);
+            body.interrupts = (body.interrupts ?? 0) + 1;
+            body.wake?.();
+        },
+        view, ops, recovery,
     };
+
+    // What the watchdog's ladder moves an agent with (genesis/adapters/bot_recovery.js for a real bot).
+    function recovery(agent) {
+        const body = bodies.get(agent);
+        const note = (name, more = {}) => { world.recoveries.push({ agent, name, at: clock.now(), ...more }); };
+        return {
+            async interrupt() { note('interrupt'); world.interrupt(agent); return true; },
+            async moveAway(blocks) {
+                world.interrupt(agent);
+                const ok = !world.boxed(agent);
+                if (ok) body.position = { ...body.position, x: body.position.x + blocks };
+                note('moveAway', { blocks, ok });
+                return ok;
+            },
+            async surfaceOrHome(home) {
+                world.interrupt(agent);
+                const ok = !world.boxed(agent) && Boolean(home);
+                if (ok) body.position = { ...home };
+                note('surfaceOrHome', { ok });
+                return ok;
+            },
+            async restartProcess(reason) {
+                note('restartProcess', { reason });
+                world.on_restart?.(agent, reason);
+            },
+        };
+    }
 
     function refresh() {
         const now = clock.now();
@@ -159,6 +197,11 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
                 return { craftable, needs_table: recipe.table };
             },
             canHarvest: (name) => !NEEDS_PICKAXE.includes(name) || Object.keys(body.inventory).some((item) => item.endsWith('_pickaxe')),
+            // another agent is "in sight" within 48 blocks (a server's view distance, more or less)
+            agentPosition(name) {
+                const other = bodies.get(name);
+                return other && name !== agent && dist(other.position, body.position) <= 48 ? { ...other.position } : null;
+            },
             fuel: () => fuelOf(body),
             isSmeltable: (item) => Object.hasOwn(SMELTS, item),
         };
@@ -170,7 +213,11 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
         const body = bodies.get(agent);
         const out = [];
         const log = (line) => out.push(line);
-        const wait = (ms) => (ms > 0 ? new Promise((resolve) => clock.setTimeout(resolve, ms)) : Promise.resolve());
+        // a wait that world.interrupt() ends early
+        const wait = (ms) => (ms > 0 ? new Promise((resolve) => {
+            const timer = clock.setTimeout(() => { body.wake = null; resolve(); }, ms);
+            body.wake = () => { clock.clearTimeout(timer); body.wake = null; resolve(); };
+        }) : Promise.resolve());
 
         function put(x, y, z, name, how) {
             world.set(x, y, z, name);
@@ -328,6 +375,20 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
                 log(`Placed ${type} at (${x}, ${y}, ${z}).`);
                 return true;
             },
+            giveToPlayer(call, item, username, num = 1) {
+                if (username === agent) { log('You cannot give items to yourself.'); return false; }
+                const other = bodies.get(username);
+                if (!other || dist(other.position, body.position) > 48) { log(`Could not find ${username}.`); return false; }
+                if (!walk(other.position, 3, call)) return false;
+                if (!(body.inventory[item] > 0)) { log(`You do not have any ${item} to discard.`); return false; }
+                const count = Math.min(num, body.inventory[item]);
+                take(body, item, count);
+                log(`Discarded ${count} ${item}.`);
+                if (world.butterfingers?.(call)) { ground.push({ ...other.position, item, count }); log(`Failed to give ${item} to ${username}, it was never received.`); return false; }
+                give(other, item, count);
+                log(`${username} received ${item}.`);
+                return true;
+            },
             smeltItem(call, item, num = 1) {
                 if (!SMELTS[item]) { log(`Cannot smelt ${item}. Hint: make sure you are smelting the 'raw' item.`); return false; }
                 if (nearest(body, ['furnace'], 16, 1).length === 0) {
@@ -357,8 +418,15 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
                 if (world.hang?.(call)) return new Promise(() => {});
                 const far = typeof args[0] === 'number' ? dist(body.position, { x: args[0], y: args[1], z: args[2] }) : 0;
                 const life = body.lives;
+                const cuts = body.interrupts ?? 0;
+                if (world.stall?.(call)) {
+                    // the skill gets nowhere: it ends when it is stopped, or when the action manager's timeout stops it
+                    await wait(world.stall_ms);
+                    const stopped = body.lives !== life || (body.interrupts ?? 0) !== cuts;
+                    return { ok: false, interrupted: true, timedout: !stopped, output: stopped ? '' : 'Action output:\n' };
+                }
                 await wait(world.durations ? world.durations(command, args, far) : 0);
-                if (body.lives !== life) return { ok: false, interrupted: true, timedout: false, output: '' };
+                if (body.lives !== life || (body.interrupts ?? 0) !== cuts) return { ok: false, interrupted: true, timedout: false, output: '' };
                 const forced = world.fail?.(call);
                 if (forced?.interrupted) return { ok: false, interrupted: true, timedout: false, output: '' };
                 if (forced) return { ok: false, interrupted: false, timedout: forced.timedout === true, output: `Action output:\n${forced.output ?? ''}` };
