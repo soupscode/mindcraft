@@ -1,0 +1,20 @@
+{
+    "v": 1,
+    "dimension": "overworld",
+    "camp": { "min": [-16, -16], "max": [16, 16] },
+    "field": { "min": [20, -8], "max": [36, 8] },
+    "plots": [
+        { "id": "arthur-1", "owner": "Arthur", "min": [-40, 64, 20], "max": [-28, 72, 32], "blueprint": "small_wood_house" },
+        { "id": "spare-1", "owner": null, "min": [-40, 64, -32], "max": [-28, 72, -20], "blueprint": null }
+    ],
+    "chests": {
+        "shared": [2, 64, 2],
+        "kits": [-2, 64, 2]
+    },
+    "agents": {
+        "Arthur": { "home": [0, 64, 0], "range": 48 },
+        "Mira": { "home": [4, 64, 0], "range": 32 },
+        "Felix": { "home": [0, 64, 4], "range": 128 },
+        "Nova": { "home": [-4, 64, 0], "range": 32 }
+    }
+}

@@ -129,6 +129,7 @@ export function createPlannerBroker({
         }
         if (wake_at !== null) {
             wake_timer = clock.setTimeout(() => { wake_timer = null; pump(); }, Math.max(0, wake_at - now));
+            wake_timer?.unref?.(); // a waiting timer must not keep the process alive (the MindServer does that)
         }
     }
 
@@ -280,6 +281,7 @@ export function createPlannerBroker({
             scheduleProbe();
             pump();
         }, config.probe_interval_ms);
+        probe_timer?.unref?.();
     }
 
     // 'desktop_available' or 'desktop_leaving'. Resolves when the gate has dealt with it.
@@ -298,9 +300,11 @@ export function createPlannerBroker({
     return {
         gate,
         // Queues a planning request for an agent. Returns { ok: true, request, replaced } or { ok: false, error }.
-        submit({ agent, trigger = null, kind = 'plan' } = {}) {
+        // ref: the sender's own name for the request (optional). It comes back on the request of
+        // every result, so a result that is delivered before submit() has returned can be matched.
+        submit({ agent, trigger = null, kind = 'plan', ref = null } = {}) {
             if (typeof agent !== 'string' || agent.trim().length === 0) return { ok: false, error: 'agent must be a non-empty string' };
-            const request = { id: nextId(), agent, kind, trigger, queued_at: clock.now() };
+            const request = { id: nextId(), agent, kind, trigger, queued_at: clock.now(), ...(ref !== null ? { ref } : {}) };
             stats.submitted++;
             const replaced = queue.put(request);
             if (replaced) {

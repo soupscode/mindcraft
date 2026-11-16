@@ -7,6 +7,12 @@
 //   desktop_available, then one passing health probe   -> AVAILABLE
 //   desktop_leaving                                    -> LEAVING -> AWAY
 //   two failed health probes in a row, with no warning -> AWAY, with exactly one event
+//   one passing health probe after such a silent loss  -> AVAILABLE (no signal needed)
+//
+// How the gate comes back depends on how it went away. After desktop_leaving the desktop
+// said it is gone: it is not probed at all, and only desktop_available (plus a passing
+// probe) reopens the gate. After an unannounced loss (two failed probes) the probes go on,
+// and the first one that passes reopens the gate by itself.
 //
 // A missing model is never a failure and never an alert: every event the gate emits has
 // severity "info", and a probe that fails while the gate is AWAY is not reported at all.
@@ -22,9 +28,10 @@ export const GATE_STATES = Object.freeze({ AVAILABLE: 'AVAILABLE', LEAVING: 'LEA
 export const GATE_DEFAULTS = Object.freeze({
     failed_probes_to_away: 2,
     probe_timeout_ms: 5000,
-    // false: after the gate went AWAY on failed probes, only desktop_available brings it back.
-    // true: a passing probe brings it back by itself.
-    probe_recovery: false,
+    // true (decided): after the gate went AWAY on failed probes, a passing probe brings it
+    // back by itself. false: only desktop_available does.
+    // Either way, after desktop_leaving only desktop_available brings it back.
+    probe_recovery: true,
 });
 
 export function createModelGate({ probe, clock = { setTimeout, clearTimeout }, emit = () => {}, ...options } = {}) {

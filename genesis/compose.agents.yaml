@@ -25,8 +25,15 @@ services:
     volumes:
       - ./settings.json:/app/genesis/settings.json:ro
       - ./profiles:/app/genesis/profiles:ro
-      # agent memory, histories and logs (same folder the upstream compose file mounts)
+      # agent memory, histories and logs (same folder the upstream compose file mounts);
+      # the Genesis checkpoints go there too (bots/genesis_checkpoints)
       - ../bots:/app/bots
+      # The Genesis decision loop ("genesis_planning" in settings.json) needs the world config:
+      # the camp, the field, the plots and each agent's home and range. Copy
+      # genesis.world.example.json to genesis.world.json, fill it in for the world that is
+      # running, then remove the "#" below. (While the file does not exist, leave the line
+      # commented out: Docker would create a folder in its place.)
+      # - ./genesis.world.json:/app/genesis/genesis.world.json:ro
     # The MindServer (port 8081) listens on every interface inside this container
     # ("mindserver_host": "0.0.0.0" in settings.json), so a container attached to the
     # same Docker network reaches it by service name:  http://agents:8081

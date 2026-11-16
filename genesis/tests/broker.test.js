@@ -12,7 +12,7 @@ import { EventEmitter } from 'node:events';
 import { fakeClock, settle } from './helpers/fakes.mjs';
 import { httpServer, silentServer, refusedPort, closeAllServers } from './helpers/stubs.mjs';
 import { createPlannerBroker, BROKER_DEFAULTS } from '../broker/broker.js';
-import { createModelGate, GATE_STATES } from '../broker/gate.js';
+import { createModelGate, GATE_STATES, GATE_DEFAULTS } from '../broker/gate.js';
 import { createRequestQueue } from '../broker/queue.js';
 import { createBudget, BUDGET_DEFAULTS } from '../broker/budget.js';
 import { validatePlannerReply, plannerReplySchema, buildPlannerMessages, checkOptions, REPLY_LIMITS } from '../broker/planner_reply.js';
@@ -220,10 +220,32 @@ test('gate: two failed probes with no warning give AWAY and exactly one low-seve
     await h.clock.advance(MINUTE);
     assert.equal(h.model.requests.length, 0);
 
-    // back only through desktop_available and a passing probe
+    // back through a passing probe alone: nobody has to say desktop_available
     h.model.probe_ok = true;
-    await h.clock.advance(10 * MINUTE);
+    await h.clock.advance(BROKER_DEFAULTS.probe_interval_ms);
+    assert.equal(h.broker.gate.state(), GATE_STATES.AVAILABLE);
+    assert.equal(h.model.requests.length, 1, 'the waiting request did not go out when the gate reopened');
+    assert.deepEqual(h.events.map((e) => [e.data.state, e.data.detail.reason, e.severity]),
+        [['model_away', 'probe_failed', 'info'], ['model_available', 'probe_passed', 'info']]);
+});
+
+test('gate: after desktop_leaving a passing probe does not reopen the gate, only desktop_available does', async () => {
+    const h = await setupAvailable();
+    // first lost without warning, then the launcher says the desktop is leaving after all
+    h.model.probe_ok = false;
+    await h.clock.advance(2 * BROKER_DEFAULTS.probe_interval_ms);
+    assert.equal(h.broker.gate.awayReason(), 'probe_failed');
+    await h.broker.signal('desktop_leaving');
+    assert.equal(h.broker.gate.awayReason(), 'desktop_leaving');
+
+    h.model.probe_ok = true;
+    const probes = h.model.probes;
+    h.broker.submit({ agent: 'Arthur', trigger: 'idle' });
+    await h.clock.advance(60 * MINUTE);
     assert.equal(h.broker.gate.state(), GATE_STATES.AWAY);
+    assert.equal(h.model.probes, probes, 'the desktop was probed after it said it was leaving');
+    assert.equal(h.model.requests.length, 0);
+
     await h.broker.signal('desktop_available');
     await settle();
     assert.equal(h.broker.gate.state(), GATE_STATES.AVAILABLE);
@@ -279,15 +301,16 @@ test('gate: starts AWAY, a hanging probe counts as failed, and a signal overrule
     assert.ok(events.every((e) => e.severity === 'info'));
 });
 
-test('gate: probe_recovery (off by default) lets passing probes bring the gate back by themselves', async () => {
-    for (const probe_recovery of [false, true]) {
-        const h = await setupAvailable({ gate: { probe_recovery } });
+test('gate: probe_recovery (on by default) lets passing probes bring the gate back by themselves', async () => {
+    assert.equal(GATE_DEFAULTS.probe_recovery, true);
+    for (const probe_recovery of [false, true, undefined]) {
+        const h = await setupAvailable(probe_recovery === undefined ? {} : { gate: { probe_recovery } });
         h.model.probe_ok = false;
         await h.clock.advance(2 * BROKER_DEFAULTS.probe_interval_ms);
         assert.equal(h.broker.gate.state(), GATE_STATES.AWAY);
         h.model.probe_ok = true;
         await h.clock.advance(2 * BROKER_DEFAULTS.probe_interval_ms);
-        assert.equal(h.broker.gate.state(), probe_recovery ? GATE_STATES.AVAILABLE : GATE_STATES.AWAY);
+        assert.equal(h.broker.gate.state(), probe_recovery === false ? GATE_STATES.AWAY : GATE_STATES.AVAILABLE);
     }
 });
 

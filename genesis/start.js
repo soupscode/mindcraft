@@ -16,18 +16,25 @@
 // Redis stream named there. That needs the "redis" package and a filled-in redis_url.
 // A Redis that is down or missing never stops or slows an agent: events wait in a bounded
 // buffer in the MindServer and are counted as dropped once it is full.
+//
+// The Genesis decision loop ("genesis_planning" in the settings file) is off until
+// "enabled" is true. Then the agents stop asking the model after every action: they carry
+// out goals from the skill templates (genesis/catalog, genesis/executor), ask the planner
+// broker (which runs in this process) only when something changed, and work from their
+// role routines while the model is away. That needs the world config file named there
+// (genesis.world.json: the camp, the field, the plots and each agent's home and range).
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSettings, checkProfiles, checkSettings } from './lib/config.js';
+import { buildSettings, checkProfiles, checkSettings, checkWorld } from './lib/config.js';
 
 const repo_root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(repo_root); // upstream resolves profiles and ./bots relative to the working directory
 
 const settings_file = process.env.GENESIS_SETTINGS_FILE || path.join(repo_root, 'genesis', 'settings.json');
 const settings = buildSettings(JSON.parse(readFileSync(settings_file, 'utf8')), process.env.SETTINGS_JSON, process.env.GENESIS_LOAD_MEMORY);
-const problems = [...checkSettings(settings), ...checkProfiles(settings, repo_root)];
+const problems = [...checkSettings(settings), ...checkProfiles(settings, repo_root), ...checkWorld(settings, repo_root)];
 
 // Model-written code can only be switched on through the environment variable
 // read by main.js, or through allow_insecure_coding. Remove the first, the second is forced to false above.
@@ -45,8 +52,14 @@ if (problems.length > 0) {
     console.error('Not starting. Fix the problems above (see genesis/profiles and genesis/settings.json).');
     process.exit(1);
 }
+let event_hub = null;
 if (settings.genesis_events?.enabled === true) {
     const { startEventPublishing } = await import('./events/server.js');
-    await startEventPublishing(settings.genesis_events);
+    event_hub = await startEventPublishing(settings.genesis_events);
+}
+if (settings.genesis_planning?.enabled === true) {
+    // the planner broker lives in this (the MindServer's) process; the agents reach it over their sockets
+    const { startPlanning } = await import('./planning/server.js');
+    await startPlanning(settings.genesis_planning, { event_sink: event_hub ? event_hub.accept : null });
 }
 await import('../main.js');

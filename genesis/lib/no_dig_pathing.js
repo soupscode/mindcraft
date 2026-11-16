@@ -13,6 +13,16 @@
 // asks bot.pathfinder.movements.safeToBreak(block) whether it may mine the block it was
 // sent to collect. Mining a target block is not digging to get somewhere and still works.
 //
+// One exception, the pathing permit (withPathingPermit below). The Genesis executor gives
+// it to a gather step only: a buried block may be tunnelled to. While a permit is on a bot,
+// path searches may dig, except in the cells the permit forbids (the camp, the field and
+// the plots): those cost what mineflayer-pathfinder treats as "cannot break" (its
+// Movements.safeToBreak() refuses a block whose exclusionAreasBreak weight is 100 or more,
+// lib/movements.js of 2.4.5). A permit can also forbid placing blocks while walking
+// (scaffolding): the search then starts with no scaffolding blocks to spend
+// (index.js: `new Move(..., movements.countScaffoldingItems(), 0)`).
+// Without a permit nothing changes: no digging at all.
+//
 // Depends only on Node built-ins and on the bot it is given, so it can be imported from
 // upstream files and from tests.
 
@@ -38,6 +48,73 @@ export function noDigView(movements) {
 
 export function isNoDigPathing(bot) {
     return guarded_bots.has(bot);
+}
+
+// ---- the pathing permit ----
+
+const permits = new WeakMap(); // bot -> { dig_forbidden: (position) -> boolean, or null; no_place: boolean }
+
+// The weight mineflayer-pathfinder reads as "this block cannot be broken".
+export const CANNOT_BREAK = 100;
+
+// permit: { dig: (position) -> true where digging stays forbidden   (omit: no digging at all, as without a permit)
+//           no_place: true to walk without placing any block }
+export function setPathingPermit(bot, permit) {
+    if (!permit) { permits.delete(bot); return; }
+    permits.set(bot, {
+        dig_forbidden: typeof permit.dig === 'function' ? permit.dig : null,
+        no_place: permit.no_place === true,
+    });
+}
+
+export function clearPathingPermit(bot) {
+    permits.delete(bot);
+}
+
+export function pathingPermit(bot) {
+    return permits.get(bot) ?? null;
+}
+
+// Runs fn with the permit on the bot, and takes the permit away again whatever happens.
+export async function withPathingPermit(bot, permit, fn) {
+    const before = permits.get(bot);
+    setPathingPermit(bot, permit);
+    try {
+        return await fn();
+    } finally {
+        if (before) permits.set(bot, before); else permits.delete(bot);
+    }
+}
+
+// The view of `movements` a path search gets while `permit` is on the bot.
+export function permitView(movements, permit) {
+    if (movements === null || typeof movements !== 'object') return movements;
+    const base = permit.dig_forbidden ? movements : noDigView(movements);
+    if (!permit.dig_forbidden && !permit.no_place) return base;
+    const view = Object.create(base);
+    if (permit.dig_forbidden) {
+        const forbidden = (block) => {
+            try {
+                return block?.position && permit.dig_forbidden(block.position) ? CANNOT_BREAK : 0;
+            } catch {
+                return CANNOT_BREAK; // a zone check that fails must never open a zone
+            }
+        };
+        Object.defineProperty(view, 'exclusionAreasBreak', {
+            get: () => [...(movements.exclusionAreasBreak ?? []), forbidden], set: () => {}, enumerable: true,
+        });
+    }
+    if (permit.no_place) {
+        Object.defineProperty(view, 'countScaffoldingItems', { value: () => 0, enumerable: true });
+        Object.defineProperty(view, 'allow1by1towers', { get: () => false, set: () => {}, enumerable: true });
+    }
+    return view;
+}
+
+// What a path search of this bot is given instead of the caller's Movements.
+function searchView(bot, movements) {
+    const permit = permits.get(bot);
+    return permit ? permitView(movements, permit) : noDigView(movements);
 }
 
 // Appends the no_safe_path line to the action log the model reads (same place as skills.log).
@@ -123,11 +200,11 @@ export function enforceNoDigPathing(bot) {
     const getPathFromTo = pathfinder.getPathFromTo;
     const getPathTo = pathfinder.getPathTo;
     pathfinder.getPathFromTo = function (movements, ...rest) {
-        return getPathFromTo.call(this, noDigView(movements), ...rest);
+        return getPathFromTo.call(this, searchView(bot, movements), ...rest);
     };
     // getPathTo calls getPathFromTo itself; wrapped as well so the guard does not depend on that
     pathfinder.getPathTo = function (movements, ...rest) {
-        return getPathTo.call(this, noDigView(movements), ...rest);
+        return getPathTo.call(this, searchView(bot, movements), ...rest);
     };
     pathfinder.goto = (goal) => gotoWithoutDigging(bot, goal);
     guarded_bots.add(bot);

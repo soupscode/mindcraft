@@ -20,6 +20,17 @@
         "buffer_size": 2000
     },
 
+    "genesis_planning": {
+        "enabled": false,
+        "world_file": "./genesis/genesis.world.json",
+        "checkpoint_dir": "./bots/genesis_checkpoints",
+        "model": {
+            "url": "http://DESKTOP_IP:11434",
+            "model": "GENESIS_MODEL"
+        },
+        "postgres_url": ""
+    },
+
     "allow_insecure_coding": false,
     "pathfinding_no_dig": true,
     "blocked_actions": [

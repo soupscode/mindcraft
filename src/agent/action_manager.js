@@ -100,7 +100,8 @@ export class ActionManager {
             this.timedout = false; // a timeout of an earlier action must not mark this one
             this.currentActionLabel = actionLabel;
             this.currentActionFn = actionFn;
-            skill_event = skillStarted(actionLabel, actionFn?.args);
+            // an action that emits its own events (a Genesis executor step) is not reported twice
+            skill_event = actionFn?.own_events ? { result: (r) => r } : skillStarted(actionLabel, actionFn?.args);
 
             // timeout in minutes
             if (timeout > 0) {

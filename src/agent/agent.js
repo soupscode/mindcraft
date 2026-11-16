@@ -17,6 +17,7 @@ import settings from './settings.js';
 import { Task } from './tasks/tasks.js';
 import { speak } from './speak.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
+import { genesisPlanningOn, startGenesisAgent, genesisMessage } from '../../genesis/agent/hooks.js';
 
 export class Agent {
     async start(load_mem=false, init_message=null, count_id=0) {
@@ -194,6 +195,10 @@ export class Agent {
             bannedFood: ["rotten_flesh", "spider_eye", "poisonous_potato", "pufferfish", "chicken"]
         };
 
+        // Genesis (genesis_planning setting, off by default): the executor takes over here. It loads its
+        // checkpoint and resumes; no restart prompt, no self-prompter and no greeting go to the model.
+        if (await startGenesisAgent(this, settings)) return;
+
         if (save_data?.self_prompt) {
             if (init_message) {
                 this.history.add('system', init_message);
@@ -288,6 +293,9 @@ export class Agent {
                 return true;
             }
         }
+
+        // Genesis: no model call per message. The message becomes a planning trigger instead.
+        if (genesisPlanningOn(settings)) return genesisMessage(this, source, message, from_other_bot);
 
         if (from_other_bot)
             this.last_sender = source;

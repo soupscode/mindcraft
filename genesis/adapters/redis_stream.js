@@ -2,7 +2,8 @@
 //
 // NOT COVERED BY THE TESTS: the test suite runs without node_modules and without a Redis
 // server, and uses an in-memory fake with the same one-method interface instead.
-// Needs the "redis" package (node-redis 4 or newer), which is not in package.json.
+// Needs the "redis" package (node-redis 4 or newer), listed in genesis/package.json (the
+// Genesis image installs it; the root package.json does not have it).
 //
 // Interface handed to the hub:
 //   xadd(stream, fields, { maxlen }) -> Promise   XADD <stream> MAXLEN ~ <maxlen> * field value ...

@@ -1,10 +1,13 @@
 // Genesis: builds the settings override for upstream main.js and checks the profiles.
 // Upstream main.js applies the SETTINGS_JSON environment variable last, on top of
 // settings.js and every other environment override, so Genesis never edits settings.js.
-// Depends only on Node built-ins.
+// Depends only on Node built-ins and on the plain-data checks of genesis/catalog/zones.js and
+// genesis/routines/routines.js.
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { checkZonesConfig, createZones } from '../catalog/zones.js';
+import { checkRoutineRanges } from '../routines/routines.js';
 
 // Actions Genesis agents must never have, whatever the settings file says.
 export const REQUIRED_BLOCKED_ACTIONS = ['!newAction', '!startConversation', '!endConversation'];
@@ -13,6 +16,8 @@ export const REQUIRED_BLOCKED_ACTIONS = ['!newAction', '!startConversation', '!e
 export const PLACEHOLDERS = ['GENESIS_MODEL', 'DESKTOP_IP'];
 // "Not filled in yet" for the Redis address in genesis_events.redis_url.
 export const REDIS_PLACEHOLDER = 'REDIS_HOST';
+// "Not filled in yet" for the Postgres address in genesis_planning.postgres_url.
+export const POSTGRES_PLACEHOLDER = 'POSTGRES_HOST';
 
 // Addresses the MindServer may listen on. The agents always connect to it through
 // localhost (src/agent/mindserver_proxy.js), so only loopback and "every interface"
@@ -56,6 +61,82 @@ export function checkSettings(settings) {
             + 'the agents connect through localhost and would not find the MindServer on another address');
     }
     problems.push(...checkEventSettings(settings.genesis_events));
+    problems.push(...checkPlanningSettings(settings.genesis_planning));
+    return problems;
+}
+
+// Checks the genesis_planning setting (the Genesis decision loop: executor, planner broker,
+// routines). No setting at all, or "enabled": false, leaves it off: the agents then ask the
+// model after every action as upstream does, and the rest of the setting is not looked at.
+function checkPlanningSettings(planning) {
+    if (planning === undefined) return [];
+    if (planning === null || typeof planning !== 'object' || Array.isArray(planning)) {
+        return ['settings: "genesis_planning" must be an object'];
+    }
+    if (planning.enabled !== true && planning.enabled !== false) {
+        return ['settings: "genesis_planning.enabled" must be true or false'];
+    }
+    if (!planning.enabled) return [];
+    const problems = [];
+    for (const key of ['world_file', 'checkpoint_dir']) {
+        if (typeof planning[key] !== 'string' || planning[key].length === 0) {
+            problems.push(`settings: "genesis_planning.${key}" must be a path`);
+        }
+    }
+    const model = planning.model;
+    if (model === null || typeof model !== 'object' || Array.isArray(model)) {
+        problems.push('settings: "genesis_planning.model" must be an object with url and model');
+    } else {
+        for (const field of ['url', 'model']) {
+            if (typeof model[field] !== 'string' || model[field].length === 0) {
+                problems.push(`settings: "genesis_planning.model.${field}" is missing`);
+            } else if (PLACEHOLDERS.some((p) => model[field].includes(p))) {
+                problems.push(`settings: "genesis_planning.model.${field}" still holds a placeholder (${model[field]})`);
+            }
+        }
+        let url = null;
+        try { url = new URL(model.url); } catch { /* reported below */ }
+        if (typeof model.url === 'string' && model.url.length > 0 && (!url || !['http:', 'https:'].includes(url.protocol))) {
+            problems.push('settings: "genesis_planning.model.url" must be an http:// or https:// address');
+        }
+    }
+    const postgres = planning.postgres_url;
+    if (postgres !== undefined && postgres !== null && postgres !== '') {
+        if (typeof postgres !== 'string' || !/^postgres(ql)?:\/\/[^/]+/.test(postgres)) {
+            problems.push('settings: "genesis_planning.postgres_url" must be a postgres:// address, or empty for none');
+        } else if (postgres.includes(POSTGRES_PLACEHOLDER)) {
+            problems.push(`settings: "genesis_planning.postgres_url" still holds a placeholder (${postgres})`);
+        }
+    }
+    return problems;
+}
+
+// Checks the world config file the genesis_planning setting names (the zones: camp, field,
+// plots, and each agent's home and range). Only looked at while planning is on.
+// Returns a list of problems (empty = fine).
+export function checkWorld(settings, repo_root) {
+    const planning = settings.genesis_planning;
+    if (planning?.enabled !== true || typeof planning.world_file !== 'string' || planning.world_file.length === 0) return [];
+    const file = planning.world_file;
+    let config;
+    try {
+        config = JSON.parse(readFileSync(path.resolve(repo_root, file), 'utf8'));
+    } catch (err) {
+        return [`${file}: the world config cannot be read as JSON (${err.code === 'ENOENT' ? 'the file does not exist' : err.message})`];
+    }
+    const problems = checkZonesConfig(config).map((problem) => `${file}: ${problem}`);
+    if (problems.length > 0) return problems;
+    const zones = createZones(config);
+    problems.push(...checkRoutineRanges(zones).map((problem) => `${file}: ${problem.replace(/^world config: /, '')}`));
+    // every agent that is started needs a home and a range
+    for (const profile_path of Array.isArray(settings.profiles) ? settings.profiles : []) {
+        try {
+            const name = JSON.parse(readFileSync(path.resolve(repo_root, profile_path), 'utf8')).name;
+            if (name && zones.home(name) === null && !problems.some((problem) => problem.includes(`agents.${name} `))) {
+                problems.push(`${file}: agents.${name} is missing (home and range)`);
+            }
+        } catch { /* an unreadable profile is reported by checkProfiles */ }
+    }
     return problems;
 }
 

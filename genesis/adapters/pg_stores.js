@@ -3,7 +3,8 @@
 // NOT RUN AGAINST A REAL POSTGRES: the test suite runs without node_modules and without a
 // database. The tests only check, with a recording stand-in for the pool, that every
 // statement names the columns of genesis/store/migrations/*.sql and passes as many values
-// as it has placeholders. Needs the "pg" package, which is not in package.json.
+// as it has placeholders. Needs the "pg" package, listed in genesis/package.json (the
+// Genesis image installs it; the root package.json does not have it).
 //
 // Every store takes a `pool` with query(text, values) -> Promise<{ rows }> (a pg.Pool).
 // The tables come from genesis/store/migrations/*.sql, which nothing here runs.
