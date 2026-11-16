@@ -1,0 +1,30 @@
+{
+    "minecraft_version": "1.21.6",
+    "host": "192.168.1.190",
+    "port": 25600,
+    "auth": "offline",
+
+    "mindserver_port": 8081,
+    "auto_open_ui": false,
+
+    "init_message": "",
+    "load_memory": true,
+
+    "allow_insecure_coding": false,
+    "blocked_actions": [
+        "!checkBlueprint",
+        "!checkBlueprintLevel",
+        "!getBlueprint",
+        "!getBlueprintLevel",
+        "!newAction",
+        "!startConversation",
+        "!endConversation"
+    ],
+
+    "profiles": [
+        "./genesis/profiles/arthur.json",
+        "./genesis/profiles/mira.json",
+        "./genesis/profiles/felix.json",
+        "./genesis/profiles/nova.json"
+    ]
+}

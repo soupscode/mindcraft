@@ -47,7 +47,7 @@ if (process.env.MINDSERVER_PORT) {
 if (process.env.PROFILES && JSON.parse(process.env.PROFILES).length > 0) {
     settings.profiles = JSON.parse(process.env.PROFILES);
 }
-if (process.env.INSECURE_CODING) {
+if (process.env.INSECURE_CODING === 'true') { // only the exact value "true" enables coding ("false", "0", "1" etc. do not)
     settings.allow_insecure_coding = true;
 }
 if (process.env.BLOCKED_ACTIONS) {

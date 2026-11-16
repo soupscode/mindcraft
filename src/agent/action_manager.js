@@ -1,3 +1,5 @@
+import assert from 'assert';
+
 export class ActionManager {
     constructor(agent) {
         this.agent = agent;
@@ -54,7 +56,7 @@ export class ActionManager {
             this.currentActionLabel = '';
             return res;
         } else {
-            return { success: false, message: null, interrupted: false, timedout: false };
+            return actionResult(false, null, false, false, false);
         }
     }
 
@@ -76,7 +78,7 @@ export class ActionManager {
                 if (this.recent_action_counter > 5) {
                     console.error('Infinite action loop detected, shutting down.');
                     this.agent.cleanKill('Infinite action loop detected, shutting down.');
-                    return { success: false, message: 'Infinite action loop detected, shutting down.', interrupted: false, timedout: false };
+                    return actionResult(false, 'Infinite action loop detected, shutting down.', false, false, false);
                 }
             }
             this.last_action_time = Date.now();
@@ -93,6 +95,7 @@ export class ActionManager {
             this.agent.clearBotLogs();
 
             this.executing = true;
+            this.timedout = false; // a timeout of an earlier action must not mark this one
             this.currentActionLabel = actionLabel;
             this.currentActionFn = actionFn;
 
@@ -101,8 +104,8 @@ export class ActionManager {
                 TIMEOUT = this._startTimeout(timeout);
             }
 
-            // start the action
-            await actionFn();
+            // start the action. an action that returns false is reporting that it did not succeed
+            const returned = await actionFn();
 
             // mark action as finished + cleanup
             this.executing = false;
@@ -122,7 +125,7 @@ export class ActionManager {
             }
 
             // return action status report
-            return { success: true, message: output, interrupted, timedout };
+            return actionResult(returned !== false, output, interrupted, timedout, true);
         } catch (err) {
             this.executing = false;
             this.currentActionLabel = '';
@@ -145,7 +148,7 @@ export class ActionManager {
             if (!interrupted) {
                 this.agent.bot.emit('idle');
             }
-            return { success: false, message, interrupted, timedout: false };
+            return actionResult(false, message, interrupted, false, false);
         }
     }
 
@@ -174,4 +177,15 @@ export class ActionManager {
         }, TIMEOUT_MINS * 60 * 1000);
     }
 
+}
+
+// Structured result of an action:
+//   ok:          false if the action threw, or returned false (a failed skill)
+//   interrupted: the action was stopped before it finished
+//   timedout:    the action was stopped because it ran too long
+//   output:      the text the action logged for the model
+// success/message are the older names, kept so existing readers keep working:
+// success only says the action did not throw, message is the same text as output.
+function actionResult(ok, output, interrupted, timedout, success) {
+    return { ok, interrupted, timedout, output, success, message: output };
 }

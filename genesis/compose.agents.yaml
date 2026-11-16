@@ -1,0 +1,32 @@
+# Genesis agents: Arthur, Mira, Felix and Nova in one container.
+#
+#   docker compose -f genesis/compose.agents.yaml up -d --build
+#
+# Settings live in genesis/settings.json and the profiles in genesis/profiles/.
+# Both are mounted read-only, so editing them needs a restart, not a rebuild.
+# The launcher (genesis/start.js) refuses to start while a profile still holds
+# a placeholder for the model name or the Ollama address.
+#
+# Model-written code is off: the launcher forces it off and ignores the
+# environment switch upstream offers. Keep the command below as it is.
+
+services:
+  agents:
+    build:
+      context: ..
+      dockerfile: genesis/Dockerfile
+    image: genesis-agents
+    command: ["node", "genesis/start.js"]
+    init: true
+    environment:
+      # Saved memory loads on start. For a full reset start, run once with
+      #   GENESIS_LOAD_MEMORY=false docker compose -f genesis/compose.agents.yaml up -d
+      GENESIS_LOAD_MEMORY: "${GENESIS_LOAD_MEMORY:-true}"
+    volumes:
+      - ./settings.json:/app/genesis/settings.json:ro
+      - ./profiles:/app/genesis/profiles:ro
+      # agent memory, histories and logs (same folder the upstream compose file mounts)
+      - ../bots:/app/bots
+    # The MindServer (port 8081, see settings.json) listens on localhost inside the
+    # container only, so publishing the port would not make it reachable.
+    # Left out until a later step decides how the dashboard reaches it.

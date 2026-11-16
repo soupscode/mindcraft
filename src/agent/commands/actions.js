@@ -1,7 +1,10 @@
-import * as skills from '../library/skills.js';
+import * as skills_module from '../library/skills.js';
+import { trackSkillReturns, runWithSkillTracking } from '../../../genesis/lib/skill_results.js';
 import settings from '../settings.js';
 import convoManager from '../conversation.js';
 
+// same skills, but each true/false they return is noted for the action that ran them
+const skills = trackSkillReturns(skills_module);
 
 function runAsAction (actionFn, resume = false, timeout = -1) {
     let actionLabel = null;  // Will be set on first use
@@ -13,13 +16,18 @@ function runAsAction (actionFn, resume = false, timeout = -1) {
             actionLabel = actionObj.name.substring(1); // Remove the ! prefix
         }
 
+        let skills_ok = true;
         const actionFnWithAgent = async () => {
-            await actionFn(agent, ...args);
+            // false if the action, or any skill it ran, returned false. becomes `ok` in the action result
+            skills_ok = await runWithSkillTracking(() => actionFn(agent, ...args));
+            return skills_ok;
         };
         const code_return = await agent.actions.runAction(`action:${actionLabel}`, actionFnWithAgent, { timeout, resume });
         if (code_return.interrupted && !code_return.timedout)
             return;
-        return code_return.message;
+        if (!skills_ok) // tell the model too, the output alone does not always say so
+            return code_return.output + '\nAction did not succeed.';
+        return code_return.output;
     }
 
     return wrappedAction;
@@ -175,7 +183,7 @@ export const actionsList = [
             const pos = agent.memory_bank.recallPlace(name);
             if (!pos) {
             skills.log(agent.bot, `No location named "${name}" saved.`);
-            return;
+            return false;
             }
             await skills.goToPosition(agent.bot, pos[0], pos[1], pos[2], 1);
         })

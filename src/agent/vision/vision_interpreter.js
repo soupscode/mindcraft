@@ -71,6 +71,8 @@ export class VisionInterpreter {
 
             const blockInfo = this.getCenterBlockInfo();
             const result = await this.agent.prompter.promptVision(messages, imageBuffer);
+            if (result == null) // the model gave no reply (see prompter): report only what the bot itself knows
+                return blockInfo;
             return result + `\n${blockInfo}`;
 
         } catch (error) {

@@ -47,6 +47,8 @@ export class Coder {
             let res = await this.agent.prompter.promptCoding(messages_copy);
             if (this.agent.bot.interrupt_code)
                 return null;
+            if (res == null) // the model gave no reply (see prompter): nothing to report
+                return null;
             let contains_code = res.indexOf('```') !== -1;
             if (!contains_code) {
                 if (res.indexOf('!newAction') !== -1) {
