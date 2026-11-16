@@ -1,13 +1,16 @@
 // Genesis: builds the settings override for upstream main.js and checks the profiles.
 // Upstream main.js applies the SETTINGS_JSON environment variable last, on top of
 // settings.js and every other environment override, so Genesis never edits settings.js.
-// Depends only on Node built-ins and on the plain-data checks of genesis/catalog/zones.js and
-// genesis/routines/routines.js.
+// Depends only on Node built-ins and on the plain-data checks of genesis/catalog/zones.js,
+// genesis/routines/routines.js and genesis/world (the world file and the bootstrap manifest).
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { checkZonesConfig, createZones } from '../catalog/zones.js';
 import { checkRoutineRanges } from '../routines/routines.js';
+import { fileBlueprints, BLUEPRINT_DIR } from '../catalog/blueprints.js';
+import { checkWorldConfig, describeProblem } from '../world/world_config.js';
+import { DEFAULT_MANIFEST_FILE, RESET_MARKER_FILE, manifestPaths, parseManifest, checkManifest } from '../world/manifest.js';
 
 // Actions Genesis agents must never have, whatever the settings file says.
 export const REQUIRED_BLOCKED_ACTIONS = ['!newAction', '!startConversation', '!endConversation'];
@@ -18,6 +21,10 @@ export const PLACEHOLDERS = ['GENESIS_MODEL', 'DESKTOP_IP'];
 export const REDIS_PLACEHOLDER = 'REDIS_HOST';
 // "Not filled in yet" for the Postgres address in genesis_planning.postgres_url.
 export const POSTGRES_PLACEHOLDER = 'POSTGRES_HOST';
+// "Not filled in yet" for the operator's Minecraft username in genesis_planning.operators.
+export const OPERATOR_PLACEHOLDER = 'OPERATOR_NAME';
+// What a Minecraft Java username looks like.
+export const MINECRAFT_NAME = /^[A-Za-z0-9_]{3,16}$/;
 
 // Addresses the MindServer may listen on. The agents always connect to it through
 // localhost (src/agent/mindserver_proxy.js), so only loopback and "every interface"
@@ -100,6 +107,25 @@ function checkPlanningSettings(planning) {
             problems.push('settings: "genesis_planning.model.url" must be an http:// or https:// address');
         }
     }
+    // The operator's Minecraft username(s). In the game, only they are listened to; everybody
+    // else's chat is ignored and counted (genesis/agent/hooks.js). The panel always counts as the operator.
+    const operators = planning.operators;
+    if (!Array.isArray(operators) || operators.length === 0) {
+        problems.push('settings: "genesis_planning.operators" must list the operator\'s Minecraft username (at least one)');
+    } else {
+        for (const name of operators) {
+            if (name === OPERATOR_PLACEHOLDER) {
+                problems.push(`settings: "genesis_planning.operators" still holds a placeholder (${name})`);
+            } else if (typeof name !== 'string' || !MINECRAFT_NAME.test(name)) {
+                problems.push(`settings: "genesis_planning.operators" holds ${JSON.stringify(name)}, which is not a Minecraft username (3 to 16 letters, digits or _)`);
+            }
+        }
+    }
+    for (const key of ['manifest_file', 'ledger_file']) {
+        if (planning[key] !== undefined && (typeof planning[key] !== 'string' || planning[key].length === 0)) {
+            problems.push(`settings: "genesis_planning.${key}" must be a path, or left out for the default`);
+        }
+    }
     const postgres = planning.postgres_url;
     if (postgres !== undefined && postgres !== null && postgres !== '') {
         if (typeof postgres !== 'string' || !/^postgres(ql)?:\/\/[^/]+/.test(postgres)) {
@@ -138,6 +164,39 @@ export function checkWorld(settings, repo_root) {
         } catch { /* an unreadable profile is reported by checkProfiles */ }
     }
     return problems;
+}
+
+// The gate in front of planning: with planning on, the world file must be the full "v": 2
+// file and pass every check of genesis/world/world_config.js, AND the bootstrap must have run
+// for exactly that file: a manifest whose hash matches and whose checks passed
+// (genesis/world/bootstrap.js writes it). While the marker of a full reset is there
+// (genesis/world/reset.js), the world has to be regenerated first.
+// Call it after checkWorld came back clean. Returns a list of problems (empty = fine).
+export function checkBootstrap(settings, repo_root) {
+    const planning = settings.genesis_planning;
+    if (planning?.enabled !== true || typeof planning.world_file !== 'string' || planning.world_file.length === 0) return [];
+    const file = planning.world_file;
+    let config;
+    try {
+        config = JSON.parse(readFileSync(path.resolve(repo_root, file), 'utf8'));
+    } catch {
+        return []; // reported by checkWorld
+    }
+    const world_problems = checkWorldConfig(config, { blueprints: fileBlueprints(path.resolve(repo_root, BLUEPRINT_DIR)) });
+    if (world_problems.length > 0) return world_problems.map((problem) => `${file}: ${describeProblem(problem)}`);
+
+    const manifest_file = planning.manifest_file || DEFAULT_MANIFEST_FILE;
+    const paths = manifestPaths(path.resolve(repo_root, manifest_file));
+    const how = 'run  node genesis/world/bootstrap.js  against the Minecraft server first';
+    if (existsSync(paths.reset_marker)) {
+        return [`${manifest_file}: a full reset was run and the world has not been bootstrapped since (${RESET_MARKER_FILE} is there): regenerate the world, then ${how}`];
+    }
+    let text = null;
+    try { text = readFileSync(paths.manifest, 'utf8'); } catch { /* no manifest */ }
+    if (text === null) return [`${manifest_file}: there is no bootstrap manifest, so planning stays off: ${how}`];
+    const manifest = parseManifest(text);
+    if (!manifest) return [`${manifest_file}: is not a bootstrap manifest: ${how}`];
+    return checkManifest(manifest, config).map((problem) => `${manifest_file}: ${problem}: ${how}`);
 }
 
 // Whole-number settings of genesis_events, with the smallest value each may have.
@@ -193,6 +252,10 @@ export function checkProfiles(settings, repo_root) {
             continue;
         }
         if (!profile.name) problems.push(`${profile_path}: "name" is missing`);
+        if (settings.genesis_planning?.enabled === true && Array.isArray(settings.genesis_planning.operators)
+            && settings.genesis_planning.operators.includes(profile.name)) {
+            problems.push(`${profile_path}: the agent ${profile.name} is listed under "genesis_planning.operators": an agent is never the operator`);
+        }
         for (const key of ['model', 'embedding']) {
             const spec = profile[key];
             if (!spec || typeof spec !== 'object') {

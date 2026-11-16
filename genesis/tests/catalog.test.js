@@ -69,7 +69,8 @@ test('zones: the example world config in the repository is a valid one, with the
     assert.deepEqual(checkZonesConfig(example), []);
     const zones = createZones(example);
     assert.deepEqual(checkRoutineRanges(zones), []);
-    assert.deepEqual(zones.plots().map((plot) => zones.plotOverlaps(plot.id)), [[], []]);
+    assert.ok(zones.plots().length >= 2);
+    for (const plot of zones.plots()) assert.deepEqual(zones.plotOverlaps(plot.id), [], `plot ${plot.id} overlaps something`);
     assert.ok(zones.chests().every((chest) => zones.protectedAt(chest.pos) === 'camp'));
     // the real file is the operator's to write: it is not in the repository
     assert.throws(() => readFileSync(path.join(REPO_ROOT, 'genesis', ZONES_FILE)), /ENOENT/);
@@ -91,7 +92,7 @@ test('zones: a plot that overlaps the camp, the field or another plot says so', 
 
 test('zones: a broken world config is reported, never thrown at the caller of the loader', async () => {
     const problems = checkZonesConfig({
-        v: 2, camp: { min: [0, 0], max: [-1, 5] }, plots: [{ id: 'bad id', min: [0, 0], max: [1, 1] }, { id: 'p', min: [0, 0, 0], max: [1, 1, 1] }, { id: 'p', min: [0, 0, 0], max: [1, 1, 1] }],
+        v: 3, camp: { min: [0, 0], max: [-1, 5] }, plots: [{ id: 'bad id', min: [0, 0], max: [1, 1] }, { id: 'p', min: [0, 0, 0], max: [1, 1, 1] }, { id: 'p', min: [0, 0, 0], max: [1, 1, 1] }],
         chests: { shared: [1, 2] }, agents: { Arthur: { home: [0, 64], range: 0 } },
     });
     for (const expected of ['"v" must be 1', 'camp: min is larger than max', 'field must be', 'plots[0].id', 'plots[0] needs a height', 'plots[2].id "p" is used twice',

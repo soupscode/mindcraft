@@ -22,19 +22,26 @@
 // out goals from the skill templates (genesis/catalog, genesis/executor), ask the planner
 // broker (which runs in this process) only when something changed, and work from their
 // role routines while the model is away. That needs the world config file named there
-// (genesis.world.json: the camp, the field, the plots and each agent's home and range).
+// (genesis.world.json: the seed, the camp, the field, the plots, each agent's home and range,
+// and the game rules), AND a bootstrapped world: the launcher refuses to turn planning on
+// unless the world file passes its checks and a bootstrap manifest for exactly that file
+// exists (node genesis/world/bootstrap.js writes it once the starter camp is built and
+// checked). It also needs the operator's Minecraft username under "operators".
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSettings, checkProfiles, checkSettings, checkWorld } from './lib/config.js';
+import { buildSettings, checkProfiles, checkSettings, checkWorld, checkBootstrap } from './lib/config.js';
 
 const repo_root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(repo_root); // upstream resolves profiles and ./bots relative to the working directory
 
 const settings_file = process.env.GENESIS_SETTINGS_FILE || path.join(repo_root, 'genesis', 'settings.json');
 const settings = buildSettings(JSON.parse(readFileSync(settings_file, 'utf8')), process.env.SETTINGS_JSON, process.env.GENESIS_LOAD_MEMORY);
-const problems = [...checkSettings(settings), ...checkProfiles(settings, repo_root), ...checkWorld(settings, repo_root)];
+const world_problems = checkWorld(settings, repo_root);
+const problems = [...checkSettings(settings), ...checkProfiles(settings, repo_root), ...world_problems,
+    // the bootstrap is only looked at once the world file itself reads cleanly
+    ...(world_problems.length === 0 ? checkBootstrap(settings, repo_root) : [])];
 
 // Model-written code can only be switched on through the environment variable
 // read by main.js, or through allow_insecure_coding. Remove the first, the second is forced to false above.

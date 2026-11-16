@@ -3,7 +3,7 @@ import convoManager from './conversation.js';
 import { setSettings } from './settings.js';
 import { getFullState } from './library/full_state.js';
 import { initAgentEvents } from '../../genesis/events/agent_emit.js';
-import { genesisLastSeq } from '../../genesis/agent/hooks.js';
+import { genesisLastSeq, asPanelMessage } from '../../genesis/agent/hooks.js';
 
 // agent's individual connection to the mindserver
 // always connect to localhost
@@ -65,7 +65,8 @@ class MindServerProxy {
 		
         this.socket.on('send-message', (data) => {
             try {
-                this.agent.respondFunc(data.from, data.message);
+                // Genesis: a message from the panel is the operator's (only matters when the genesis_planning setting is on)
+                asPanelMessage(this.agent, () => this.agent.respondFunc(data.from, data.message));
             } catch (error) {
                 console.error('Error: ', JSON.stringify(error, Object.getOwnPropertyNames(error)));
             }

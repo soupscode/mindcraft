@@ -17,7 +17,7 @@ import settings from './settings.js';
 import { Task } from './tasks/tasks.js';
 import { speak } from './speak.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
-import { genesisPlanningOn, startGenesisAgent, genesisMessage } from '../../genesis/agent/hooks.js';
+import { genesisPlanningOn, startGenesisAgent, genesisMessage, genesisHears, genesisOperatorCommand } from '../../genesis/agent/hooks.js';
 
 export class Agent {
     async start(load_mem=false, init_message=null, count_id=0) {
@@ -159,6 +159,8 @@ export class Agent {
             if (message === "") return;
             if (username === this.name) return;
             if (settings.only_chat_with.length > 0 && !settings.only_chat_with.includes(username)) return;
+            // Genesis (genesis_planning setting, off by default): only the operator is listened to. Always true when the setting is off.
+            if (!genesisHears(this, settings, username, convoManager.isOtherAgent(username))) return;
             try {
                 if (ignore_messages.some((m) => message.startsWith(m))) return;
 
@@ -287,6 +289,7 @@ export class Agent {
                     // add the preceding message to the history to give context for newAction
                     this.history.add(source, message);
                 }
+                genesisOperatorCommand(this, source, user_command_name); // Genesis: !stop holds the executor until !resume. Does nothing unless the genesis_planning setting is on
                 let execute_res = await executeCommand(this, message);
                 if (execute_res) 
                     this.routeResponse(source, execute_res);

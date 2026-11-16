@@ -10,6 +10,8 @@
 import { createPlanningHost, createHostGoalStorage } from './host.js';
 import { createOllamaPlanner } from '../broker/ollama_planner.js';
 import { createEmitter } from '../events/agent_emit.js';
+import { createSharedLedger, createLedgerFile } from '../catalog/shared_ledger.js';
+import { DEFAULT_LEDGER_FILE } from '../agent/hooks.js';
 
 // The name the broker's own events (the model gate opening and closing) are published under.
 export const BROKER_EVENT_AGENT = 'planner';
@@ -28,9 +30,17 @@ export function memoryCallStore(max = 500) {
 
 // planning: the genesis_planning setting
 // event_sink: where events go when the genesis_events setting is on (the hub's accept), or null
-// Injectable for the tests: setSocketExtension, createModel, createPool, clock.
-export async function startPlanning(planning, { event_sink = null, setSocketExtension, createModel = createOllamaPlanner, createPool, clock, warn = console.warn } = {}) {
+// Injectable for the tests: setSocketExtension, createModel, createPool, clock, files.
+export async function startPlanning(planning, { event_sink = null, setSocketExtension, createModel = createOllamaPlanner, createPool, clock, files = null, warn = console.warn } = {}) {
     if (!setSocketExtension) ({ setSocketExtension } = await import('../../src/mindcraft/mindserver.js'));
+    const log = (event, message) => warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event, message }));
+
+    // the ONE chest ledger of all agents lives in this process, and in one file
+    if (!files) files = (await import('../store/node_files.js')).nodeFiles();
+    let ledger_file = null;
+    const ledger = createSharedLedger({ ...(clock ? { clock } : {}), onChange: () => ledger_file?.schedule() });
+    ledger_file = createLedgerFile({ ledger, files, file: planning.ledger_file || DEFAULT_LEDGER_FILE, ...(clock ? { clock } : {}), warn: (message) => log('genesis_chest_ledger', message) });
+    await ledger_file.load();
 
     let calls = memoryCallStore();
     let durable = null;
@@ -49,12 +59,14 @@ export async function startPlanning(planning, { event_sink = null, setSocketExte
     const host = createPlanningHost({
         model: createModel({ url: planning.model.url, model: planning.model.model, options: planning.model.options ?? null }),
         calls,
-        goal_storage: createHostGoalStorage({ durable, warn: (message) => warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'genesis_goal_storage', message })) }),
+        goal_storage: createHostGoalStorage({ durable, warn: (message) => log('genesis_goal_storage', message) }),
+        ledger,
         emit: emitter ? emitter.emit : () => {},
         ...(clock ? { clock } : {}),
     });
     setSocketExtension((socket, helpers) => host.attach(socket, helpers));
     // the broker does not know whether the desktop is there: it asks once now, and keeps asking
     host.start().catch(() => {});
+    host.ledger_file = ledger_file;
     return host;
 }

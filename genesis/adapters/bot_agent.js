@@ -5,8 +5,6 @@
 // NOT RUN AGAINST A REAL MINECRAFT SERVER, MINDSERVER OR MODEL. This file is the wiring; the
 // parts it joins are tested with stand-ins (see genesis/tests).
 
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import * as skills from '../../src/agent/library/skills.js';
@@ -16,6 +14,8 @@ import { serverProxy } from '../../src/agent/mindserver_proxy.js';
 import { emitEvent, agentEventStats } from '../events/agent_emit.js';
 import { loadZones } from '../catalog/zones.js';
 import { createCatalog } from '../catalog/catalog.js';
+import { createLedgerClient } from '../catalog/ledger_client.js';
+import { fileBlueprints } from '../catalog/blueprints.js';
 import { createScaffoldTracker } from '../executor/scaffold.js';
 import { createCheckpointStore } from '../store/checkpoint.js';
 import { nodeFiles } from '../store/node_files.js';
@@ -28,23 +28,7 @@ import { createBotView } from './bot_world.js';
 import { createBotOps } from './bot_ops.js';
 
 // Blueprints in upstream's construction format (src/agent/npc/construction/<name>.json).
-export function fileBlueprints(dir = './src/agent/npc/construction') {
-    const cache = new Map();
-    return {
-        get(name) {
-            if (!/^[A-Za-z0-9_-]+$/.test(String(name))) return null;
-            if (!cache.has(name)) {
-                let blueprint = null;
-                try {
-                    const parsed = JSON.parse(readFileSync(path.join(dir, `${name}.json`), 'utf8'));
-                    if (Array.isArray(parsed?.blocks)) blueprint = { name: parsed.name ?? name, blocks: parsed.blocks };
-                } catch { /* no such blueprint */ }
-                cache.set(name, blueprint);
-            }
-            return cache.get(name);
-        },
-    };
-}
+export { fileBlueprints };
 
 const logLine = (record) => console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', ...record }));
 
@@ -60,6 +44,13 @@ export async function buildBotRuntime(agent, settings) {
     const scaffold = createScaffoldTracker({ zones });
     const guards = installBotGuards(bot, { zones, onPlace: (pos) => scaffold.placed(pos) });
     const socket = serverProxy.getSocket();
+    const send = (event, ...args) => {
+        if (!socket.connected) throw new Error('not connected to MindServer');
+        socket.emit(event, ...args);
+    };
+    // this agent's copy of the ONE chest ledger, which the MindServer holds
+    const ledger = createLedgerClient({ agent: agent.name, send });
+    socket.on('genesis-ledger-update', (message) => ledger.onUpdate(message));
     const runtime = createAgentRuntime({
         agent: agent.name,
         zones,
@@ -72,10 +63,8 @@ export async function buildBotRuntime(agent, settings) {
             files: nodeFiles(), dir: planning.checkpoint_dir || DEFAULT_CHECKPOINT_DIR,
             report: (problem) => logLine({ event: 'genesis_checkpoint_problem', ...problem }),
         }),
-        send(event, ...args) {
-            if (!socket.connected) throw new Error('not connected to MindServer');
-            socket.emit(event, ...args);
-        },
+        send,
+        ledger,
         emit: emitEvent,
         getSeq: () => agentEventStats()?.seq ?? 0,
     });

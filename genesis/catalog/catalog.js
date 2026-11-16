@@ -8,6 +8,13 @@
 // is enough to find the skill and the arguments again ("gather_blocks:oak_log:8").
 //
 // agent_state: { agent, view, ledger, avoid?, now? }   (the view is described in templates.js)
+//
+// Contested claims: when an agent wants items that another agent has reserved in the chest
+// ledger, the option is refused with the reason "contested_claim" AND the catalog reports the
+// claim, { chest, item, count, holder, held, asker, in_chest }, to whoever listens:
+//   createCatalog({ onContested })   or   catalog.setContestedHook(fn)
+// The agent runtime turns it into an event and hands it to the hook the agent-to-agent
+// request will be sent from (a later step; nothing is sent to another agent from here).
 // Fixed for the catalog's life: zones (genesis/catalog/zones.js), blueprints
 // ({ get(name) -> { name, blocks[y][z][x] } | null }) and the config tables (defaults.js).
 //
@@ -21,8 +28,10 @@ import {
 
 const NO_BLUEPRINTS = Object.freeze({ get: () => null });
 
-export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {} } = {}) {
+export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, onContested = null } = {}) {
     if (!zones) throw new Error('the catalog needs the zones');
+    let contested_hook = typeof onContested === 'function' ? onContested : null;
+    let quiet = 0; // > 0 while an offer is put together: looking at what could be offered is not wanting it
     const settings = {
         ...CATALOG_DEFAULTS, accept_partial_path: true, ...config,
         per_skill: { ...CATALOG_DEFAULTS.per_skill, ...(config.per_skill ?? {}) },
@@ -36,6 +45,11 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {} }
         craft_items: config.craft_items ?? CRAFT_ITEMS,
         natural: (name) => natural_blocks.has(name) || NATURAL_SUFFIXES.some((suffix) => name.endsWith(suffix)),
         keep: (item) => keep_items.has(item) || KEEP_SUFFIXES.some((suffix) => item.endsWith(suffix)),
+        // An agent wanted items another agent has reserved. Never throws.
+        contested(claim) {
+            if (quiet > 0 || !contested_hook) return;
+            try { contested_hook({ ...claim }); } catch { /* the listener's problem */ }
+        },
     };
     const by_name = new Map(TEMPLATES.map((template) => [template.name, template]));
 
@@ -71,6 +85,24 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {} }
         }
     }
 
+    function collect(state, options) {
+        for (const template of TEMPLATES) {
+            let taken = 0;
+            let candidates;
+            try { candidates = template.candidates(state, ctx); } catch { candidates = []; }
+            const seen = new Set();
+            for (const args of candidates) {
+                if (taken >= (settings.per_skill[template.name] ?? 1) || options.length >= settings.max_options) break;
+                const id = template.id(args);
+                if (seen.has(id)) continue;
+                seen.add(id);
+                if (refusal(template, args, state) !== null) continue;
+                options.push(makeOption(template, args, state));
+                taken++;
+            }
+        }
+    }
+
     return {
         config: settings,
         skills: () => TEMPLATES.map((template) => ({
@@ -86,22 +118,21 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {} }
         offer(agent_state) {
             const state = full(agent_state);
             const options = [];
-            for (const template of TEMPLATES) {
-                let taken = 0;
-                let candidates;
-                try { candidates = template.candidates(state, ctx); } catch { candidates = []; }
-                const seen = new Set();
-                for (const args of candidates) {
-                    if (taken >= (settings.per_skill[template.name] ?? 1) || options.length >= settings.max_options) break;
-                    const id = template.id(args);
-                    if (seen.has(id)) continue;
-                    seen.add(id);
-                    if (refusal(template, args, state) !== null) continue;
-                    options.push(makeOption(template, args, state));
-                    taken++;
-                }
+            quiet++;
+            try {
+                collect(state, options);
+            } finally {
+                quiet--;
             }
             return options;
+        },
+        // Who is told about contested claims (one listener; null for none).
+        setContestedHook(fn) { contested_hook = typeof fn === 'function' ? fn : null; },
+        // A goal ended, however it ended: the template gives back what it held (a reservation). Never throws.
+        release(option_id, agent_state) {
+            const found = resolve(option_id);
+            if (!found || typeof found.template.release !== 'function') return false;
+            try { found.template.release(found.args, full(agent_state), ctx); return true; } catch { return false; }
         },
         // { ok: true, option } when the preconditions hold now, else { ok: false, reason }.
         check(option_id, agent_state) {

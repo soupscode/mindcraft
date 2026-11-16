@@ -41,7 +41,6 @@ export function makeRig({
         agent, catalog: rig.catalog, goals: rig.goals, checkpoints: rig.checkpoints, ops: rig.ops, state: rig.state,
         emit: rig.emitter.emit, getSeq: () => rig.emitter.stats().seq, clock, scaffold: rig.scaffold, zones: rig.zones,
         onTrigger: (trigger) => rig.triggers.push(trigger), onGoalEnd: (end) => rig.ended.push(end),
-        extras: () => ({ places: { ledger: rig.ledger.snapshot() } }),
         ...executor_options,
     });
     // Puts a goal in the queue the way the operator (or a planner reply) would.

@@ -11,6 +11,7 @@ import { createCheckpointStore } from '../../store/checkpoint.js';
 import { createEmitter } from '../../events/agent_emit.js';
 import { createScaffoldTracker } from '../../executor/scaffold.js';
 import { createAgentRuntime } from '../../agent/runtime.js';
+import { createLedgerClient } from '../../catalog/ledger_client.js';
 import { createPlanningHost, createHostGoalStorage, socketGoalStorage } from '../../planning/host.js';
 
 // Two ends of one connection: what one end emits, the other end's handlers get (ack
@@ -93,6 +94,10 @@ export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, wo
         a.emitter = createEmitter({ agent, send: (event) => a.events.push(event), last_seq, now: clock.now, warn: () => {}, progress_interval_ms: 0 });
         a.scaffold = createScaffoldTracker({ zones: town.zones });
         a.ops = town.world.ops(agent, { on_place: (pos, how) => { if (how !== 'skill') a.scaffold.placed(pos); } });
+        // the agent's copy of the one chest ledger the host holds
+        a.ledger = createLedgerClient({ agent, send: (event, ...args) => client.emit(event, ...args), clock });
+        client.on('genesis-ledger-update', (message) => a.ledger.onUpdate(message));
+        a.claims = [];
         a.runtime = createAgentRuntime({
             agent, zones: town.zones, catalog: createCatalog({ zones: town.zones, blueprints: BLUEPRINTS }),
             view: town.world.view(agent), ops: a.ops, scaffold: a.scaffold,
@@ -100,6 +105,7 @@ export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, wo
             checkpoints: createCheckpointStore({ files: town.files, dir: '/checkpoints', clock }),
             send: (event, ...args) => client.emit(event, ...args),
             emit: a.emitter.emit, getSeq: () => a.emitter.stats().seq, clock,
+            ledger: a.ledger, onContestedClaim: (claim) => a.claims.push(claim),
             ...runtime_options,
         });
         client.on('genesis-plan-context', (request, ack) => a.runtime.onPlanContext(request, ack));

@@ -121,8 +121,9 @@ test('a queued goal whose preconditions no longer hold is dropped with a reason'
     // no skill ran for a dropped goal
     assert.deepEqual(rig.world.calls.map((call) => call.command), ['goToPosition', 'putInChest']);
     assert.equal(rig.eventsOf('agent.decision').length, 1);
-    // goal 1 left a queue behind, so it raised no trigger; the queue ran empty on a drop: that is the one planning trigger
-    assert.deepEqual(rig.triggers.map((trigger) => [trigger.kind, trigger.detail.outcome]), [['goal_complete', 'dropped']]);
+    // decided at the last review: finishing ANY goal asks the planner, also with goals still queued (goal 1);
+    // a drop asks once the queue has run empty
+    assert.deepEqual(rig.triggers.map((trigger) => [trigger.kind, trigger.detail.outcome]), [['goal_complete', 'completed'], ['goal_complete', 'dropped']]);
     assertEventsValid(rig);
 });
 

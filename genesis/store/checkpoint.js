@@ -8,7 +8,10 @@
 //            "steps":[{"i","command","args","status":"pending|active|done|parked|skipped","attempts","progress":{"done","total"}}]},
 //    "routine":{"name","phase"}|null,
 //    "position":{"x","y","z","dimension"},
-//    "places":{},"pending_request":{"id","kind","queued_at"}|null,"budgets":{}}
+//    "places":{},"pending_request":{"id","kind","queued_at"}|null,"budgets":{},
+//    "hold":{"by","reason","at"}|null}
+//   hold is optional (a checkpoint written before it existed has none): set while the operator
+//   holds the agent with !stop, so that the hold survives a restart.
 //   plan may be null: an agent that has no plan yet still has a position to save.
 //   plan.cursor is the index of the current step; cursor == steps.length means the plan is finished.
 //   seq is the seq of the agent's last event (genesis/events/agent_emit.js takes it back as last_seq).
@@ -37,6 +40,7 @@ export const PLAN_SOURCES = Object.freeze(['model', 'routine']);
 export const CHECKPOINT_INTERVAL_MS = 30 * 1000;
 
 const TOP_KEYS = ['v', 'agent', 'seq', 'saved_at', 'plan', 'routine', 'position', 'places', 'pending_request', 'budgets'];
+const OPTIONAL_KEYS = ['hold']; // may be left out: a checkpoint from before the key existed is still valid
 const AGENT_NAME = /^[A-Za-z0-9_]{1,64}$/; // the name becomes part of a file name
 const ISO_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
@@ -76,7 +80,7 @@ export function checkCheckpoint(checkpoint) {
     if (!isPlainObject(checkpoint)) return ['checkpoint must be an object'];
     const problems = [];
     for (const key of TOP_KEYS) if (!Object.hasOwn(checkpoint, key)) problems.push(`"${key}" is missing`);
-    for (const key of Object.keys(checkpoint)) if (!TOP_KEYS.includes(key)) problems.push(`"${key}" is not a checkpoint field`);
+    for (const key of Object.keys(checkpoint)) if (!TOP_KEYS.includes(key) && !OPTIONAL_KEYS.includes(key)) problems.push(`"${key}" is not a checkpoint field`);
     if (problems.length > 0) return problems;
 
     if (checkpoint.v !== CHECKPOINT_VERSION) problems.push(`v must be ${CHECKPOINT_VERSION}`);
@@ -98,6 +102,10 @@ export function checkCheckpoint(checkpoint) {
         problems.push('pending_request must be {id, kind, queued_at} or null');
     }
     if (!isPlainObject(checkpoint.budgets)) problems.push('budgets must be an object');
+    const hold = checkpoint.hold;
+    if (hold !== undefined && hold !== null && (!isPlainObject(hold) || !isFilledText(hold.by) || !isFilledText(hold.reason) || !isIsoTime(hold.at))) {
+        problems.push('hold must be {by, reason, at} or null');
+    }
     return problems;
 }
 

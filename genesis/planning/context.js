@@ -107,7 +107,10 @@ export function buildPlanContext({
 export function describeTrigger(trigger) {
     const detail = trigger?.detail ?? {};
     switch (trigger?.kind) {
-        case 'goal_complete': return 'the goals you had are finished.';
+        // every goal that ends asks (also while others still wait): the planner is told which one it was
+        case 'goal_complete': return detail.option_id
+            ? `a goal ended (${clip(detail.option_id, 40)}, ${clip(detail.outcome ?? 'completed', 12)}).`
+            : 'the goals you had are finished.';
         case 'step_failed': return `a goal failed (${clip(detail.reason ?? 'unknown', 40)}).`;
         case 'reflex_interrupt': return 'a reflex interrupted what you were doing.';
         case 'agent_request': return `${clip(detail.from ?? 'another agent', 20)} asks: "${clip(detail.text ?? '', PROMPT_LIMITS.operator_message)}"`;

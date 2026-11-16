@@ -14,6 +14,12 @@
 //     with `corr` set to the decision id (goal.changed comes from the goal store)
 //   - writes a checkpoint at every step boundary and every 30 seconds; start() loads the
 //     checkpoint and resumes the same step
+//   - every goal that completes raises a planning trigger, whatever is still queued: the
+//     planner's reply then replaces the goals that are still waiting (genesis/planning/agent_planner.js)
+//   - hold(): the operator said !stop. The executor HOLDS: no retry, no next step, no routine,
+//     nothing started, until resume(). The hold is in the checkpoint, so it survives a restart,
+//     and it is emitted as agent.state "held". A held agent has not failed: nothing about a
+//     hold is counted or reported as a failure.
 //
 // Everything outside is injected:
 //   catalog      genesis/catalog/catalog.js
@@ -50,7 +56,8 @@ export const EXECUTOR_DEFAULTS = Object.freeze({
 });
 
 // Reasons no second try can change: the step asked for something that is never allowed.
-const FINAL_REASONS = new Set(['protected_zone', 'outside_plot', 'outside_field', 'cell_occupied', 'unknown_command', 'unknown_option', 'plot_not_registered']);
+const FINAL_REASONS = new Set(['protected_zone', 'outside_plot', 'outside_field', 'cell_occupied', 'unknown_command', 'unknown_option', 'plot_not_registered',
+    'contested_claim']); // another agent holds the items: trying again at once changes nothing
 
 const copy = (value) => JSON.parse(JSON.stringify(value));
 
@@ -64,7 +71,7 @@ export function createExecutor({
         if (options[key] !== undefined) config[key] = options[key];
     }
     const nextId = ids ?? createUlidFactory({ now: clock.now });
-    const stats = { goals_started: 0, goals_completed: 0, goals_failed: 0, goals_dropped: 0, steps_done: 0, steps_failed: 0, steps_skipped: 0, interruptions: 0, resumed: 0 };
+    const stats = { goals_started: 0, goals_completed: 0, goals_failed: 0, goals_dropped: 0, steps_done: 0, steps_failed: 0, steps_skipped: 0, interruptions: 0, resumed: 0, holds: 0 };
     const sources = new Map();       // goal id -> { source, call_id }: who put the goal in the queue
     const removal_pending = new Map(); // goal id -> meta: goals that ended while the goal store could not be written
 
@@ -77,6 +84,7 @@ export function createExecutor({
     let wake_sleep = null;
     let started = false;
     let last_outcome = null;    // { option_id, title, outcome, reason } of the goal that ended last
+    let hold = null;            // { by, reason, at } while the operator holds the agent (!stop), else null
 
     const say = (type, data, extra = {}) => {
         try { return emit(type, data, { corr: plan?.id ?? null, ...extra }); } catch { return null; }
@@ -104,6 +112,7 @@ export function createExecutor({
             places: { ...(more.places ?? {}), scaffold: scaffold ? scaffold.snapshot() : [] },
             pending_request: more.pending_request ?? null,
             budgets: {},
+            hold: hold ? { ...hold } : null,
         };
     }
 
@@ -232,8 +241,9 @@ export function createExecutor({
         const measured = measure(done);
         stats.goals_completed++;
         say('agent.state', { state: 'goal_completed', detail: { goal_id: done.goal.id, option_id: done.goal.option_id, done: measured.done, total: measured.total, unit: measured.unit } });
-        const left = await endPlan('completed', null, { reason: 'completed', source: 'executor', call_id: sources.get(done.goal.id)?.call_id ?? null });
-        if (left === 0) trigger('goal_complete', { outcome: 'completed', option_id: done.goal.option_id });
+        await endPlan('completed', null, { reason: 'completed', source: 'executor', call_id: sources.get(done.goal.id)?.call_id ?? null });
+        // decided: finishing ANY goal asks the planner, also while more goals wait in the queue
+        trigger('goal_complete', { outcome: 'completed', option_id: done.goal.option_id });
         return { kind: 'goal_completed', goal_id: done.goal.id };
     }
 
@@ -312,6 +322,13 @@ export function createExecutor({
             { corr: mine.id, severity: result.ok ? 'info' : 'warn' });
         if (plan !== mine) return { kind: 'plan_gone' }; // the goal was taken away while the step ran (a death, a new plan)
 
+        if (hold && !result.ok) {
+            // the operator's !stop ended the step: it was not tried and has not failed. It waits for the resume.
+            step.attempts--;
+            step.status = 'pending';
+            await boundary();
+            return { kind: 'held', step: step.i, wait_ms: config.idle_ms };
+        }
         if (result.interrupted && !result.timedout) {
             stats.interruptions++;
             interruptions++;
@@ -327,7 +344,8 @@ export function createExecutor({
         }
         const after = catalog.after(mine.goal.option_id, step, result, world(), mine.goal.baseline);
         let reason = after?.fail ?? (result.ok ? null : classifyFailure(step.command, result));
-        if ((await cleanScaffold()) > 0 && reason === null) reason = 'scaffold_left_in_zone';
+        // while the agent is held nothing more is done, not even tidying up: scaffold waits for the resume
+        if (!hold && (await cleanScaffold()) > 0 && reason === null) reason = 'scaffold_left_in_zone';
         if (plan !== mine) return { kind: 'plan_gone' };
         if (reason !== null) return stepFailed(step, reason);
 
@@ -344,6 +362,8 @@ export function createExecutor({
     async function runOnce() {
         if (!started) throw new Error('the executor was not started');
         if (busy) return { kind: 'busy', wait_ms: config.step_gap_ms };
+        // held by the operator: nothing is retried, started or chosen until resume()
+        if (hold) return { kind: 'held', wait_ms: config.idle_ms };
         busy = true;
         try {
             for (const [goal_id, meta] of [...removal_pending]) await removeGoal(goal_id, meta);
@@ -357,6 +377,7 @@ export function createExecutor({
                     last_outcome = { option_id: gone.goal.option_id, title: gone.goal.title, outcome: 'abandoned', reason: 'replaced', at: clock.now() };
                     plan = null;
                     await boundary();
+                    try { onGoalEnd({ ...last_outcome, source: gone.source, goal_id: gone.goal.id }); } catch { /* the listener's problem */ }
                     return { kind: 'goal_abandoned', goal_id: gone.goal.id, reason: 'replaced', wait_ms: 0 };
                 }
                 return await stepOnce();
@@ -415,9 +436,14 @@ export function createExecutor({
                     }
                 }
             }
+            if (checkpoint?.hold) {
+                // the operator's !stop outlives a restart: the agent stays held until it is resumed
+                hold = { by: String(checkpoint.hold.by ?? 'operator'), reason: String(checkpoint.hold.reason ?? 'operator_stop'), at: String(checkpoint.hold.at ?? new Date(clock.now()).toISOString()) };
+                say('agent.state', { state: 'held', detail: { ...hold, restored: true, goal_id: plan?.goal.id ?? null, option_id: plan?.goal.option_id ?? null } });
+            }
             started = true;
             checkpointer.start();
-            return { resumed, checkpoint, load };
+            return { resumed, checkpoint, load, held: hold !== null };
         },
         runOnce,
         // Keeps working until stop(). Never rejects.
@@ -460,6 +486,33 @@ export function createExecutor({
         },
         // The routine gives way after the step it is on.
         requestYield(reason) { yield_reason = reason; },
+        // The operator's !stop: hold everything until resume(). Set at once (before the first
+        // await), so the step the stop interrupts is already seen as held. Resolves to true when
+        // the agent was not held before.
+        async hold({ by = 'operator', reason = 'operator_stop' } = {}) {
+            if (hold) return false;
+            hold = { by: clipText(by, 40), reason: clipText(reason, 80), at: new Date(clock.now()).toISOString() };
+            stats.holds++;
+            const step = plan ? plan.steps[plan.cursor] ?? null : null;
+            say('agent.state', { state: 'held', detail: { ...hold, goal_id: plan?.goal.id ?? null, option_id: plan?.goal.option_id ?? null, step: step?.i ?? null } });
+            await boundary(); // the hold is in the checkpoint from now on
+            return true;
+        },
+        // The operator lets the agent go on: it carries on with the step it was held at.
+        async resume({ by = 'operator' } = {}) {
+            if (!hold) return false;
+            const was = hold;
+            hold = null;
+            say('agent.state', { state: 'hold_released', detail: {
+                by: clipText(by, 40), held_by: was.by, held_at: was.at, held_ms: Math.max(0, Math.round(clock.now() - Date.parse(was.at))),
+                goal_id: plan?.goal.id ?? null, option_id: plan?.goal.option_id ?? null,
+            } });
+            await boundary();
+            wake_sleep?.();
+            return true;
+        },
+        isHeld: () => hold !== null,
+        holdInfo: () => (hold ? { ...hold } : null),
         saveNow: () => checkpointer.saveNow(),
         plan: () => (plan ? copy(plan) : null),
         corr: () => plan?.id ?? null,

@@ -16,6 +16,11 @@
 //                                       { intend: [pos] }           cells the step places on purpose
 //   after(step, result, args, state, ctx, baseline)   bookkeeping after a step; may return { fail: reason }
 //   progress(args, state, ctx, baseline, plan) -> { done, total }
+//   release(args, state)                (optional) the goal ended, however it ended: give back what it held
+//                                       (fetch_items frees its reservation in the chest ledger)
+//
+// ctx.contested(claim): told when an agent wants items another agent has reserved in the
+// chest ledger: { chest, item, count, holder, held, asker, in_chest }. Never a silent failure.
 //
 // state: { agent, view, zones, ledger, blueprints, avoid }
 //   view (the injected world view; genesis/adapters/bot_world.js for a real bot):
@@ -33,7 +38,7 @@
 
 import { STATION_RANGE, COMMON_FAILURES, isEmptyBlock } from './ops.js';
 import { boxContains, flatDistance } from './zones.js';
-import { parseChestView } from './ledger.js';
+import { parseChestView, contestedClaim } from './ledger.js';
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const held = (state, item) => state.view.inventory()[item] ?? 0;
@@ -317,42 +322,71 @@ const store_items = {
 
 // ---- fetch_items -------------------------------------------------------------------------
 
+// What the agent may still take: the count in the ledger less what other agents have reserved.
+const freeFor = (state, chest, item) => state.ledger.available(chest, item, state.agent, state.now);
+
+// Reserves the items for this agent, so that no second agent is sent after them. When
+// another agent holds them the step does not fail silently: the catalog is told a contested
+// claim (who wanted what, and who holds it), and the reason is named.
+function reserveGuard(args, state, ctx) {
+    const got = state.ledger.reserve(args.chest, args.item, args.count, state.agent, state.now);
+    if (got.ok || got.code !== 'contested') return null; // an empty ledger is for the chest itself to confirm
+    ctx.contested(got.claim);
+    return { fail: 'contested_claim' };
+}
+
 const fetch_items = {
     name: 'fetch_items',
     progress_unit: 'items taken',
-    failures: ['ledger_empty', 'inventory_full', 'unknown_chest', 'chest_unreachable', 'out_of_range', 'avoid_area', 'wrong_chest', 'no_chest', 'ledger_stale'],
+    failures: ['ledger_empty', 'contested_claim', 'inventory_full', 'unknown_chest', 'chest_unreachable', 'out_of_range', 'avoid_area', 'wrong_chest', 'no_chest', 'ledger_stale'],
     id: (args) => `fetch_items:${args.chest}:${args.item}:${args.count}`,
     parse(parts) {
         const count = whole(parts[2] ?? '');
         return parts.length === 3 && /^[A-Za-z0-9_-]{1,40}$/.test(parts[0]) && ITEM.test(parts[1]) && count >= 1 && count <= 64
             ? { chest: parts[0], item: parts[1], count } : null;
     },
+    // only what nobody else has reserved is put forward
     candidates(state, ctx) {
         const list = [];
         for (const chest of state.zones.chests()) {
-            for (const [item, count] of Object.entries(state.ledger.stock(chest.name))) {
-                list.push({ chest: chest.name, item, stock: count });
+            for (const item of Object.keys(state.ledger.stock(chest.name))) {
+                const stock = freeFor(state, chest.name, item);
+                if (stock > 0) list.push({ chest: chest.name, item, stock });
             }
         }
         return list.sort((a, b) => b.stock - a.stock || a.item.localeCompare(b.item))
             .map(({ chest, item, stock }) => ({ chest, item, count: Math.min(stock, ctx.config.fetch_count) }));
     },
     check(args, state, ctx) {
-        if (state.ledger.count(args.chest, args.item) <= 0) return 'ledger_empty';
+        const in_chest = state.ledger.count(args.chest, args.item);
+        if (in_chest <= 0) return 'ledger_empty';
+        if (freeFor(state, args.chest, args.item) <= 0) {
+            // the items are there, but another agent has reserved them all: a contested claim
+            const holders = new Map();
+            for (const held of state.ledger.reservations(state.now)) {
+                if (held.chest === args.chest && held.item === args.item && held.holder !== state.agent) holders.set(held.holder, (holders.get(held.holder) ?? 0) + held.count);
+            }
+            ctx.contested(contestedClaim({ chest: args.chest, item: args.item, count: args.count, asker: state.agent, in_chest, held_by: holders }));
+            return 'contested_claim';
+        }
         if (state.view.freeSlots() < 1) return 'inventory_full';
         return chestRefusal(state, args.chest, ctx);
     },
     title: (args) => clip(`Fetch ${args.count} ${args.item} from the ${args.chest} chest`),
-    describe: (args, state) => `Take up to ${args.count} ${args.item} from the ${args.chest} chest (the ledger says ${state.ledger.count(args.chest, args.item)})`,
+    describe: (args, state) => `Take up to ${args.count} ${args.item} from the ${args.chest} chest (the ledger says ${state.ledger.count(args.chest, args.item)}, ${freeFor(state, args.chest, args.item)} not reserved by others)`,
     steps: (args, state, ctx) => [walkTo(state.zones.chest(args.chest), ctx), { command: 'takeFromChest', args: [args.item, args.count] }],
     baseline: (args, state) => ({ had: held(state, args.item) }),
     before(step, args, state, ctx) {
+        // reserved when the agent sets out, and again right before it takes (a reservation lapses)
+        const refused = reserveGuard(args, state, ctx);
+        if (refused) return refused;
         if (step.command !== 'takeFromChest') return null;
         if (state.view.freeSlots() < 1) return { fail: 'inventory_full' };
         return chestGuard(state, args.chest, ctx);
     },
     after(step, result, args, state, ctx, baseline) {
         if (step.command !== 'takeFromChest') return null;
+        state.ledger.release(args.chest, args.item, state.agent); // taken or not, the claim is over
         if (result.ok) {
             state.ledger.remove(args.chest, args.item, Math.max(0, held(state, args.item) - baseline.had));
             return null;
@@ -364,6 +398,8 @@ const fetch_items = {
         }
         return null;
     },
+    // The goal ended, however it ended: what it had reserved is free again.
+    release(args, state) { state.ledger.release(args.chest, args.item, state.agent); },
     progress: (args, state, ctx, baseline) => ({ done: Math.max(0, held(state, args.item) - baseline.had), total: args.count }),
 };
 
