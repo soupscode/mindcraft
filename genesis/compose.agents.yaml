@@ -1,6 +1,12 @@
 # Genesis agents: Arthur, Mira, Felix and Nova in one container.
 #
+#   docker network create genesis        (once; see the end of this file)
 #   docker compose -f genesis/compose.agents.yaml up -d --build
+#
+# The world bootstrap runs from this image too, inside the Docker network, where RCON is:
+#   docker compose -f genesis/compose.agents.yaml run --rm -e GENESIS_RCON_PASSWORD \
+#       -e GENESIS_RCON_HOST=minecraft agents node genesis/world/bootstrap.js
+# (GENESIS_RCON_PASSWORD is taken from the shell that runs the command and is not kept anywhere.)
 #
 # Settings live in genesis/settings.json and the profiles in genesis/profiles/.
 # Both are mounted read-only, so editing them needs a restart, not a rebuild.
@@ -40,8 +46,19 @@ services:
     # The MindServer (port 8081) listens on every interface inside this container
     # ("mindserver_host": "0.0.0.0" in settings.json), so a container attached to the
     # same Docker network reaches it by service name:  http://agents:8081
-    # The dashboard container must join this project's network for that (by default
-    # "genesis_default": the project name comes from this folder unless -p or
-    # COMPOSE_PROJECT_NAME says otherwise; `docker network ls` shows the real name).
+    # That network is the named network "genesis" (decided), which the dashboard stack
+    # (genesis/compose.dashboard.yaml) and the Minecraft server (genesis/compose.minecraft.yaml)
+    # join as well. Inside it the agents reach Redis at redis://redis:6379, Postgres at
+    # postgres:5432 and the Minecraft server at minecraft:25600 (RCON: minecraft:25575).
     # The port is NOT published to the host, on purpose: the MindServer has no login
     # and can create, stop and reconfigure agents. Do not add a "ports:" entry here.
+    networks:
+      - genesis
+
+# Made once, by hand, before the first "up" of any Genesis compose file:
+#   docker network create genesis
+# No compose file owns it, so the three stacks can be started and stopped in any order.
+networks:
+  genesis:
+    name: genesis
+    external: true

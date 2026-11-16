@@ -194,10 +194,11 @@ test('plan: the starter camp is exactly what was decided, and the rules are the 
     // the Nether, the End and the seed are server settings: listed for the operator, never sent
     assert.deepEqual(plan.server_settings.map((s) => `${s.file}: ${s.key}=${s.value}`), [
         'server.properties: level-seed=20261116', 'server.properties: difficulty=easy',
-        'server.properties: allow-nether=false', 'bukkit.yml: settings.allow-end=false',
+        'server.properties: allow-nether=false', 'server.properties: spawn-protection=0', 'bukkit.yml: settings.allow-end=false',
     ]);
     const text = serverSettingsText(plan);
-    for (const line of ['level-seed=20261116', 'allow-nether=false', 'difficulty=easy', 'settings:', '  allow-end: false']) assert.ok(text.split('\n').includes(line), line);
+    // the camp is at the world spawn: with spawn protection on, agents (never operators) could not use it
+    for (const line of ['level-seed=20261116', 'allow-nether=false', 'spawn-protection=0', 'difficulty=easy', 'settings:', '  allow-end: false']) assert.ok(text.split('\n').includes(line), line);
     // the kit: one stack per slot, as the file lists them
     assert.deepEqual(plan.items.map((item) => [item.slot, item.item, item.count]), [
         [0, 'minecraft:stone_axe', 1], [1, 'minecraft:stone_pickaxe', 1], [2, 'minecraft:stone_hoe', 1], [3, 'minecraft:stone_sword', 1],
@@ -355,12 +356,12 @@ test('bootstrap: against the stand-in server it levels the camp, places it, sets
     assert.ok(manifestPaths(MANIFEST).server_settings.endsWith(`/genesis_world/${SERVER_SETTINGS_FILE}`));
     assert.deepEqual(result.operator_must_set, [
         'server.properties: level-seed=20261116', 'server.properties: difficulty=easy',
-        'server.properties: allow-nether=false', 'bukkit.yml: settings.allow-end=false',
+        'server.properties: allow-nether=false', 'server.properties: spawn-protection=0', 'bukkit.yml: settings.allow-end=false',
     ]);
     const report = reportLines(result, { manifest_file: MANIFEST }).join('\n');
     assert.match(report, /Bootstrap PASSED/);
     assert.match(report, /Levelled the camp: 19 blocks cleared, 300 floor blocks placed\./);
-    assert.equal(report.split('\n').filter((line) => line.includes('operator must set: ')).length, 4);
+    assert.equal(report.split('\n').filter((line) => line.includes('operator must set: ')).length, 5);
 });
 
 test('manifest: every placed block and item is listed as the Operator\'s, with every rule that favours the agents', async () => {
@@ -410,7 +411,8 @@ test('manifest: every placed block and item is listed as the Operator\'s, with e
         ['disableRaids', 'set', true], ['worldborder.size', 'set', false], ['worldborder.center', 'set, cannot be read back', false],
         ['worldspawn', 'set, cannot be read back', true],
         ['server.properties:level-seed', 'operator must set', false], ['server.properties:difficulty', 'operator must set', true],
-        ['server.properties:allow-nether', 'operator must set', false], ['bukkit.yml:settings.allow-end', 'operator must set', false],
+        ['server.properties:allow-nether', 'operator must set', false], ['server.properties:spawn-protection', 'operator must set', false],
+        ['bukkit.yml:settings.allow-end', 'operator must set', false],
     ]);
     assert.match(rule('mobGriefing').why, /cannot destroy or take blocks/);
     const favours = manifest.favours_agents.join('\n');

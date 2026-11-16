@@ -181,6 +181,11 @@ export function buildBootstrapPlan(config) {
             why: 'Easy difficulty, also for a world that is generated anew' },
         { file: 'server.properties', key: 'allow-nether', value: String(config.rules.nether), lines: [`allow-nether=${config.rules.nether}`], favours_agents: false,
             why: 'the Nether is disabled' },
+        // The camp stands at the world spawn (setworldspawn above). While the server has an operator, nobody
+        // else may place, break or open anything within spawn-protection blocks of it (default 16): the
+        // agents are never operators, so the chests, the beds and the field would be closed to them.
+        { file: 'server.properties', key: 'spawn-protection', value: '0', lines: ['spawn-protection=0'], favours_agents: false,
+            why: 'no spawn protection: the camp is at the world spawn, and the agents (never operators) must be able to place, break and open things there' },
         { file: 'bukkit.yml', key: 'settings.allow-end', value: String(config.rules.end), lines: ['settings:', `  allow-end: ${config.rules.end}`], favours_agents: false,
             why: 'the End is disabled (the key "allow-end" under "settings")' },
     ];
