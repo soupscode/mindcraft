@@ -13,7 +13,7 @@ export class Ollama {
         this.timeout_ms = Number(request_timeout_ms) > 0 ? Number(request_timeout_ms) : DEFAULT_TIMEOUT_MS;
         this.url = url || 'http://127.0.0.1:11434';
         this.chat_endpoint = '/api/chat';
-        this.embedding_endpoint = '/api/embeddings';
+        this.embedding_endpoint = '/api/embed';
     }
 
     async sendRequest(turns, systemMessage) {
@@ -72,12 +72,15 @@ export class Ollama {
 
     async embed(text) {
         let model = this.model_name || 'embeddinggemma';
+        // Ollama's embeddings API (docs/api.md, "Generate Embeddings"): POST /api/embed with
+        // {model, input}; the answer holds one vector per input in `embeddings`.
         let body = { model: model, input: text };
         let res = await this.send(this.embedding_endpoint, body);
-        if (!Array.isArray(res?.embedding) || res.embedding.length === 0) {
+        const embedding = Array.isArray(res?.embeddings) ? res.embeddings[0] : null;
+        if (!Array.isArray(embedding) || embedding.length === 0 || !embedding.every((value) => Number.isFinite(value))) {
             throw new ModelInvalidResponseError('Ollama embedding response has no embedding.', this._details(this.embedding_endpoint, model));
         }
-        return res['embedding'];
+        return embedding;
     }
 
     _details(endpoint, model) {

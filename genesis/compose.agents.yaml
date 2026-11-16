@@ -27,6 +27,11 @@ services:
       - ./profiles:/app/genesis/profiles:ro
       # agent memory, histories and logs (same folder the upstream compose file mounts)
       - ../bots:/app/bots
-    # The MindServer (port 8081, see settings.json) listens on localhost inside the
-    # container only, so publishing the port would not make it reachable.
-    # Left out until a later step decides how the dashboard reaches it.
+    # The MindServer (port 8081) listens on every interface inside this container
+    # ("mindserver_host": "0.0.0.0" in settings.json), so a container attached to the
+    # same Docker network reaches it by service name:  http://agents:8081
+    # The dashboard container must join this project's network for that (by default
+    # "genesis_default": the project name comes from this folder unless -p or
+    # COMPOSE_PROJECT_NAME says otherwise; `docker network ls` shows the real name).
+    # The port is NOT published to the host, on purpose: the MindServer has no login
+    # and can create, stop and reconfigure agents. Do not add a "ports:" entry here.

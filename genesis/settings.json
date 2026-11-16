@@ -5,12 +5,14 @@
     "auth": "offline",
 
     "mindserver_port": 8081,
+    "mindserver_host": "0.0.0.0",
     "auto_open_ui": false,
 
     "init_message": "",
     "load_memory": true,
 
     "allow_insecure_coding": false,
+    "pathfinding_no_dig": true,
     "blocked_actions": [
         "!checkBlueprint",
         "!checkBlueprintLevel",

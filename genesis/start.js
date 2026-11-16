@@ -14,17 +14,18 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSettings, checkProfiles } from './lib/config.js';
+import { buildSettings, checkProfiles, checkSettings } from './lib/config.js';
 
 const repo_root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(repo_root); // upstream resolves profiles and ./bots relative to the working directory
 
 const settings_file = process.env.GENESIS_SETTINGS_FILE || path.join(repo_root, 'genesis', 'settings.json');
 const settings = buildSettings(JSON.parse(readFileSync(settings_file, 'utf8')), process.env.SETTINGS_JSON, process.env.GENESIS_LOAD_MEMORY);
-const problems = checkProfiles(settings, repo_root);
+const problems = [...checkSettings(settings), ...checkProfiles(settings, repo_root)];
 
 // Model-written code can only be switched on through the environment variable
 // read by main.js, or through allow_insecure_coding. Remove the first, the second is forced to false above.
+// buildSettings also forces pathfinding_no_dig on: agents never dig to get somewhere.
 delete process.env.INSECURE_CODING;
 process.env.SETTINGS_JSON = JSON.stringify(settings);
 

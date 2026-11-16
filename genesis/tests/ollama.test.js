@@ -139,10 +139,68 @@ test('answer that never finishes its <think> block: rejects after the retries', 
     }
 });
 
-test('empty embedding: rejects with ModelInvalidResponseError', LIMIT, async () => {
-    const server = await httpServer((req, res) => {
+// Embeddings follow Ollama's API documentation (docs/api.md in github.com/ollama/ollama,
+// "Generate Embeddings"): POST /api/embed with {model, input}, answered with
+// {model, embeddings: [[...]], total_duration, load_duration, prompt_eval_count}.
+// The older POST /api/embeddings ({model, prompt} -> {embedding: [...]}) is documented as superseded.
+test('embedding request: documented endpoint and body, vector read from "embeddings"', LIMIT, async () => {
+    const seen = [];
+    const server = await httpServer((req, res, body) => {
+        seen.push({ method: req.method, url: req.url, body: JSON.parse(body) });
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end('{"embedding":[]}');
+        res.end(JSON.stringify({
+            model: 'embed-model',
+            embeddings: [[0.010071029, -0.0017594862, 0.05007221]],
+            total_duration: 14143917, load_duration: 1019500, prompt_eval_count: 8,
+        }));
+    });
+    try {
+        // chat parameters and the client's own timeout option stay out of the embedding request
+        const model = new Ollama('embed-model', server.url, { request_timeout_ms: 2000, temperature: 0.5 });
+        const { result } = await captureConsole(() => model.embed('Why is the sky blue?'));
+        assert.deepEqual(result, [0.010071029, -0.0017594862, 0.05007221]);
+        assert.equal(seen.length, 1);
+        assert.equal(seen[0].method, 'POST');
+        assert.equal(seen[0].url, '/api/embed');
+        assert.deepEqual(seen[0].body, { model: 'embed-model', input: 'Why is the sky blue?' });
+    } finally {
+        await server.close();
+    }
+});
+
+test('embedding answers without a usable vector: reject with ModelInvalidResponseError', LIMIT, async () => {
+    const answers = {
+        'no embeddings field': '{"model":"embed-model"}',
+        'no vector in the list': '{"embeddings":[]}',
+        'empty vector': '{"embeddings":[[]]}',
+        'vector that is not numbers': '{"embeddings":[["a","b"]]}',
+        'embeddings is not a list': '{"embeddings":"none"}',
+        // the shape of the superseded /api/embeddings endpoint is not what /api/embed answers
+        'superseded response shape': '{"embedding":[0.1,0.2,0.3]}',
+        'JSON null': 'null',
+    };
+    for (const [name, answer] of Object.entries(answers)) {
+        const server = await httpServer((req, res) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(answer);
+        });
+        try {
+            const model = new Ollama('embed-model', server.url, { request_timeout_ms: 2000 });
+            const { error } = await failure(() => model.embed('some text'));
+            assert.ok(error instanceof ModelInvalidResponseError, `${name}: got ${error.name}: ${error.message}`);
+            assert.equal(error.provider, 'ollama');
+            assert.equal(error.model, 'embed-model');
+            assert.equal(error.url, `${server.url}/api/embed`);
+        } finally {
+            await server.close();
+        }
+    }
+});
+
+test('embedding answer that is not JSON: rejects with ModelInvalidResponseError', LIMIT, async () => {
+    const server = await httpServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('not json');
     });
     try {
         const model = new Ollama('embed-model', server.url, { request_timeout_ms: 2000 });
@@ -150,6 +208,30 @@ test('empty embedding: rejects with ModelInvalidResponseError', LIMIT, async () 
         assert.ok(error instanceof ModelInvalidResponseError, `got ${error.name}: ${error.message}`);
     } finally {
         await server.close();
+    }
+});
+
+test('embedding HTTP errors: reject with ModelUnavailableError carrying the status', LIMIT, async () => {
+    const cases = [
+        [404, '404 page not found'], // an Ollama too old to have /api/embed
+        [404, '{"error":"model \\"embed-model\\" not found, try pulling it first"}'],
+        [400, '{"error":"this model does not support embeddings"}'],
+        [500, '{"error":"model runner has stopped"}'],
+    ];
+    for (const [status, text] of cases) {
+        const server = await httpServer((req, res) => {
+            res.writeHead(status, { 'Content-Type': 'application/json' });
+            res.end(text);
+        });
+        try {
+            const model = new Ollama('embed-model', server.url, { request_timeout_ms: 2000 });
+            const { error } = await failure(() => model.embed('some text'));
+            assert.ok(error instanceof ModelUnavailableError, `${status}: got ${error.name}: ${error.message}`);
+            assert.equal(error.status, status);
+            assert.equal(error.url, `${server.url}/api/embed`);
+        } finally {
+            await server.close();
+        }
     }
 });
 

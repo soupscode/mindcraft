@@ -10,8 +10,8 @@ register('./stub-hooks.mjs', {
     data: {
         stubs: {
             'src/mindcraft/mindcraft.js': `
-                export function init(host_public, port, auto_open_ui) {
-                    console.log('GENESIS_TEST_INIT ' + JSON.stringify({ host_public, port, auto_open_ui }));
+                export function init(host_public, port, auto_open_ui, mindserver_host) {
+                    console.log('GENESIS_TEST_INIT ' + JSON.stringify({ host_public, port, auto_open_ui, mindserver_host }));
                 }
                 export function createAgent(settings) {
                     console.log('GENESIS_TEST_AGENT ' + JSON.stringify(settings));

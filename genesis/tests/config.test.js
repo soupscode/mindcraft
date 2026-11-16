@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { REPO_ROOT, captureConsole } from './helpers/stubs.mjs';
-import { buildSettings, checkProfiles, REQUIRED_BLOCKED_ACTIONS } from '../lib/config.js';
+import { buildSettings, checkProfiles, checkSettings, REQUIRED_BLOCKED_ACTIONS, MINDSERVER_HOSTS } from '../lib/config.js';
 
 const GENESIS = path.join(REPO_ROOT, 'genesis');
 const PRELOAD = pathToFileURL(path.join(GENESIS, 'tests', 'helpers', 'preload-main-stubs.mjs')).href;
@@ -47,6 +47,8 @@ function assertGenesisSettings(settings) {
     assert.equal(settings.port, 25600);
     assert.equal(settings.auth, 'offline');
     assert.equal(settings.mindserver_port, 8081);
+    assert.equal(settings.mindserver_host, '0.0.0.0'); // reachable from the Docker network
+    assert.equal(settings.pathfinding_no_dig, true);   // agents never dig to get somewhere
     assert.equal(settings.auto_open_ui, false);
     assert.ok(!settings.init_message, 'there must be no start-up prompt');
     assert.equal(settings.allow_insecure_coding, false);
@@ -76,7 +78,7 @@ function filledInCopy() {
 test('main.js with the Genesis settings: effective settings are the intended ones', () => {
     const { status, stderr, init, agents } = run('main.js', { SETTINGS_JSON: JSON.stringify(genesis_settings) });
     assert.equal(status, 0, stderr);
-    assert.deepEqual(init, [{ host_public: false, port: 8081, auto_open_ui: false }]);
+    assert.deepEqual(init, [{ host_public: false, port: 8081, auto_open_ui: false, mindserver_host: '0.0.0.0' }]);
     assert.deepEqual(agents.map((a) => a.profile.name), NAMES);
     for (const settings of agents) assertGenesisSettings(settings);
 });
@@ -117,7 +119,7 @@ test('launcher: with the placeholders filled in, starts the four agents with the
     const { settings_file } = filledInCopy();
     const { status, stderr, init, agents } = run('genesis/start.js', { GENESIS_SETTINGS_FILE: settings_file });
     assert.equal(status, 0, stderr);
-    assert.deepEqual(init, [{ host_public: false, port: 8081, auto_open_ui: false }]);
+    assert.deepEqual(init, [{ host_public: false, port: 8081, auto_open_ui: false, mindserver_host: '0.0.0.0' }]);
     assert.deepEqual(agents.map((a) => a.profile.name), NAMES);
     for (const settings of agents) {
         assertGenesisSettings(settings);
@@ -141,6 +143,78 @@ test('launcher: coding stays off whatever the environment says', () => {
         for (const action of REQUIRED_BLOCKED_ACTIONS) assert.ok(settings.blocked_actions.includes(action));
         assert.equal(settings.host, '10.0.0.5'); // ordinary one-off overrides still apply
     }
+});
+
+test('main.js without Genesis: upstream defaults are unchanged (MindServer on localhost, digging as before)', () => {
+    const { status, stderr, init, agents } = run('main.js');
+    assert.equal(status, 0, stderr);
+    assert.deepEqual(init, [{ host_public: false, port: 8080, auto_open_ui: true, mindserver_host: 'localhost' }]);
+    assert.ok(agents.length > 0);
+    for (const settings of agents) {
+        assert.equal(settings.mindserver_host, 'localhost');
+        assert.equal(settings.pathfinding_no_dig, false);
+    }
+    // a settings override that does not mention the new settings leaves them alone
+    const overridden = run('main.js', { SETTINGS_JSON: JSON.stringify({ mindserver_port: 9000 }) });
+    assert.deepEqual(overridden.init, [{ host_public: false, port: 9000, auto_open_ui: true, mindserver_host: 'localhost' }]);
+    for (const settings of overridden.agents) assert.equal(settings.pathfinding_no_dig, false);
+});
+
+test('launcher: no digging while walking stays on whatever the environment says', () => {
+    const { settings_file } = filledInCopy();
+    const { status, stderr, agents } = run('genesis/start.js', {
+        GENESIS_SETTINGS_FILE: settings_file,
+        SETTINGS_JSON: JSON.stringify({ pathfinding_no_dig: false }),
+    });
+    assert.equal(status, 0, stderr);
+    assert.equal(agents.length, 4);
+    for (const settings of agents) assert.equal(settings.pathfinding_no_dig, true);
+});
+
+test('buildSettings: forces no digging while walking on', () => {
+    assert.equal(buildSettings({}).pathfinding_no_dig, true);
+    assert.equal(buildSettings({ pathfinding_no_dig: false }).pathfinding_no_dig, true);
+    assert.equal(buildSettings({}, '{"pathfinding_no_dig":false}').pathfinding_no_dig, true);
+    assert.equal(buildSettings(genesis_settings, '{"pathfinding_no_dig":"no"}', 'false').pathfinding_no_dig, true);
+});
+
+test('launcher: the MindServer address can be put back to localhost, but not to one the agents cannot reach', () => {
+    const { settings_file } = filledInCopy();
+    const local = run('genesis/start.js', {
+        GENESIS_SETTINGS_FILE: settings_file, SETTINGS_JSON: JSON.stringify({ mindserver_host: 'localhost' }),
+    });
+    assert.equal(local.status, 0, local.stderr);
+    assert.deepEqual(local.init, [{ host_public: false, port: 8081, auto_open_ui: false, mindserver_host: 'localhost' }]);
+
+    const elsewhere = run('genesis/start.js', {
+        GENESIS_SETTINGS_FILE: settings_file, SETTINGS_JSON: JSON.stringify({ mindserver_host: '172.18.0.5' }),
+    });
+    assert.equal(elsewhere.status, 1);
+    assert.match(elsewhere.stderr, /"mindserver_host" must be one of/);
+    assert.deepEqual(elsewhere.init, []);
+    assert.deepEqual(elsewhere.agents, []);
+});
+
+test('checkSettings: accepts only loopback and wildcard MindServer addresses', () => {
+    for (const host of MINDSERVER_HOSTS) assert.deepEqual(checkSettings({ mindserver_host: host }), []);
+    assert.deepEqual(checkSettings({}), []); // not set: upstream listens on localhost
+    assert.deepEqual(checkSettings(genesis_settings), []);
+    for (const host of ['172.18.0.5', 'agents', '', null, 8081, true]) {
+        const problems = checkSettings({ mindserver_host: host });
+        assert.equal(problems.length, 1, `accepted ${JSON.stringify(host)}`);
+        assert.match(problems[0], /mindserver_host/);
+    }
+});
+
+test('compose file: the MindServer port is not published, and the comment says how the dashboard reaches it', () => {
+    const text = readFileSync(path.join(GENESIS, 'compose.agents.yaml'), 'utf8');
+    const config_lines = text.split('\n').filter((line) => !line.trim().startsWith('#'));
+    for (const key of ['ports:', 'expose:', 'network_mode:']) {
+        assert.ok(!config_lines.some((line) => line.trim().startsWith(key)), `compose file has "${key}"`);
+    }
+    assert.match(text, /# .*http:\/\/agents:8081/);
+    assert.equal(genesis_settings.mindserver_host, '0.0.0.0');
+    assert.equal(genesis_settings.mindserver_port, 8081);
 });
 
 test('buildSettings: forces coding off and keeps the required actions blocked', () => {

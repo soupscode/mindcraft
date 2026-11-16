@@ -45,7 +45,7 @@ export function logoutAgent(agentName) {
 }
 
 // Initialize the server
-export function createMindServer(host_public = false, port = 8080) {
+export function createMindServer(host_public = false, port = 8080, listen_host = 'localhost') {
     const app = express();
     server = http.createServer(app);
     io = new Server(server);
@@ -279,7 +279,9 @@ export function createMindServer(host_public = false, port = 8080) {
     if (host_public) {
         console.log('Public hosting not supported yet. Using localhost.');
     }
-    const host = 'localhost';
+    // listen_host comes from the mindserver_host setting. Agents always connect through
+    // localhost (src/agent/mindserver_proxy.js), so it must be a loopback or wildcard address.
+    const host = listen_host || 'localhost';
     server.listen(port, host, () => {
         console.log(`MindServer running on port ${port} on host ${host}`);
     });

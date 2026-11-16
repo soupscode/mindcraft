@@ -12,6 +12,12 @@ export const REQUIRED_BLOCKED_ACTIONS = ['!newAction', '!startConversation', '!e
 // Values that mean "not filled in yet".
 export const PLACEHOLDERS = ['GENESIS_MODEL', 'DESKTOP_IP'];
 
+// Addresses the MindServer may listen on. The agents always connect to it through
+// localhost (src/agent/mindserver_proxy.js), so only loopback and "every interface"
+// addresses keep them connected. "0.0.0.0" is what makes it reachable from another
+// container on the same Docker network.
+export const MINDSERVER_HOSTS = ['localhost', '127.0.0.1', '::1', '0.0.0.0', '::'];
+
 // file_settings: the parsed genesis/settings.json
 // env_settings_json: an existing SETTINGS_JSON value (operator override), or undefined
 // load_memory_env: the GENESIS_LOAD_MEMORY value, or undefined. "false" starts every agent
@@ -27,12 +33,27 @@ export function buildSettings(file_settings, env_settings_json, load_memory_env)
     if (load_memory_env === 'false') settings.load_memory = false;
     // Model-written code stays off. Not configurable from Genesis.
     settings.allow_insecure_coding = false;
+    // Agents never dig through blocks to get somewhere (they destroyed their own builds).
+    // Not configurable from Genesis. See genesis/lib/no_dig_pathing.js.
+    settings.pathfinding_no_dig = true;
     const blocked = Array.isArray(settings.blocked_actions) ? [...settings.blocked_actions] : [];
     for (const action of REQUIRED_BLOCKED_ACTIONS) {
         if (!blocked.includes(action)) blocked.push(action);
     }
     settings.blocked_actions = blocked;
     return settings;
+}
+
+// Checks the settings that are not about profiles. Returns a list of problems (empty = fine).
+// No mindserver_host at all is fine: upstream then listens on localhost.
+export function checkSettings(settings) {
+    const problems = [];
+    const host = settings.mindserver_host;
+    if (host !== undefined && !MINDSERVER_HOSTS.includes(host)) {
+        problems.push(`settings: "mindserver_host" must be one of ${MINDSERVER_HOSTS.join(', ')} (got ${JSON.stringify(host)}); `
+            + 'the agents connect through localhost and would not find the MindServer on another address');
+    }
+    return problems;
 }
 
 // Checks each profile listed in the settings. Returns a list of problems (empty = fine).

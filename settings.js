@@ -6,6 +6,7 @@ const settings = {
 
     // the mindserver manages all agents and hosts the UI
     "mindserver_port": 8080,
+    "mindserver_host": "localhost", // address the mindserver listens on. "0.0.0.0" also accepts connections from other machines/containers; it has no login, so only do that on a trusted network
     "auto_open_ui": true, // opens UI in browser on startup
     
     "base_profile": "assistant", // survival, assistant, creative, or god_mode
@@ -54,6 +55,7 @@ const settings = {
     "chat_bot_messages": true, // publicly chat messages to other bots
 
     "spawn_timeout": 30, // num seconds allowed for the bot to spawn before throwing error. Increase when spawning takes a while.
+    "pathfinding_no_dig": false, // true: bots never break blocks to get somewhere. With no dig-free path, movement stops and the action fails with "no_safe_path"
     "block_place_delay": 0, // delay between placing blocks (ms) if using newAction. helps avoid bot being kicked by anti-cheat mechanisms on servers.
   
     "log_all_prompts": false, // log ALL prompts to file
