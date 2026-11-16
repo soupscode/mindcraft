@@ -3,6 +3,7 @@ import * as world from "./world.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import settings from "../../../settings.js";
+import { isNoDigPathing, goToGoalWithoutDigging } from '../../../genesis/lib/no_dig_pathing.js';
 
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
@@ -517,6 +518,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             }
             else {
                 log(bot, `Failed to collect ${blockType}: ${err}.`);
+                if (err?.no_safe_path) break; // pathfinding_no_dig: the nearest one cannot be reached without digging
                 continue;
             }
         }
@@ -587,7 +589,7 @@ export async function breakBlockAt(bot, x, y, z) {
             movements.canPlaceOn = false;
             movements.allow1by1towers = false;
             bot.pathfinder.setMovements(movements);
-            await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
+            if (!(await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4)))) return false; // false: no_safe_path
         }
         if (bot.game.gameMode !== 'creative') {
             await bot.tool.equipForBlock(block);
@@ -766,7 +768,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         let pos = targetBlock.position;
         let movements = new pf.Movements(bot);
         bot.pathfinder.setMovements(movements);
-        await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
+        if (!(await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4)))) return false; // false: no_safe_path
     }
 
     // will throw error if an entity is in the way, and sometimes even if the block was placed
@@ -1082,6 +1084,17 @@ export async function goToGoal(bot, goal) {
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
 
+    if (isNoDigPathing(bot)) {
+        // pathfinding_no_dig setting: never dig to get somewhere, so there is no destructive fallback.
+        // Returns false after a "no_safe_path" log line when there is no dig-free path.
+        const doorCheckInterval = startDoorInterval(bot);
+        try {
+            return await goToGoalWithoutDigging(bot, goal, nonDestructiveMovements);
+        } finally {
+            clearInterval(doorCheckInterval);
+        }
+    }
+
     const destructiveMovements = new pf.Movements(bot);
 
     let final_movements = destructiveMovements;
@@ -1216,8 +1229,9 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
     const progressInterval = setInterval(checkDigProgress, 1000);
     
     try {
-        await goToGoal(bot, new pf.goals.GoalNear(x, y, z, min_distance));
+        const path_found = await goToGoal(bot, new pf.goals.GoalNear(x, y, z, min_distance));
         clearInterval(progressInterval);
+        if (!path_found) return false; // only with pathfinding_no_dig: no_safe_path is already in the log
         const distance = bot.entity.position.distanceTo(new Vec3(x, y, z));
         if (distance <= min_distance+1) {
             log(bot, `You have reached at ${x}, ${y}, ${z}.`);
@@ -1267,8 +1281,8 @@ export async function goToNearestBlock(bot, blockType,  min_distance=2, range=64
         return false;
     }
     log(bot, `Found ${blockType} at ${block.position}. Navigating...`);
-    await goToPosition(bot, block.position.x, block.position.y, block.position.z, min_distance);
-    return true;
+    const reached = await goToPosition(bot, block.position.x, block.position.y, block.position.z, min_distance);
+    return isNoDigPathing(bot) ? reached : true; // pathfinding_no_dig: an unreachable block is a failure
 }
 
 export async function goToNearestEntity(bot, entityType, min_distance=2, range=64) {
@@ -1287,8 +1301,8 @@ export async function goToNearestEntity(bot, entityType, min_distance=2, range=6
     }
     let distance = bot.entity.position.distanceTo(entity.position);
     log(bot, `Found ${entityType} ${distance} blocks away.`);
-    await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
-    return true;
+    const reached = await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
+    return isNoDigPathing(bot) ? reached : true; // pathfinding_no_dig: an unreachable entity is a failure
 }
 
 export async function goToPlayer(bot, username, distance=3) {
@@ -1322,7 +1336,7 @@ export async function goToPlayer(bot, username, distance=3) {
     distance = Math.max(distance, 0.5);
     const goal = new pf.goals.GoalFollow(player, distance);
 
-    await goToGoal(bot, goal, true);
+    if (!(await goToGoal(bot, goal, true))) return false; // false: no_safe_path
 
     log(bot, `You have reached ${username}.`);
 }
@@ -1421,7 +1435,7 @@ export async function moveAway(bot, distance) {
         }
     }
 
-    await goToGoal(bot, inverted_goal);
+    if (!(await goToGoal(bot, inverted_goal))) return false; // false: no_safe_path
     let new_pos = bot.entity.position;
     log(bot, `Moved away from ${pos.floored()} to ${new_pos.floored()}.`);
     return true;
@@ -1621,7 +1635,7 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
     if (bot.entity.position.distanceTo(block.position) > 4.5) {
         let pos = block.position;
         bot.pathfinder.setMovements(new pf.Movements(bot));
-        await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
+        if (!(await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4)))) return false; // false: no_safe_path
     }
     if (block.name !== 'farmland') {
         let hoe = bot.inventory.items().find(item => item.name.includes('hoe'));
@@ -1666,7 +1680,7 @@ export async function activateNearestBlock(bot, type) {
     if (bot.entity.position.distanceTo(block.position) > 4.5) {
         let pos = block.position;
         bot.pathfinder.setMovements(new pf.Movements(bot));
-        await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
+        if (!(await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4)))) return false; // false: no_safe_path
     }
     await bot.activateBlock(block);
     log(bot, `Activated ${type} at x:${block.position.x.toFixed(1)}, y:${block.position.y.toFixed(1)}, z:${block.position.z.toFixed(1)}.`);
@@ -1721,7 +1735,7 @@ async function findAndGoToVillager(bot, id) {
         try {
             bot.modes.pause('unstuck');
             const goal = new pf.goals.GoalFollow(entity, 2);
-            await goToGoal(bot, goal);
+            if (!(await goToGoal(bot, goal))) return null; // false: no_safe_path
             
             
             log(bot, 'Successfully reached villager');

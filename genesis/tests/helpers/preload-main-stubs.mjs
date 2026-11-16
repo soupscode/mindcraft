@@ -10,13 +10,20 @@ register('./stub-hooks.mjs', {
     data: {
         stubs: {
             'src/mindcraft/mindcraft.js': `
-                export function init(host_public, port, auto_open_ui) {
-                    console.log('GENESIS_TEST_INIT ' + JSON.stringify({ host_public, port, auto_open_ui }));
+                export function init(host_public, port, auto_open_ui, mindserver_host) {
+                    console.log('GENESIS_TEST_INIT ' + JSON.stringify({ host_public, port, auto_open_ui, mindserver_host }));
                 }
                 export function createAgent(settings) {
                     console.log('GENESIS_TEST_AGENT ' + JSON.stringify(settings));
                     return { success: true, error: null };
                 }`,
+            // only loaded by the launcher when the genesis_events setting is on
+            'src/mindcraft/mindserver.js': `
+                export function setEventSink(sink) {
+                    console.log('GENESIS_TEST_EVENT_SINK ' + JSON.stringify({ is_function: typeof sink === 'function' }));
+                }`,
+            // as if the package was not installed, also on a machine where it is
+            'redis': "throw Object.assign(new Error(\"Cannot find package 'redis' (test stand-in)\"), { code: 'ERR_MODULE_NOT_FOUND' });",
             'yargs': `
                 const chain = { option() { return chain; }, help() { return chain; }, alias() { return chain; }, parse() { return {}; } };
                 export default function yargs() { return chain; }`,

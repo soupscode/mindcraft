@@ -7,6 +7,7 @@ import { plugin as pvp } from 'mineflayer-pvp';
 import { plugin as collectblock } from 'mineflayer-collectblock';
 import { plugin as autoEat } from 'mineflayer-auto-eat';
 import plugin from 'mineflayer-armor-manager';
+import { noDigPathingPlugin } from '../../genesis/lib/no_dig_pathing.js';
 const armorManager = plugin;
 let mc_version = settings.minecraft_version;
 let mcdata = null;
@@ -115,6 +116,7 @@ export function initBot(username) {
     };
 
     bot.loadPlugin(pathfinder);
+    if (settings.pathfinding_no_dig) bot.loadPlugin(noDigPathingPlugin); // off by default: bots never dig to get somewhere
     bot.loadPlugin(pvp);
     bot.loadPlugin(collectblock);
     bot.loadPlugin(autoEat);

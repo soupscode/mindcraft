@@ -22,6 +22,7 @@ function runAsAction (actionFn, resume = false, timeout = -1) {
             skills_ok = await runWithSkillTracking(() => actionFn(agent, ...args));
             return skills_ok;
         };
+        actionFnWithAgent.args = args; // shown in the skill.started event
         const code_return = await agent.actions.runAction(`action:${actionLabel}`, actionFnWithAgent, { timeout, resume });
         if (code_return.interrupted && !code_return.timedout)
             return;

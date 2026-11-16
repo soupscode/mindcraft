@@ -2,6 +2,7 @@ import { io } from 'socket.io-client';
 import convoManager from './conversation.js';
 import { setSettings } from './settings.js';
 import { getFullState } from './library/full_state.js';
+import { initAgentEvents } from '../../genesis/events/agent_emit.js';
 
 // agent's individual connection to the mindserver
 // always connect to localhost
@@ -92,6 +93,11 @@ class MindServerProxy {
                 }
                 setSettings(response.settings);
                 this.socket.emit('connect-agent-process', name);
+                // structured events go to the mindserver over this socket. does nothing unless the genesis_events setting is on
+                initAgentEvents({ agent: name, settings: response.settings, send: (event) => {
+                    if (!this.socket.connected) throw new Error('not connected to MindServer');
+                    this.socket.emit('genesis-event', event);
+                } });
                 resolve();
             });
         });

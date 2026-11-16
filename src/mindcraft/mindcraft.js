@@ -9,12 +9,12 @@ let agent_processes = {};
 let agent_count = 0;
 let mindserver_port = 8080;
 
-export async function init(host_public=false, port=8080, auto_open_ui=true) {
+export async function init(host_public=false, port=8080, auto_open_ui=true, mindserver_host='localhost') {
     if (connected) {
         console.error('Already initiliazed!');
         return;
     }
-    mindserver = createMindServer(host_public, port);
+    mindserver = createMindServer(host_public, port, mindserver_host);
     mindserver_port = port;
     connected = true;
     if (auto_open_ui) {
