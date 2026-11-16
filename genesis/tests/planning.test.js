@@ -85,6 +85,8 @@ test('context: the prompt stays within about 1,200 tokens and keeps 240 of them 
     assert.match(small.context, /Long-term goals: 1\) Feed the camp\./);
     assert.match(small.context, /Carrying: /);
     assert.equal(describeTrigger({ kind: 'step_failed', detail: { reason: 'no_safe_path' } }), 'a goal failed (no_safe_path).');
+    assert.equal(describeTrigger({ kind: 'reflex_interrupt', detail: { option_id: 'travel:home' } }), 'a reflex interrupted what you were doing.');
+    assert.equal(describeTrigger({ kind: 'reflex_interrupt', detail: { cause: 'death', gave_up: 'gather_blocks:oak_log:8' } }), 'you died, and the goal you were on was given up (gather_blocks:oak_log:8).');
     assert.deepEqual(planOptions([{ id: 'a:b', description: 'x'.repeat(200), title: 't', skill: 's' }]), [{ id: 'a:b', description: `${'x'.repeat(79)}…` }]);
     await t.stop();
 });
@@ -180,25 +182,34 @@ test('the context is rebuilt when the request is dispatched, not when it was que
     await t.stop();
 });
 
-test('the 21st call in an hour is refused and recorded, and the agent carries on with its routine', async () => {
+test('the 41st call in an hour is refused and recorded, and the agent carries on with its routine', async () => {
     const t = await town({ agents: ['Arthur'], inventories: { Arthur: { wooden_axe: 1, wooden_pickaxe: 1, bread: 4 } } });
     const arthur = t.agents.Arthur;
     t.world.durations = (command, args, far) => 500 + far * 200;
     t.world.regrow_ms = 4 * MINUTE;
-    // the model always picks a walk: done in seconds, so the agent asks again as soon as it may
+    // the model always picks a walk: done in seconds, so the agent asks again as soon as it may.
+    // 90 seconds between calls allow no more than 40 in an hour, so the limit is only reached with
+    // repair retries: after the first two calls the first reply to every request is invalid, and its
+    // one retry counts (2 calls, then 19 requests of 2 calls each: 40)
     const walk = (request, ids) => reply(ids.find((id) => id.startsWith('travel:')) ?? ids[0]);
-    t.model.chat = ((chat) => (request) => { t.model.replies.push(walk); return chat(request); })(t.model.chat);
+    t.model.chat = ((chat) => (request) => {
+        const n = t.model.requests.length; // calls made before this one
+        t.model.replies.push(n >= 2 && n < 40 && n % 2 === 0 ? 'not a plan' : walk);
+        return chat(request);
+    })(t.model.chat);
     t.run();
     await t.clock.advance(45 * MINUTE);
 
-    assert.equal(t.model.requests.length, 20, 'the model was asked more than 20 times in the hour');
+    assert.equal(BUDGET_DEFAULTS.max_calls, 40);
+    assert.equal(t.model.requests.length, 40, 'the model was asked more than 40 times in the hour');
     const outcomes = t.calls.map((call) => call.outcome);
-    assert.deepEqual(outcomes.slice(0, 20), Array(20).fill('ok'));
-    assert.deepEqual(outcomes.slice(20), ['refused_budget'], 'the 21st call is refused once, and recorded');
-    const refused = t.calls[20];
+    assert.deepEqual(outcomes.slice(0, 40), Array.from({ length: 40 }, (_, i) => (i >= 2 && i % 2 === 0 ? 'invalid' : 'ok')));
+    assert.equal(t.calls.slice(0, 40).filter((call) => call.attempt === 2).length, 19, 'the repair retries were not counted as calls');
+    assert.deepEqual(outcomes.slice(40), ['refused_budget'], 'the 41st call is refused once, and recorded');
+    const refused = t.calls[40];
     assert.equal(refused.agent, 'Arthur');
     assert.equal(refused.raw_output, null);
-    assert.match(refused.errors[0], /hourly budget used up \(20 calls per hour\)/);
+    assert.match(refused.errors[0], /hourly budget used up \(40 calls per hour\)/);
     assert.equal(arthur.results.at(-1).reason, 'budget_exhausted');
     assert.equal(arthur.runtime.planner.stats().refused, 1);
 
@@ -211,11 +222,11 @@ test('the 21st call in an hour is refused and recorded, and the agent carries on
     await t.clock.advance(10 * MINUTE);
     assert.equal(arthur.runtime.planner.stats().requests, asked, 'the agent kept asking while its budget was used up');
     assert.ok(arthur.runtime.planner.stats().held_back > 0);
-    assert.equal(t.model.requests.length, 20);
+    assert.equal(t.model.requests.length, 40);
 
     // when the oldest call is an hour old, it may ask again
     await t.clock.advance(20 * MINUTE);
-    assert.ok(t.model.requests.length > 20, 'the agent never asked again after its budget came back');
+    assert.ok(t.model.requests.length > 40, 'the agent never asked again after its budget came back');
     assert.equal(t.calls.filter((call) => call.outcome === 'refused_budget').length, arthur.runtime.planner.stats().refused, 'a refusal was not recorded');
     assertEventsValid(arthur);
     await t.stop();
@@ -354,8 +365,17 @@ test('triggers: a step that failed after its retries, a reflex, another agent an
 
     arthur.runtime.agentRequest('Mira', 'can you bring me a hoe?');
     assert.deepEqual(requests(), ['step_failed', 'agent_request']);
+    // decided: a death with no goal of the planner or the operator to resume (here the agent is idle) sends no planning request
     await arthur.runtime.died({ x: 20, y: 64, z: 20 });
+    assert.deepEqual(requests(), ['step_failed', 'agent_request']);
+    assert.equal(arthur.runtime.stats().deaths_without_request, 1);
+    // a reflex that interrupts a goal still asks, once per goal
+    t.world.fail = (call) => (call.command === 'goToPosition' ? { interrupted: true } : null);
+    const again = await arthur.runtime.goals.pushShortTerm('Arthur', { title: 'Store the logs', option_id: 'store_items:shared:oak_log' }, { reason: 'the operator asked', source: 'operator' });
+    arthur.runtime.executor.noteGoals(again.goals.short_term, { source: 'operator' });
+    for (let i = 0; i < 3; i++) await arthur.runtime.executor.runOnce();
     assert.deepEqual(requests(), ['step_failed', 'agent_request', 'reflex_interrupt']);
+    t.world.fail = null;
     arthur.runtime.operatorMessage('Soup', 'are you all right?');
     assert.deepEqual(requests(), ['step_failed', 'agent_request', 'reflex_interrupt', 'operator_message']);
     await settle();

@@ -16,16 +16,17 @@ import { loadZones } from '../catalog/zones.js';
 import { createCatalog } from '../catalog/catalog.js';
 import { createLedgerClient } from '../catalog/ledger_client.js';
 import { fileBlueprints } from '../catalog/blueprints.js';
-import { createScaffoldTracker } from '../executor/scaffold.js';
+import { createScaffoldTracker, placementSink } from '../executor/scaffold.js';
 import { createCheckpointStore } from '../store/checkpoint.js';
 import { nodeFiles } from '../store/node_files.js';
 import { socketGoalStorage } from '../planning/host.js';
 import { createAgentRuntime } from '../agent/runtime.js';
-import { DEFAULT_CHECKPOINT_DIR, DEFAULT_WORLD_FILE } from '../agent/hooks.js';
+import { DEFAULT_CHECKPOINT_DIR, DEFAULT_WORLD_FILE, genesisRecoveryOn, genesisRelayOn } from '../agent/hooks.js';
 import { installBotGuards } from '../lib/bot_guards.js';
 import { isNoDigPathing } from '../lib/no_dig_pathing.js';
 import { createBotView } from './bot_world.js';
 import { createBotOps } from './bot_ops.js';
+import { createBotRecovery } from './bot_recovery.js';
 
 // Blueprints in upstream's construction format (src/agent/npc/construction/<name>.json).
 export { fileBlueprints };
@@ -42,7 +43,9 @@ export async function buildBotRuntime(agent, settings) {
     if (!zones.home(agent.name)) throw new Error(`${agent.name} has no entry under "agents" in the world config`);
 
     const scaffold = createScaffoldTracker({ zones });
-    const guards = installBotGuards(bot, { zones, onPlace: (pos) => scaffold.placed(pos) });
+    // every block the bot places is tracked as scaffolding, except a torch of upstream's idle torch reflex
+    // (decided: those may stay in the camp, the field and the plots; genesis/executor/scaffold.js)
+    const guards = installBotGuards(bot, { zones, onPlace: placementSink(scaffold, () => agent.actions?.currentActionLabel ?? null) });
     const socket = serverProxy.getSocket();
     const send = (event, ...args) => {
         if (!socket.connected) throw new Error('not connected to MindServer');
@@ -67,20 +70,40 @@ export async function buildBotRuntime(agent, settings) {
         ledger,
         emit: emitEvent,
         getSeq: () => agentEventStats()?.seq ?? 0,
+        // recovery: the watchdog and its ladder (off only with "genesis_recovery": { "enabled": false })
+        recovery_ops: genesisRecoveryOn(settings) ? createBotRecovery(agent, { skills }) : null,
+        watchdog: settings.genesis_recovery?.watchdog ?? {},
+        death: settings.genesis_recovery?.death ?? {},
+        // agent messages through the relay in the MindServer (off only with "genesis_relay": { "enabled": false })
+        messaging: genesisRelayOn(settings),
+        // the relay's limits as the settings have them: the agent's desk knows beforehand what the relay would reject
+        relay_limits: settings.genesis_relay?.limits ?? {},
     });
 
     socket.on('genesis-plan-context', (request, ack) => runtime.onPlanContext(request, ack));
     socket.on('genesis-plan-queued', (message) => runtime.onPlanQueued(message));
     socket.on('genesis-plan-result', (result) => { runtime.onPlanResult(result).catch((err) => logLine({ event: 'genesis_plan_result_error', message: String(err?.message ?? err) })); });
     socket.on('genesis-gate', (message) => runtime.onGate(message));
+    // agent messages: what the relay hands this agent, and the one line it is to say for each message it sent.
+    // The line goes out through upstream's own chat (src/agent/agent.js, openChat, lines 415-440); nothing an
+    // agent hears in chat is ever acted on (genesis/agent/hooks.js, genesisHears).
+    const failedMessage = (err) => logLine({ event: 'genesis_message_error', message: String(err?.message ?? err) });
+    socket.on('genesis-msg', (message) => { runtime.onMessage(message).catch(failedMessage); });
+    socket.on('genesis-msg-state', (update) => { runtime.onMessageState(update).catch(failedMessage); });
+    socket.on('genesis-msg-speak', (said) => {
+        if (typeof said?.line !== 'string' || said.line.length === 0) return;
+        Promise.resolve(agent.openChat(said.line)).catch(failedMessage);
+    });
 
-    // a death: upstream stops the action (src/agent/agent.js, the 'death' handler); once the bot
-    // stands again the runtime gives up the goal in hand and the routine applies its death rule
+    // a death: upstream stops the action (src/agent/agent.js, the 'death' handler, lines 476-479).
+    // Nothing runs while the bot is down; once it stands again the runtime decides (genesis/agent/runtime.js,
+    // died): a goal the planner or the operator chose is kept and resumed after the walk home and
+    // the re-equip, a goal of the routine is given up and the routine applies its own death rule
     bot.on('death', () => {
         const at = bot.entity?.position;
         const point = at ? { x: at.x, y: at.y, z: at.z } : null;
         const failed = (err) => logLine({ event: 'genesis_death_error', message: String(err?.message ?? err) });
-        runtime.executor.abandon('died').catch(failed); // at once: no step of the old goal is tried again while the bot is down
+        runtime.deathBegan(); // at once: no step is tried again while the bot is down
         bot.once('spawn', () => { runtime.died(point).catch(failed); });
     });
     return runtime;

@@ -1,0 +1,32 @@
+{
+    "name": "genesis-dashboard",
+    "private": true,
+    "type": "module",
+    "description": "Genesis web dashboard: reads the event stream, keeps history in Postgres, serves the Preact front end and one server-sent-events stream.",
+    "engines": { "node": ">=20" },
+    "scripts": {
+        "build": "node scripts/build.mjs",
+        "typecheck": "tsc --noEmit",
+        "test": "node --import tsx --test test/*.test.ts",
+        "start": "node dist/server.mjs",
+        "migrate": "node dist/server.mjs --migrate-only"
+    },
+    "dependencies": {
+        "@fastify/static": "^8.0.0",
+        "fastify": "^5.0.0",
+        "pg": "^8.11.0",
+        "redis": "^4.7.0",
+        "socket.io-client": "^4.8.0"
+    },
+    "devDependencies": {
+        "@fontsource/cormorant-garamond": "^5.0.0",
+        "@fontsource/inter": "^5.0.0",
+        "@fontsource/jetbrains-mono": "^5.0.0",
+        "@types/node": "^20.0.0",
+        "@types/pg": "^8.11.0",
+        "esbuild": "^0.25.0",
+        "preact": "^10.24.0",
+        "tsx": "^4.19.0",
+        "typescript": "~5.9.0"
+    }
+}

@@ -20,12 +20,19 @@
 //     nothing started, until resume(). The hold is in the checkpoint, so it survives a restart,
 //     and it is emitted as agent.state "held". A held agent has not failed: nothing about a
 //     hold is counted or reported as a failure.
+//   - recovery (genesis/recovery): pause() while the bot is down (it died and has not
+//     respawned); detour() runs goals a chooser hands out (walk home, re-equip) while the goal
+//     in hand is kept, and then carries on at the SAME step, with no planning trigger;
+//     expectInterrupt() and park() are how the watchdog ladder stops a step on purpose
+//     (a new try that is not a reflex and not a failed attempt, or the step parked as "stuck").
 //
 // Everything outside is injected:
 //   catalog      genesis/catalog/catalog.js
 //   goals        the goal store (genesis/store/goal_store.js)
 //   checkpoints  the checkpoint store (genesis/store/checkpoint.js)
 //   ops          { run(command, args, { permit, corr, cleanup }) -> Promise<{ ok, interrupted, timedout, output }> }
+//                (a step that is not an upstream skill, the message of an ask_agent or offer_agent goal,
+//                is handed on by the agent runtime before it reaches the bot: genesis/agent/runtime.js)
 //                permit: null | { dig: (pos) -> true where digging stays forbidden, no_place: boolean }
 //   state        () -> { agent, view, ledger, avoid, now }   the world as it is (see genesis/catalog/templates.js)
 //   emit         (type, data, { corr, severity })            genesis/events/agent_emit.js shape
@@ -36,7 +43,7 @@
 //   chooseWork   async () -> { goal: { title, option_id }, reason, routine? } | { idle_ms } | null
 //                asked when the queue is empty (the role routine, step 9); a goal it returns is
 //                queued with source "routine"
-//   extras       () -> { routine, pending_request, places }   more for the checkpoint
+//   extras       () -> { routine, pending_request, places, recovery }   more for the checkpoint
 //   ids          () -> string    ids of decisions (ULIDs by default)
 //
 // Depends only on other Genesis files.
@@ -57,7 +64,12 @@ export const EXECUTOR_DEFAULTS = Object.freeze({
 
 // Reasons no second try can change: the step asked for something that is never allowed.
 const FINAL_REASONS = new Set(['protected_zone', 'outside_plot', 'outside_field', 'cell_occupied', 'unknown_command', 'unknown_option', 'plot_not_registered',
-    'contested_claim']); // another agent holds the items: trying again at once changes nothing
+    'contested_claim', // another agent holds the items: trying again at once changes nothing
+    'stuck']);         // the watchdog parked the step (genesis/recovery/watchdog.js): it was tried in every way already
+
+// A message the relay did not take (ask_agent, offer_agent: "relay_rate_limit", ...): sending it again at once
+// would only be refused again, and count against the agent's messages.
+const isFinal = (reason) => FINAL_REASONS.has(reason) || String(reason).startsWith('relay_');
 
 const copy = (value) => JSON.parse(JSON.stringify(value));
 
@@ -71,7 +83,8 @@ export function createExecutor({
         if (options[key] !== undefined) config[key] = options[key];
     }
     const nextId = ids ?? createUlidFactory({ now: clock.now });
-    const stats = { goals_started: 0, goals_completed: 0, goals_failed: 0, goals_dropped: 0, steps_done: 0, steps_failed: 0, steps_skipped: 0, interruptions: 0, resumed: 0, holds: 0 };
+    const stats = { goals_started: 0, goals_completed: 0, goals_failed: 0, goals_dropped: 0, steps_done: 0, steps_failed: 0, steps_skipped: 0, interruptions: 0, resumed: 0, holds: 0,
+        recovery_interruptions: 0, steps_parked_stuck: 0, detours: 0 };
     const sources = new Map();       // goal id -> { source, call_id }: who put the goal in the queue
     const removal_pending = new Map(); // goal id -> meta: goals that ended while the goal store could not be written
 
@@ -85,11 +98,17 @@ export function createExecutor({
     let started = false;
     let last_outcome = null;    // { option_id, title, outcome, reason } of the goal that ended last
     let hold = null;            // { by, reason, at } while the operator holds the agent (!stop), else null
+    let paused = null;          // a reason while the bot is down (it died and has not respawned): nothing runs
+    let detour = null;          // { reason, next, onEnd, main, goals_run } while a recovery detour runs; main is the goal kept for afterwards
+    let expected_interrupt = null; // set by the watchdog right before it stops the running step on purpose
+    let park_request = null;    // the reason the watchdog parks the current step with
+    const after_turn = [];      // what waits until the thing the executor is doing right now is done
 
     const say = (type, data, extra = {}) => {
         try { return emit(type, data, { corr: plan?.id ?? null, ...extra }); } catch { return null; }
     };
     const trigger = (kind, detail = {}) => {
+        if (detour) return; // a recovery detour never asks the planner: it is carried out by code alone
         try { onTrigger({ kind, detail }); } catch { /* planning is never allowed to stop the work */ }
     };
 
@@ -102,17 +121,19 @@ export function createExecutor({
         const current = state();
         const position = current.view.position();
         const more = extras() ?? {};
+        const kept = detour ? detour.main : plan; // during a detour the checkpoint keeps the goal that goes on afterwards
         return {
             v: 1,
             agent,
             seq: Math.max(0, Math.floor(Number(getSeq()) || 0)),
-            plan: plan ? copy(plan) : null,
+            plan: kept ? copy(kept) : null,
             routine: more.routine ?? null,
             position: { x: position.x, y: position.y, z: position.z, dimension: current.view.dimension?.() ?? zones?.dimension ?? 'overworld' },
             places: { ...(more.places ?? {}), scaffold: scaffold ? scaffold.snapshot() : [] },
             pending_request: more.pending_request ?? null,
             budgets: {},
             hold: hold ? { ...hold } : null,
+            ...(more.recovery !== undefined && more.recovery !== null ? { recovery: copy(more.recovery) } : {}),
         };
     }
 
@@ -137,7 +158,7 @@ export function createExecutor({
         return false;
     }
 
-    async function endPlan(outcome, reason, meta) {
+    async function endPlan(outcome, reason, meta, more = {}) {
         const ended = plan;
         last_outcome = { option_id: ended.goal.option_id, title: ended.goal.title, outcome, reason: reason ?? null, at: clock.now() };
         await removeGoal(ended.goal.id, meta);
@@ -145,7 +166,7 @@ export function createExecutor({
         interruptions = 0;
         reflex_reported = false;
         await boundary();
-        try { onGoalEnd({ ...last_outcome, source: ended.source, goal_id: ended.goal.id }); } catch { /* the listener's problem */ }
+        try { onGoalEnd({ ...last_outcome, ...more, source: ended.source, origin: ended.goal.origin ?? null, goal_id: ended.goal.id }); } catch { /* the listener's problem */ }
         return (await queueOf())?.length ?? 0;
     }
 
@@ -209,7 +230,7 @@ export function createExecutor({
             last_outcome = { option_id: goal.option_id, title: goal.title, outcome: 'dropped', reason, at: clock.now() };
             await removeGoal(goal.id, { reason: `dropped before starting: ${reason}`, source: 'executor', call_id: origin.call_id ?? null });
             say('agent.state', { state: 'goal_dropped', detail: { goal_id: goal.id, option_id: goal.option_id, reason } }, { severity: 'warn' });
-            try { onGoalEnd({ ...last_outcome, source: origin.source, goal_id: goal.id }); } catch { /* the listener's problem */ }
+            try { onGoalEnd({ ...last_outcome, source: origin.source, origin: origin.source, goal_id: goal.id }); } catch { /* the listener's problem */ }
             const left = (await queueOf())?.length ?? 0;
             if (left === 0) trigger('goal_complete', { outcome: 'dropped', reason, option_id: goal.option_id });
             return { kind: 'goal_dropped', goal_id: goal.id, reason };
@@ -220,12 +241,15 @@ export function createExecutor({
             // origin: who queued the goal (planner, routine, operator). The checkpoint's plan.source
             // only knows "model" and "routine": everything that is not the routine is filed under "model".
             goal: { id: goal.id, title: goal.title, option_id: goal.option_id, skill: resolved.skill, origin: origin.source, call_id: origin.call_id ?? null, baseline: built.baseline ?? {} },
-            source: origin.source === 'routine' ? 'routine' : 'model',
+            // a recovery detour is scripted work like a routine's: it never places a block either
+            source: origin.source === 'routine' || origin.source === 'recovery' ? 'routine' : 'model',
             cursor: 0,
             steps: built.steps.map((step, i) => ({ i, command: step.command, args: copy(step.args), status: 'pending', attempts: 0, progress: { done: 0, total: null } })),
         };
         interruptions = 0;
         reflex_reported = false;
+        park_request = null; // what the watchdog asked of an earlier goal is not meant for this one
+        expected_interrupt = null;
         stats.goals_started++;
         say('agent.decision', {
             decision_id: plan.id, summary: goal.title, trigger: origin.source, command: resolved.skill, args: [goal.option_id],
@@ -250,7 +274,7 @@ export function createExecutor({
     async function stepFailed(step, reason) {
         const failed = plan;
         stats.steps_failed++;
-        if (step.attempts < config.max_attempts && !FINAL_REASONS.has(reason)) {
+        if (step.attempts < config.max_attempts && !isFinal(reason)) {
             await boundary();
             return { kind: 'step_retry', step: step.i, reason, attempts: step.attempts, wait_ms: config.retry_gap_ms };
         }
@@ -261,7 +285,7 @@ export function createExecutor({
         await endPlan('failed', reason, {
             reason: `failed: ${reason} (${step.command}, step ${step.i + 1} of ${failed.steps.length}, ${step.attempts} attempt${step.attempts === 1 ? '' : 's'})`,
             source: 'executor', call_id: sources.get(failed.goal.id)?.call_id ?? null,
-        });
+        }, { parked: { step: step.i, command: step.command, attempts: step.attempts, max_attempts: config.max_attempts } });
         trigger('step_failed', { reason, option_id: failed.goal.option_id, command: step.command }); // exactly one planning request
         return { kind: 'goal_failed', goal_id: failed.goal.id, reason, step: step.i };
     }
@@ -278,6 +302,16 @@ export function createExecutor({
         }
         if (mine.cursor >= mine.steps.length) return completeGoal();
         const step = mine.steps[mine.cursor];
+        if (park_request !== null) {
+            // the watchdog parked the step while it was between two tries
+            const why = park_request;
+            park_request = null;
+            step.status = 'active';
+            step.attempts = Math.max(1, step.attempts);
+            stats.steps_parked_stuck++;
+            return stepFailed(step, why);
+        }
+        expected_interrupt = null; // only the step that is running when the watchdog acts is meant
         const guard = catalog.before(mine.goal.option_id, step, world());
         if (guard?.skip) {
             step.status = 'skipped';
@@ -329,7 +363,25 @@ export function createExecutor({
             await boundary();
             return { kind: 'held', step: step.i, wait_ms: config.idle_ms };
         }
-        if (result.interrupted && !result.timedout) {
+        if (paused && !result.ok) {
+            // the bot went down under the step (it died): not a try, not a reflex. What comes next is decided at the respawn.
+            step.attempts--;
+            step.status = 'pending';
+            await boundary();
+            return { kind: 'paused', step: step.i, reason: paused, wait_ms: config.idle_ms };
+        }
+        const parked_as = !result.ok && park_request !== null ? park_request : null;
+        park_request = null;
+        if (parked_as === null && result.interrupted && !result.timedout && expected_interrupt !== null) {
+            // the watchdog stopped the step to have it tried afresh: not a reflex and not a failed try
+            const why = expected_interrupt;
+            expected_interrupt = null;
+            stats.recovery_interruptions++;
+            step.attempts--;
+            await boundary();
+            return { kind: 'step_recovery', step: step.i, reason: why, wait_ms: config.retry_gap_ms };
+        }
+        if (parked_as === null && result.interrupted && !result.timedout) {
             stats.interruptions++;
             interruptions++;
             if (interruptions <= config.max_interruptions) {
@@ -343,7 +395,9 @@ export function createExecutor({
             }
         }
         const after = catalog.after(mine.goal.option_id, step, result, world(), mine.goal.baseline);
-        let reason = after?.fail ?? (result.ok ? null : classifyFailure(step.command, result));
+        // (a template may say the step did what it was for although the skill answered false: after -> { ok: true })
+        let reason = parked_as ?? after?.fail ?? (result.ok || after?.ok === true ? null : classifyFailure(step.command, result));
+        if (parked_as !== null) stats.steps_parked_stuck++;
         // while the agent is held nothing more is done, not even tidying up: scaffold waits for the resume
         if (!hold && (await cleanScaffold()) > 0 && reason === null) reason = 'scaffold_left_in_zone';
         if (plan !== mine) return { kind: 'plan_gone' };
@@ -364,11 +418,14 @@ export function createExecutor({
         if (busy) return { kind: 'busy', wait_ms: config.step_gap_ms };
         // held by the operator: nothing is retried, started or chosen until resume()
         if (hold) return { kind: 'held', wait_ms: config.idle_ms };
+        // the bot is down (it died): nothing runs until the respawn decided what comes next
+        if (paused) return { kind: 'paused', reason: paused, wait_ms: config.idle_ms };
         busy = true;
         try {
             for (const [goal_id, meta] of [...removal_pending]) await removeGoal(goal_id, meta);
             const queue = await queueOf();
             if (queue === null) return { kind: 'store_unavailable', wait_ms: config.idle_ms };
+            if (detour) return await detourOnce();
             if (plan) {
                 if (queue[0]?.id !== plan.goal.id && !removal_pending.has(plan.goal.id)) {
                     // the queue was replaced (a new plan from the planner or the operator)
@@ -377,7 +434,7 @@ export function createExecutor({
                     last_outcome = { option_id: gone.goal.option_id, title: gone.goal.title, outcome: 'abandoned', reason: 'replaced', at: clock.now() };
                     plan = null;
                     await boundary();
-                    try { onGoalEnd({ ...last_outcome, source: gone.source, goal_id: gone.goal.id }); } catch { /* the listener's problem */ }
+                    try { onGoalEnd({ ...last_outcome, source: gone.source, origin: gone.goal.origin ?? null, goal_id: gone.goal.id }); } catch { /* the listener's problem */ }
                     return { kind: 'goal_abandoned', goal_id: gone.goal.id, reason: 'replaced', wait_ms: 0 };
                 }
                 return await stepOnce();
@@ -404,7 +461,49 @@ export function createExecutor({
             return { kind: 'idle', wait_ms: config.idle_ms };
         } finally {
             busy = false;
+            for (const fn of after_turn.splice(0)) { try { fn(); } catch { /* the listener's problem */ } }
         }
+    }
+
+    // One thing of a recovery detour: a step of the detour goal in hand, the next goal the
+    // chooser hands out, or the end of the detour (the goal that was kept goes on at its step).
+    async function detourOnce() {
+        if (plan) return await stepOnce();
+        const mine = detour;
+        let choice = null;
+        try { choice = await mine.next({ goals_run: mine.goals_run, last: last_outcome ? { ...last_outcome } : null }); } catch { choice = null; }
+        if (detour !== mine) return { kind: 'plan_gone' };
+        if (choice?.goal) {
+            mine.goals_run++;
+            const goal = { id: nextId(), title: String(choice.goal.title).slice(0, 60), option_id: choice.goal.option_id };
+            sources.set(goal.id, { source: 'recovery', call_id: null });
+            return await startGoal(goal);
+        }
+        if (Number.isFinite(choice?.idle_ms)) return { kind: 'detour_waiting', wait_ms: choice.idle_ms };
+        detour = null;
+        plan = mine.main;
+        interruptions = 0;
+        reflex_reported = false;
+        const step = plan ? plan.steps[plan.cursor] ?? null : null;
+        say('agent.state', { state: 'detour_ended', detail: { reason: mine.reason, goals_run: mine.goals_run, goal_id: plan?.goal.id ?? null, option_id: plan?.goal.option_id ?? null, step: step?.i ?? null } });
+        await boundary();
+        try { mine.onEnd?.({ resumed: plan !== null, abandoned: false, goals_run: mine.goals_run, plan_id: plan?.id ?? null, step: step?.i ?? null }); } catch { /* the listener's problem */ }
+        return { kind: 'detour_ended', resumed: plan !== null, wait_ms: 0 };
+    }
+
+    // Ends a detour before its chooser is done: its own goal goes, the goal it kept is in hand again.
+    function cutDetour(reason) {
+        if (!detour) return false;
+        const cut = detour;
+        const side = plan;
+        detour = null;
+        plan = cut.main;
+        if (side) {
+            sources.delete(side.goal.id);
+            say('agent.state', { state: 'goal_abandoned', detail: { goal_id: side.goal.id, option_id: side.goal.option_id, reason } }, { corr: side.id, severity: 'warn' });
+        }
+        try { cut.onEnd?.({ resumed: false, abandoned: true, goals_run: cut.goals_run, plan_id: null, step: null }); } catch { /* the listener's problem */ }
+        return true;
     }
 
     function sleep(ms) {
@@ -474,6 +573,7 @@ export function createExecutor({
         // The goal being worked on is given up now (the agent died). The step that is running
         // ends on its own (the skill is stopped by whoever calls this).
         async abandon(reason, { source = 'executor' } = {}) {
+            cutDetour(reason); // a detour that is cut short takes its own goal with it, then the goal it kept is given up below
             if (!plan) return false;
             const gone = plan;
             plan = null;
@@ -481,9 +581,49 @@ export function createExecutor({
             last_outcome = { option_id: gone.goal.option_id, title: gone.goal.title, outcome: 'abandoned', reason, at: clock.now() };
             await removeGoal(gone.goal.id, { reason: `abandoned: ${reason}`, source, call_id: null });
             await boundary();
-            try { onGoalEnd({ ...last_outcome, source: gone.source, goal_id: gone.goal.id }); } catch { /* the listener's problem */ }
+            try { onGoalEnd({ ...last_outcome, source: gone.source, origin: gone.goal.origin ?? null, goal_id: gone.goal.id }); } catch { /* the listener's problem */ }
             return true;
         },
+        // ---- recovery (genesis/recovery) ----
+        // The bot is down: no step runs, and the step that was cut off is neither a try nor a reflex.
+        pause(reason = 'down') { paused = String(reason); },
+        unpause() { paused = null; wake_sleep?.(); },
+        isPaused: () => paused !== null,
+        // Runs the goals `next` hands out, one after the other, while the goal in hand is kept
+        // (the checkpoint goes on holding it). When `next` has nothing more, the kept goal goes on
+        // at the step it was at. Nothing of a detour raises a planning trigger.
+        //   next({ goals_run, last }) -> { goal: { title, option_id }, reason } | { idle_ms } | null
+        //   onEnd({ resumed, abandoned, goals_run, plan_id, step })
+        // Returns false when a detour is already running.
+        detour({ reason = 'recovery', next, onEnd = null } = {}) {
+            if (detour || typeof next !== 'function') return false;
+            const main = plan;
+            const step = main ? main.steps[main.cursor] ?? null : null;
+            if (step && step.status === 'active') {
+                // the step was cut off under the agent: it is tried again afterwards, and this try does not count
+                step.status = 'pending';
+                step.attempts = Math.max(0, step.attempts - 1);
+            }
+            detour = { reason: String(reason), next, onEnd, main, goals_run: 0 };
+            plan = null; // the step still running finds its goal gone and ends without a verdict
+            interruptions = 0;
+            expected_interrupt = null;
+            park_request = null;
+            stats.detours++;
+            say('agent.state', { state: 'detour_started', detail: { reason: detour.reason, goal_id: main?.goal.id ?? null, option_id: main?.goal.option_id ?? null, step: step?.i ?? null } }, { corr: main?.id ?? null });
+            boundary().catch(() => {});
+            wake_sleep?.();
+            return true;
+        },
+        isDetouring: () => detour !== null,
+        // Ends a running detour early and keeps the goal it kept (a second death during the re-equip starts it anew).
+        cutDetour: (reason = 'cut') => cutDetour(reason),
+        // The goal a reply of the planner must not replace: the one in hand, or the one a detour keeps.
+        mainPlan: () => { const kept = detour ? detour.main : plan; return kept ? copy(kept) : null; },
+        // The watchdog is about to stop the running step so that it is tried afresh.
+        expectInterrupt(reason = 'recovery') { if (plan) expected_interrupt = String(reason); return plan !== null; },
+        // The watchdog parks the step in hand: its goal ends as failed with this reason, and the next goal starts.
+        park(reason = 'stuck') { if (!plan) return false; park_request = String(reason); wake_sleep?.(); return true; },
         // The routine gives way after the step it is on.
         requestYield(reason) { yield_reason = reason; },
         // The operator's !stop: hold everything until resume(). Set at once (before the first
@@ -518,6 +658,9 @@ export function createExecutor({
         corr: () => plan?.id ?? null,
         lastOutcome: () => (last_outcome ? { ...last_outcome } : null),
         isBusy: () => busy,
+        // Runs fn once the thing the executor is doing right now (starting a goal, a step, ending a goal with
+        // all its bookkeeping) is done; at once when it is doing nothing.
+        afterTurn(fn) { if (busy) after_turn.push(fn); else fn(); },
         stats: () => ({ ...stats, scaffold_tracked: scaffold?.count() ?? 0 }),
     };
 }

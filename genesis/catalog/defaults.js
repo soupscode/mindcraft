@@ -22,13 +22,14 @@ export const GATHER_TYPES = Object.freeze({
     red_mushroom: { blocks: ['red_mushroom'], drops: ['red_mushroom'] },
 });
 
-// Crops harvest_replant knows: the block, the age at which it is mature, and what is sown
-// back. Upstream digs a crop at any age, so the template reads the age itself first.
+// Crops harvest_replant and sow_field know: the block, the age at which it is mature, what
+// is sown (back), and what a mature one yields. Upstream digs a crop at any age, so the
+// harvest template reads the age itself first.
 export const CROPS = Object.freeze({
-    wheat: { max_age: 7, seed: 'wheat_seeds' },
-    carrots: { max_age: 7, seed: 'carrot' },
-    potatoes: { max_age: 7, seed: 'potato' },
-    beetroots: { max_age: 3, seed: 'beetroot_seeds' },
+    wheat: { max_age: 7, seed: 'wheat_seeds', produce: 'wheat' },
+    carrots: { max_age: 7, seed: 'carrot', produce: 'carrot' },
+    potatoes: { max_age: 7, seed: 'potato', produce: 'potato' },
+    beetroots: { max_age: 3, seed: 'beetroot_seeds', produce: 'beetroot' },
 });
 
 // What craft_item may be asked for: [item, how many times the recipe is made].
@@ -47,6 +48,10 @@ export const NATURAL_BLOCKS = Object.freeze([
     'dandelion', 'poppy', 'azure_bluet', 'oxeye_daisy', 'cornflower', 'large_fern',
 ]);
 export const NATURAL_SUFFIXES = Object.freeze(['_leaves']);
+// Torches are exempt from scaffold clean-up (decided: upstream's idle torch reflex may leave
+// them in the camp, the field and the plots). So that such a torch never blocks a build for
+// good, the owner's build may clear one that stands where the blueprint wants something else.
+export const CLEARABLE_BLOCKS = Object.freeze(['torch', 'wall_torch']);
 
 // Items an agent keeps when it stores things away (never offered to store_items).
 export const KEEP_SUFFIXES = Object.freeze(['_pickaxe', '_axe', '_shovel', '_hoe', '_sword', '_helmet', '_chestplate', '_leggings', '_boots']);
@@ -56,6 +61,7 @@ export const CATALOG_DEFAULTS = Object.freeze({
     gather_count: 8,        // blocks one gather goal goes for
     gather_distance: 32,    // how far a matching block may be
     harvest_batch: 12,      // crops one harvest goal takes
+    sow_batch: 16,          // proposed: bare cells of the field one sow goal sows
     build_batch: 12,        // cells one build goal changes
     smelt_batch: 8,         // items one smelt goal smelts
     fetch_count: 8,         // items one fetch goal takes
@@ -64,5 +70,10 @@ export const CATALOG_DEFAULTS = Object.freeze({
     ledger_fresh_ms: 5 * 60 * 1000, // a chest is not walked to just to be looked into again within this time
     free_slots_needed: 3,   // gather_blocks and harvest_replant
     max_options: 16,        // how many options one offer holds at most
-    per_skill: { travel: 5, gather_blocks: 3, craft_item: 3, store_items: 2, fetch_items: 2, harvest_replant: 1, build_blueprint: 1, smelt_item: 2 },
+    per_skill: { travel: 5, gather_blocks: 3, craft_item: 3, store_items: 2, fetch_items: 2, harvest_replant: 1, sow_field: 1, build_blueprint: 1, smelt_item: 2, give_items: 2,
+        ask_agent: 2, offer_agent: 1 }, // proposed: how many messages the planner is offered to send at a time
+    ask_count: 8,           // proposed: items one ask_agent goal asks for at most
+    offer_count: 8,         // proposed: items one offer_agent goal offers at most
+    handoff_distance: 16,   // proposed: within this many blocks items are handed over directly, further away they go through the shared chest
+    handoff_chest: 'shared',
 });

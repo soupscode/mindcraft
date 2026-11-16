@@ -15,21 +15,32 @@
 //   1. checks the world file (genesis/world/world_config.js); nothing is sent while it has problems
 //   2. asks the server for its seed: it must be the seed in the world file
 //   3. game rules: reads each one, sets it only when it differs, and reads it back
-//   4. the starter camp: looks at each block first and places it only when it is not there yet
+//   4. levels the camp, ONCE (decided): the layers above the camp's floor are cleared, highest
+//      first, and the floor is laid, each layer with one fill command. Never done again once the
+//      manifest records it, and never where the camp already stands (see below).
+//   5. the starter camp: looks at each block first and places it only when it is not there yet
 //      (one shared double chest, a kits chest, four beds, a crafting table, a furnace, a 9 by 9
-//      field with water). The agents build every house.
-//   5. the kits chest is filled, once
-//   6. every block is checked again; a block that is not as planned stops the run with its position
-//   7. writes the manifest and, next to it, server-settings.required.txt with the settings that
+//      field of bare farmland with water: nothing is sown). The agents build every house.
+//   6. the kits chest is filled, once
+//   7. every block is checked again, and every cell of the camp's floor; a block that is not as
+//      planned stops the run with its position
+//   8. writes the manifest and, next to it, server-settings.required.txt with the settings that
 //      cannot be set over RCON (they are reported as "operator must set")
 //
 // It can be run again at any time: on a bootstrapped world a second run places nothing and
-// passes. What the agents change afterwards (the crops, what is in the kits chest) is placed
-// once and never again.
+// passes. What the agents change afterwards (what grows on the field, what is in the kits
+// chest, a torch they put down in the camp) is left alone: the levelling, the cleared layer
+// above the farmland and the kit are done once and never again.
+//
+// Levelling never runs over a camp that stands: when the manifest has no record of it and any
+// block of the camp is already there (a lost manifest), nothing is cleared or floored, the run
+// says so, and the floor check decides whether the camp is fit.
 //
 // Honesty: every block and item placed is in the manifest, attributed to "Operator", and so
-// is every rule that favours the agents. The script never edits server files and never
-// deletes anything in the world folder.
+// is every rule that favours the agents. The levelling is recorded layer by layer with the
+// number of blocks the server reported as changed (removed or placed): a fill command does
+// not say which blocks they were. The script never edits server files and never deletes
+// anything in the world folder.
 //
 // NOT RUN AGAINST A REAL MINECRAFT SERVER. The tests run it against an in-memory stand-in
 // that answers the way the commands are documented to (genesis/tests/helpers/fake-rcon.mjs).
@@ -46,6 +57,7 @@ import { MANIFEST_KIND, MANIFEST_VERSION, OPERATOR, DEFAULT_MANIFEST_FILE, manif
 
 const xyz = (pos) => pos.join(' ');
 const passed = (answer) => /Test passed/i.test(answer) && !/Test failed/i.test(answer);
+const sameBox = (a, b) => a.min.join(',') === b.min.join(',') && a.max.join(',') === b.max.join(',');
 
 // What the server said a value is, or null when the answer is not understood.
 export const ANSWERS = Object.freeze({
@@ -55,6 +67,12 @@ export const ANSWERS = Object.freeze({
     worldborder: (answer) => {
         const found = /currently\s+(-?\d+(?:\.\d+)?)\s+block/i.exec(answer);
         return found ? String(Math.round(Number(found[1]))) : null;
+    },
+    // how many blocks a fill command changed: a number, 0 for "No blocks were filled", null when not understood
+    fill: (answer) => {
+        const found = /Successfully filled\s+(\d+)\s+block/i.exec(answer);
+        if (found) return Number(found[1]);
+        return /No blocks were filled/i.test(answer) ? 0 : null;
     },
 });
 
@@ -105,14 +123,16 @@ export function parseItems(answer) {
 
 // Runs the bootstrap. Never throws: resolves to
 //   { ok, stage, problems, failed, commands, placed, manifest, operator_must_set, warnings }
-//     stage     where it ended: validate | seed | rules | camp | kits | check | done
+//     stage     where it ended: validate | seed | rules | level | camp | kits | check | done
+//     placed    { blocks, items, rules, cleared, floored }: cleared and floored are the blocks the
+//               levelling changed (removed above the floor, placed in it), as the server counted them
 //     failed    null, or { id, pos, expected, answer } of the check that failed
 //     commands  every command sent: { command, changes } (changes: it can change the world)
 export async function runBootstrap({
     config, rcon, files, clock = { now: Date.now }, manifest_file = DEFAULT_MANIFEST_FILE, world_file = 'genesis.world.json', blueprints = null,
 } = {}) {
     const result = {
-        ok: false, stage: 'validate', problems: [], failed: null, commands: [], placed: { blocks: 0, items: 0, rules: 0 },
+        ok: false, stage: 'validate', problems: [], failed: null, commands: [], placed: { blocks: 0, items: 0, rules: 0, cleared: 0, floored: 0 },
         manifest: null, operator_must_set: [], warnings: [],
     };
     const config_problems = checkWorldConfig(config, { blueprints });
@@ -151,7 +171,7 @@ export async function runBootstrap({
     if (after_reset || (previous && previous.seed !== plan.seed)) previous = null;
     const run = (previous?.runs?.length ?? 0) + 1;
     const carried = (list, id, same) => (previous?.[list] ?? []).find((record) => record.id === id && same(record)) ?? null;
-    const records = { blocks: [], items: [], rules: [] };
+    const records = { blocks: [], items: [], rules: [], areas: [] };
 
     let failure = null;
     try {
@@ -203,7 +223,45 @@ export async function runBootstrap({
             records.rules.push({ ...record, status: 'set' });
         }
 
-        // ---- 4. the starter camp: look first, place only what is not there ----
+        // ---- 4. the camp is levelled, once: cleared above the floor (highest layer first), then floored ----
+        result.stage = 'level';
+        const to_level = [];
+        for (const area of plan.areas) {
+            const before = carried('areas', area.id, (old) => old.block === area.block && sameBox(old, area));
+            if (before) records.areas.push(before); else to_level.push(area);
+        }
+        if (to_level.length > 0) {
+            // never over a camp that stands: with no record of the levelling, a block of the camp that is
+            // already there means the manifest was lost, not that the world is new
+            const camp_cells = plan.blocks.filter((block) => block.pos[0] >= plan.floor.min[0] && block.pos[0] <= plan.floor.max[0]
+                && block.pos[2] >= plan.floor.min[1] && block.pos[2] <= plan.floor.max[1] && block.pos[1] > plan.floor.y);
+            let standing = null;
+            for (const block of camp_cells) {
+                if (passed(await send(`execute if block ${xyz(block.pos)} ${block.expect}`, false))) { standing = block; break; }
+            }
+            for (const area of to_level) {
+                const record = { id: area.id, kind: area.kind, min: area.min, max: area.max, block: area.block, purpose: area.purpose, by: OPERATOR, changed: 0, placed: false, status: null, at: now(), run };
+                if (standing) {
+                    records.areas.push({ ...record, status: 'not levelled: the camp was already standing' });
+                    continue;
+                }
+                const command = `fill ${xyz(area.min)} ${xyz(area.max)} ${area.block}`;
+                const answer = await send(command, true);
+                const changed = ANSWERS.fill(answer);
+                if (changed === null) {
+                    stop('level', `the ${area.purpose} could not be filled: the server's answer to "${command}" was not understood: ${JSON.stringify(answer)}`,
+                        { id: area.id, pos: area.min, expected: area.block, answer });
+                    return true;
+                }
+                result.placed[area.kind === 'floor' ? 'floored' : 'cleared'] += changed;
+                records.areas.push({ ...record, changed, placed: changed > 0, status: changed > 0 ? 'filled' : 'nothing to change' });
+            }
+            if (standing) {
+                result.warnings.push(`The camp was NOT levelled: the manifest has no record of the levelling, but the ${standing.purpose} already stands at ${standing.pos.join(', ')}. Nothing was cleared or floored; the floor check below decides whether the camp is fit.`);
+            }
+        }
+
+        // ---- 5. the starter camp: look first, place only what is not there ----
         result.stage = 'camp';
         const to_check = [];
         for (const block of plan.blocks) {
@@ -221,7 +279,7 @@ export async function runBootstrap({
             to_check.push(block);
         }
 
-        // ---- 5. the kit, once ----
+        // ---- 6. the kit, once ----
         result.stage = 'kits';
         const new_items = [];
         let in_chest = null;
@@ -242,8 +300,24 @@ export async function runBootstrap({
             new_items.push(item);
         }
 
-        // ---- 6. check every block again ----
+        // ---- 7. check every block again, and the camp's floor ----
         result.stage = 'check';
+        for (let x = plan.floor.min[0]; x <= plan.floor.max[0]; x++) {
+            for (let z = plan.floor.min[1]; z <= plan.floor.max[1]; z++) {
+                const pos = [x, plan.floor.y, z];
+                let answer = '';
+                let fits = false;
+                for (const accepted of plan.floor.accepts) {
+                    answer = await send(`execute if block ${xyz(pos)} ${accepted}`, false);
+                    if (passed(answer)) { fits = true; break; }
+                }
+                if (!fits) {
+                    stop('check', `floor check failed at ${pos.join(', ')}: the camp floor should be ${plan.floor.accepts.join(' or ')}, the server says ${JSON.stringify(answer)}`,
+                        { id: 'camp.floor', pos, expected: plan.floor.accepts.join(' | '), answer });
+                    return true;
+                }
+            }
+        }
         for (const block of to_check) {
             const expected = block.once ? block.place : block.expect;
             const answer = await send(`execute if block ${xyz(block.pos)} ${expected}`, false);
@@ -276,7 +350,7 @@ export async function runBootstrap({
         result.warnings.push('Every block of the camp was already there, straight after a full reset. Was the world folder really deleted and generated anew?');
     }
 
-    // ---- 7. the manifest, whatever happened: what was placed is recorded even when a check failed ----
+    // ---- 8. the manifest, whatever happened: what was placed is recorded even when a check failed ----
     // records of an earlier run that this run did not get to (it stopped early) are kept
     const merged = (list) => {
         const ids = new Set(records[list].map((record) => record.id));
@@ -298,8 +372,10 @@ export async function runBootstrap({
         verified_at: result.ok ? now() : null,
         runs: [...(previous?.runs ?? []), {
             run, at: now(), blocks_placed: result.placed.blocks, items_placed: result.placed.items, rules_set: result.placed.rules,
+            blocks_cleared: result.placed.cleared, floor_blocks_placed: result.placed.floored,
             result: result.ok ? 'ok' : result.problems.join('; '),
         }],
+        areas: merged('areas'),
         blocks: merged('blocks'),
         items: merged('items'),
         rules,
@@ -329,6 +405,7 @@ export function reportLines(result, { manifest_file = DEFAULT_MANIFEST_FILE } = 
     const lines = [];
     const changing = result.commands.filter((entry) => entry.changes).length;
     lines.push(`Bootstrap ${result.ok ? 'PASSED' : `FAILED at stage "${result.stage}"`}: ${result.commands.length} commands sent, ${changing} of them changing the world.`);
+    lines.push(`Levelled the camp: ${result.placed.cleared} blocks cleared, ${result.placed.floored} floor blocks placed.`);
     lines.push(`Placed: ${result.placed.blocks} blocks, ${result.placed.items} item stacks; rules set: ${result.placed.rules}.`);
     for (const problem of result.problems) lines.push(`PROBLEM: ${problem}`);
     if (result.failed?.pos) lines.push(`Failed position: ${result.failed.pos.join(', ')}`);

@@ -14,7 +14,7 @@ import { makeRig } from './helpers/rig.mjs';
 import { validateEvent } from '../shared/events.js';
 import { checkCheckpoint, decodeCheckpoint, CHECKPOINT_INTERVAL_MS } from '../store/checkpoint.js';
 import { EXECUTOR_DEFAULTS } from '../executor/executor.js';
-import { createScaffoldTracker } from '../executor/scaffold.js';
+import { createScaffoldTracker, placementSink, isReflexTorch, TORCH_REFLEX_ACTION } from '../executor/scaffold.js';
 import { createZones } from '../catalog/zones.js';
 
 // A model that only counts: nothing in this file may ever reach it.
@@ -335,6 +335,67 @@ test('scaffold the agent can remove is removed by the agent, and then the step c
     const cleanup = rig.eventsOf('skill.started').filter((event) => event.data.cleanup === 'scaffold');
     assert.equal(cleanup.length, 1);
     assertEventsValid(rig);
+});
+
+test('a torch of the idle torch reflex is exempt from scaffold clean-up in the camp, the field and a plot; other scaffold is still cleaned up', async () => {
+    const zones = createZones(WORLD_CONFIG);
+    // the tracker: a reflex torch inside a zone is never tracked; a torch placed any other way is scaffolding like everything else
+    const tracker = createScaffoldTracker({ zones });
+    assert.equal(tracker.placed({ x: 3, y: 65, z: 3 }, { reflex_torch: true }), false, 'a reflex torch in the camp');
+    assert.equal(tracker.placed({ x: 15, y: 64, z: 0 }, { reflex_torch: true }), false, 'a reflex torch in the field');
+    assert.equal(tracker.placed({ x: -18, y: 65, z: 14 }, { reflex_torch: true }), false, 'a reflex torch on a plot');
+    assert.deepEqual([tracker.count(), tracker.exempted()], [0, 3]);
+    assert.equal(tracker.placed({ x: 3, y: 65, z: 4 }, { reflex_torch: false }), true);
+    assert.equal(tracker.placed({ x: 3, y: 65, z: 5 }), true);
+    assert.deepEqual(tracker.snapshot(), [[3, 65, 4], [3, 65, 5]]);
+    // what makes a placed block a reflex torch: the torch item, placed while upstream's torch mode runs
+    assert.equal(TORCH_REFLEX_ACTION, 'mode:torch_placing');
+    assert.equal(isReflexTorch({ item: 'torch', action: 'mode:torch_placing' }), true);
+    assert.equal(isReflexTorch({ item: 'dirt', action: 'mode:torch_placing' }), false);
+    assert.equal(isReflexTorch({ item: 'torch', action: 'action:genesis_goToPosition' }), false, 'a torch the pathfinder or a skill put down is not the reflex\'s');
+    assert.equal(isReflexTorch({ item: 'torch', action: 'mode:unstuck' }), false);
+    assert.equal(isReflexTorch({ item: 'torch' }), false);
+    assert.equal(isReflexTorch(), false);
+    const sink_tracker = createScaffoldTracker({ zones });
+    let label = 'mode:torch_placing';
+    const sink = placementSink(sink_tracker, () => label);
+    sink({ x: 3, y: 65, z: 3 }, { item: 'torch' });
+    label = '';
+    sink({ x: 4, y: 65, z: 3 }, { item: 'torch' });
+    sink({ x: 5, y: 65, z: 3 }, { item: 'cobblestone' });
+    placementSink(sink_tracker, () => { throw new Error('no action manager'); })({ x: 6, y: 65, z: 3 }, { item: 'torch' });
+    sink({ x: 7, y: 65, z: 3 });
+    assert.deepEqual(sink_tracker.snapshot(), [[4, 65, 3], [5, 65, 3], [6, 65, 3], [7, 65, 3]]);
+    assert.equal(sink_tracker.exempted(), 1);
+
+    // in the executor: on the walk to the shared chest the reflex puts a torch down in the camp, and the
+    // agent pillars up with dirt beside it. The dirt is taken away, the torch stays, the goal completes
+    const rig = await started({ inventory: { oak_log: 5 }, position: { x: 30, y: 64, z: 30 } });
+    rig.world.scaffold = (call) => (call.command === 'goToPosition'
+        ? [{ x: 6, y: 64, z: 5, name: 'torch', reflex_torch: true }, { x: 5, y: 65, z: 5, name: 'dirt' }] : []);
+    await rig.seed('store_items:shared:oak_log');
+    assert.deepEqual(kinds(await rig.drain()), ['goal_started', 'step_done', 'step_done', 'goal_completed', 'idle']);
+    assert.equal(rig.world.get(6, 64, 5).name, 'torch', 'the reflex torch in the camp was cleaned up');
+    assert.equal(rig.world.get(5, 65, 5), null, 'the scaffold block in the camp is still there');
+    assert.deepEqual(rig.world.broken.map((block) => [block.name, block.x, block.y, block.z]), [['dirt', 5, 65, 5]]);
+    assert.deepEqual(rig.world.calls.filter((call) => call.cleanup).map((call) => call.args), [[5, 65, 5]]);
+    assert.deepEqual([rig.scaffold.count(), rig.scaffold.exempted()], [0, 1]);
+    assert.deepEqual(checkpointOf(rig).places.scaffold, []);
+    assertEventsValid(rig);
+
+    // a reflex torch on the agent's own plot does not block the build for good: where the blueprint wants
+    // something else the build clears it, like the ground (genesis/catalog/defaults.js, CLEARABLE_BLOCKS)
+    const builder = await started({ inventory: { oak_planks: 64 } });
+    builder.world.set(-20, 64, 12, 'torch');
+    assert.equal(builder.catalog.check('build_blueprint:plot-1', builder.state()).ok, true);
+    await builder.seed('build_blueprint:plot-1');
+    await builder.drain();
+    assert.equal(builder.world.get(-20, 64, 12).name, 'oak_planks');
+    assert.ok(builder.world.broken.some((block) => block.name === 'torch' && block.command === 'breakBlockAt'));
+    // (anything else somebody built there still stops the build)
+    const blocked = await started({ inventory: { oak_planks: 64 } });
+    blocked.world.set(-20, 64, 12, 'chest');
+    assert.equal(blocked.catalog.check('build_blueprint:plot-1', blocked.state()).reason, 'plot_not_natural');
 });
 
 test('placing a block never breaks an occupied cell, and a build only touches its plot', async () => {

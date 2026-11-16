@@ -2,6 +2,7 @@ import * as skills_module from '../library/skills.js';
 import { trackSkillReturns, runWithSkillTracking } from '../../../genesis/lib/skill_results.js';
 import settings from '../settings.js';
 import convoManager from '../conversation.js';
+import { genesisPlanningOn, genesisIntendedRestart } from '../../../genesis/agent/hooks.js';
 
 // same skills, but each true/false they return is noted for the action that ran them
 const skills = trackSkillReturns(skills_module);
@@ -86,6 +87,7 @@ export const actionsList = [
         name: '!restart',
         description: 'Restart the agent process.',
         perform: async function (agent) {
+            genesisIntendedRestart(agent, settings); // Genesis: a restart that was asked for is not a crash. Does nothing unless the genesis_planning setting is on
             agent.cleanKill();
         }
     },
@@ -292,7 +294,8 @@ export const actionsList = [
         },
         perform: runAsAction(async (agent, item_name, num) => {
             let success = await skills.smeltItem(agent.bot, item_name, num);
-            if (success) {
+            // Genesis (genesis_planning setting, off by default): no restart after smelting. The agent keeps its process.
+            if (success && !genesisPlanningOn(settings)) {
                 setTimeout(() => {
                     agent.cleanKill('Safely restarting to update inventory.');
                 }, 500);

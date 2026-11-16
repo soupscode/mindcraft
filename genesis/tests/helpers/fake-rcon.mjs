@@ -9,6 +9,11 @@
 //   server.log           every command received
 //   server.refuse        (command) -> true: the command is answered but changes nothing
 //   server.break_after   Map("x,y,z" -> { name, states }): what a block turns into right after it is set
+//   server.fill_limit    how many blocks one fill command may cover (the game's default)
+//
+// fill <x1> <y1> <z1> <x2> <y2> <z2> <block> is answered as the game is documented to: with the
+// number of blocks that CHANGED ("Successfully filled 37 block(s)"), with "No blocks were filled"
+// when none did, and with a refusal when the box holds more blocks than the limit.
 
 const key = (x, y, z) => `${x},${y},${z}`;
 
@@ -36,9 +41,10 @@ export function fakeMinecraft({ seed = '0', difficulty = 'normal', gamerules = {
         log: [],
         refuse: () => false,
         break_after: new Map(),
+        fill_limit: 32768,
         down: false,
         blockAt(x, y, z) { return server.blocks.get(key(x, y, z)) ?? { name: 'air', states: {} }; },
-        changing: () => server.log.filter((command) => /^(setblock|item replace|gamerule \S+ \S+|difficulty \S+|worldborder (set|center)|setworldspawn)/.test(command)),
+        changing: () => server.log.filter((command) => /^(setblock|fill|item replace|gamerule \S+ \S+|difficulty \S+|worldborder (set|center)|setworldspawn)/.test(command)),
         async send(command) {
             if (server.down) throw new Error('RCON: the connection was closed');
             server.log.push(command);
@@ -75,6 +81,27 @@ export function fakeMinecraft({ seed = '0', difficulty = 'normal', gamerules = {
                 else server.blocks.set(key(x, y, z), after ?? block);
                 if (block.name === 'chest' && !server.containers.has(key(x, y, z))) server.containers.set(key(x, y, z), new Map());
                 return `Changed the block at ${x}, ${y}, ${z}`;
+            }
+            case 'fill': {
+                const [x1, y1, z1, x2, y2, z2] = numbers(1, 6);
+                const block = parseBlock(words[7] ?? '');
+                if (!block || words.length !== 8 || [x1, y1, z1, x2, y2, z2].some((n) => !Number.isInteger(n))) return 'Unknown or incomplete command';
+                const volume = (Math.abs(x2 - x1) + 1) * (Math.abs(y2 - y1) + 1) * (Math.abs(z2 - z1) + 1);
+                if (volume > server.fill_limit) return `Too many blocks in the specified area (maximum ${server.fill_limit}, specified ${volume})`;
+                if (server.refuse(command)) return 'That position is not loaded';
+                let changed = 0;
+                for (let x = Math.min(x1, x2); x <= Math.max(x1, x2); x++) {
+                    for (let y = Math.min(y1, y2); y <= Math.max(y1, y2); y++) {
+                        for (let z = Math.min(z1, z2); z <= Math.max(z1, z2); z++) {
+                            const there = server.blockAt(x, y, z);
+                            if (there.name === block.name && JSON.stringify(there.states) === JSON.stringify(block.states)) continue;
+                            if (block.name === 'air') server.blocks.delete(key(x, y, z)); else server.blocks.set(key(x, y, z), { name: block.name, states: { ...block.states } });
+                            server.containers.delete(key(x, y, z));
+                            changed++;
+                        }
+                    }
+                }
+                return changed > 0 ? `Successfully filled ${changed} block(s)` : 'No blocks were filled';
             }
             case 'execute': {
                 // execute if block <x> <y> <z> <block[states]>

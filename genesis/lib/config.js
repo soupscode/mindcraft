@@ -11,6 +11,12 @@ import { checkRoutineRanges } from '../routines/routines.js';
 import { fileBlueprints, BLUEPRINT_DIR } from '../catalog/blueprints.js';
 import { checkWorldConfig, describeProblem } from '../world/world_config.js';
 import { DEFAULT_MANIFEST_FILE, RESET_MARKER_FILE, manifestPaths, parseManifest, checkManifest } from '../world/manifest.js';
+import { WATCHDOG_DEFAULTS, SIGNATURE_DEFAULTS } from '../recovery/watchdog.js';
+import { SUPERVISOR_DEFAULTS } from '../recovery/supervisor.js';
+import { DEATH_RULES } from '../recovery/death.js';
+import { RELAY_LIMITS } from '../relay/relay.js';
+import { LINE_LIMITS } from '../relay/lines.js';
+import { DECISION_LIMITS } from '../relay/decisions.js';
 
 // Actions Genesis agents must never have, whatever the settings file says.
 export const REQUIRED_BLOCKED_ACTIONS = ['!newAction', '!startConversation', '!endConversation'];
@@ -69,6 +75,84 @@ export function checkSettings(settings) {
     }
     problems.push(...checkEventSettings(settings.genesis_events));
     problems.push(...checkPlanningSettings(settings.genesis_planning));
+    problems.push(...checkRecoverySettings(settings.genesis_recovery));
+    problems.push(...checkRelaySettings(settings.genesis_relay));
+    return problems;
+}
+
+// The values of genesis_relay that may be given other than their starting value, by part.
+export const RELAY_SETTINGS = Object.freeze({ limits: RELAY_LIMITS, line: LINE_LIMITS, decision: DECISION_LIMITS });
+// The switches of genesis_relay: each is true or false.
+export const RELAY_FLAGS = Object.freeze(['enabled', 'model_lines', 'model_decisions']);
+
+// Checks the genesis_relay setting (structured agent-to-agent messages). The relay goes with
+// planning: no setting at all means on, with every starting value. "enabled": false switches
+// it off; "model_lines": false makes every spoken line a template line; "model_decisions":
+// false lets the code rule decide every incoming request and offer. "decision" holds the
+// limits of the model's accept-or-decline call (its own hourly limit and token limit).
+function checkRelaySettings(relay) {
+    if (relay === undefined) return [];
+    if (relay === null || typeof relay !== 'object' || Array.isArray(relay)) return ['settings: "genesis_relay" must be an object'];
+    const problems = [];
+    for (const flag of RELAY_FLAGS) {
+        if (relay[flag] !== undefined && typeof relay[flag] !== 'boolean') problems.push(`settings: "genesis_relay.${flag}" must be true or false`);
+    }
+    for (const key of Object.keys(relay)) {
+        if (!RELAY_FLAGS.includes(key) && !Object.hasOwn(RELAY_SETTINGS, key)) problems.push(`settings: "genesis_relay.${key}" is not a setting (known: ${RELAY_FLAGS.join(', ')}, ${Object.keys(RELAY_SETTINGS).join(', ')})`);
+    }
+    for (const [part, defaults] of Object.entries(RELAY_SETTINGS)) {
+        problems.push(...checkOverrides(`genesis_relay.${part}`, relay[part], defaults));
+    }
+    return problems;
+}
+
+// The values of genesis_recovery that may be given other than their starting value, by part.
+export const RECOVERY_SETTINGS = Object.freeze({
+    watchdog: Object.freeze({ ...WATCHDOG_DEFAULTS, ...SIGNATURE_DEFAULTS }),
+    supervisor: SUPERVISOR_DEFAULTS,
+    death: DEATH_RULES,
+});
+
+// Checks an object of overrides against the starting values it may replace: only known
+// names, and a value of the same kind (a number of 0 or more, a text, a list of those).
+export function checkOverrides(where, given, defaults) {
+    if (given === undefined) return [];
+    if (given === null || typeof given !== 'object' || Array.isArray(given)) return [`settings: "${where}" must be an object`];
+    const problems = [];
+    const fits = (value, like) => (typeof like === 'number' ? Number.isFinite(value) && value >= 0
+        : typeof like === 'boolean' ? typeof value === 'boolean' : typeof value === 'string' && value.length > 0);
+    for (const [key, value] of Object.entries(given)) {
+        if (!Object.hasOwn(defaults, key)) {
+            problems.push(`settings: "${where}.${key}" is not a setting (known: ${Object.keys(defaults).join(', ')})`);
+        } else if (Array.isArray(defaults[key])) {
+            if (!Array.isArray(value) || value.length === 0 || !value.every((entry) => fits(entry, defaults[key][0]))) {
+                problems.push(`settings: "${where}.${key}" must be a list like ${JSON.stringify(defaults[key])}`);
+            }
+        } else if (!fits(value, defaults[key])) {
+            problems.push(`settings: "${where}.${key}" must be ${typeof defaults[key] === 'number' ? 'a number, 0 or more' : `a ${typeof defaults[key]}`} (starting value ${JSON.stringify(defaults[key])})`);
+        }
+    }
+    return problems;
+}
+
+// Checks the genesis_recovery setting (the watchdog and its ladder, the supervisor that
+// restarts agent processes, the re-equip after a death). Recovery goes with planning: no
+// setting at all means on, with every starting value. "enabled": false switches it off.
+function checkRecoverySettings(recovery) {
+    if (recovery === undefined) return [];
+    if (recovery === null || typeof recovery !== 'object' || Array.isArray(recovery)) {
+        return ['settings: "genesis_recovery" must be an object'];
+    }
+    const problems = [];
+    if (recovery.enabled !== undefined && typeof recovery.enabled !== 'boolean') {
+        problems.push('settings: "genesis_recovery.enabled" must be true or false');
+    }
+    for (const key of Object.keys(recovery)) {
+        if (key !== 'enabled' && !Object.hasOwn(RECOVERY_SETTINGS, key)) problems.push(`settings: "genesis_recovery.${key}" is not a setting (known: enabled, ${Object.keys(RECOVERY_SETTINGS).join(', ')})`);
+    }
+    for (const [part, defaults] of Object.entries(RECOVERY_SETTINGS)) {
+        problems.push(...checkOverrides(`genesis_recovery.${part}`, recovery[part], defaults));
+    }
     return problems;
 }
 

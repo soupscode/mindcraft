@@ -30,7 +30,7 @@ export function makeRig({
     rig.avoid = [];
     rig.emitter = createEmitter({ agent, send: (event) => rig.events.push(event), last_seq, now: clock.now, warn: () => {}, progress_interval_ms: 0 });
     rig.scaffold = createScaffoldTracker({ zones: rig.zones });
-    rig.ops = rig.world.ops(agent, { on_place: (pos, how) => { if (how !== 'skill') rig.scaffold.placed(pos); } });
+    rig.ops = rig.world.ops(agent, { on_place: (pos, how) => { if (how !== 'skill') rig.scaffold.placed(pos, { reflex_torch: how === 'reflex_torch' }); } });
     rig.state = () => ({ agent, view: rig.world.view(agent), ledger: rig.ledger, avoid: rig.avoid });
     rig.checkpoints = createCheckpointStore({ files, dir: '/checkpoints', clock });
     rig.goals = createGoalStore({

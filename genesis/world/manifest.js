@@ -9,13 +9,20 @@
 //     "world_file": "...", "world_sha256": "<hash of the world file's content>", "seed": "...",
 //     "attributed_to": "Operator",
 //     "verified": true, "verified_at": "<ISO time>",       every check of the last run passed
-//     "runs": [ { "run": 1, "at", "blocks_placed", "items_placed", "rules_set", "result": "ok" | "<what failed>" } ],
+//     "runs": [ { "run": 1, "at", "blocks_placed", "items_placed", "rules_set", "blocks_cleared", "floor_blocks_placed", "result": "ok" | "<what failed>" } ],
+//     "areas":  [ { "id", "kind": "clear" | "floor", "min": [x, y, z], "max": [x, y, z], "block", "purpose", "by": "Operator",
+//                   "changed": <blocks the server reported as changed>, "placed": true, "status", "at", "run" } ],
+//          the levelling of the camp, one record per layer: every block in the box that was not already
+//          `block` was removed ("clear", block air) or placed ("floor"). `changed` is the count; a fill
+//          command does not say which blocks they were.
+//          status: "filled" | "nothing to change" | "not levelled: the camp was already standing"
 //     "blocks": [ { "id", "pos": [x, y, z], "block", "purpose", "by": "Operator", "placed": true, "at", "run" } ],
 //          placed false: the block was already there when the bootstrap first looked
 //     "items":  [ { "id", "chest": "kits", "pos", "slot", "item", "count", "by": "Operator", "placed": true, "at", "run" } ],
 //     "rules":  [ { "id", "kind", "value", "favours_agents", "why", "by": "Operator", "status", "at", "run" } ],
 //          status: "set" | "already set" | "set, cannot be read back" | "operator must set"
-//     "favours_agents": [ "<one sentence each: the camp, the kit, the crops, the rules that favour the agents>" ],
+//     "favours_agents": [ "<one sentence each: the levelled camp, the camp, the kit, the field (Operator-built and
+//                           bare: every crop is agent-planted), the rules that favour the agents>" ],
 //     "operator_must_set": [ "server.properties: allow-nether=false", ... ]
 //   }
 //
@@ -57,7 +64,10 @@ export function checkManifest(manifest, config) {
     const problems = [];
     if (manifest.world_sha256 !== worldHash(config)) problems.push('the bootstrap manifest is for another version of the world file (its hash does not match)');
     if (manifest.verified !== true) problems.push('the last bootstrap run did not pass its checks');
-    const records = [...(manifest.blocks ?? []), ...(manifest.items ?? []), ...(manifest.rules ?? [])];
+    const records = [...(manifest.areas ?? []), ...(manifest.blocks ?? []), ...(manifest.items ?? []), ...(manifest.rules ?? [])];
+    if (!(manifest.areas ?? []).some((record) => record?.kind === 'floor')) {
+        problems.push('the bootstrap manifest has no record of the levelled camp (it was written before the bootstrap levelled the camp)');
+    }
     if (manifest.attributed_to !== OPERATOR || records.some((record) => record?.by !== OPERATOR)) {
         problems.push(`the bootstrap manifest attributes something to someone other than "${OPERATOR}"`);
     }

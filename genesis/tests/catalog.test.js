@@ -12,8 +12,8 @@ import { fakeBot, OPEN, WALLED, pos } from './helpers/fake-pathfinder.mjs';
 import { createZones, checkZonesConfig, loadZones, PATROL_RING, ZONES_FILE } from '../catalog/zones.js';
 import { createCatalog } from '../catalog/catalog.js';
 import { createLedger, parseChestView } from '../catalog/ledger.js';
-import { UPSTREAM_OPS, OP_NAMES, classifyFailure, EMPTY_BLOCKS, STATION_RANGE } from '../catalog/ops.js';
-import { TEMPLATES, TEMPLATE_NAMES } from '../catalog/templates.js';
+import { UPSTREAM_OPS, OP_NAMES, LOCAL_OPS, STEP_NAMES, MESSAGE_STEP, classifyFailure, EMPTY_BLOCKS, STATION_RANGE } from '../catalog/ops.js';
+import { TEMPLATES, TEMPLATE_NAMES, MESSAGE_TEMPLATES, HANDOFF_TEMPLATES } from '../catalog/templates.js';
 import { CATALOG_DEFAULTS } from '../catalog/defaults.js';
 import { checkRoutineRanges } from '../routines/routines.js';
 import {
@@ -149,6 +149,12 @@ test('ops: every step command is an upstream skill that exists at the line the t
     assert.equal(STATION_RANGE, 16);
     // every template only names commands of the table, and only build_blueprint may place a block
     assert.deepEqual(OP_NAMES.filter((name) => UPSTREAM_OPS[name].places_blocks), ['placeBlock']);
+    // one step is not an upstream skill: the message of an ask_agent or offer_agent goal, which Genesis's own code sends
+    assert.deepEqual(Object.keys(LOCAL_OPS), ['relayMessage']);
+    assert.equal(MESSAGE_STEP, 'relayMessage');
+    assert.ok(!OP_NAMES.includes('relayMessage') && !Object.hasOwn(UPSTREAM_OPS, 'relayMessage'), 'the bot\'s step runner must never be handed the message step');
+    assert.deepEqual([...STEP_NAMES], [...OP_NAMES, 'relayMessage']);
+    assert.equal(classifyFailure('relayMessage', { ok: false, output: 'message_rejected: rate_limit' }), 'message_rejected');
 });
 
 test('ops: a failed skill gets a name from what upstream logged', () => {
@@ -173,13 +179,14 @@ test('ops: a failed skill gets a name from what upstream logged', () => {
 
 // ---- the catalog -------------------------------------------------------------------------
 
-test('catalog: the eight templates, each with a progress measure and named failure reasons', () => {
-    assert.deepEqual([...TEMPLATE_NAMES], ['travel', 'gather_blocks', 'craft_item', 'store_items', 'fetch_items', 'harvest_replant', 'build_blueprint', 'smelt_item']);
+test('catalog: the nine templates, each with a progress measure and named failure reasons', () => {
+    // the eight of the first catalog, and sow_field (decided: the starter field is left bare, the agents sow it)
+    assert.deepEqual([...TEMPLATE_NAMES], ['travel', 'gather_blocks', 'craft_item', 'store_items', 'fetch_items', 'harvest_replant', 'sow_field', 'build_blueprint', 'smelt_item']);
     const { catalog } = setup();
     const units = Object.fromEntries(catalog.skills().map((skill) => [skill.name, skill.progress_unit]));
     assert.deepEqual(units, {
         travel: 'blocks covered', gather_blocks: 'items gained', craft_item: 'items made', store_items: 'items stored',
-        fetch_items: 'items taken', harvest_replant: 'plots replanted', build_blueprint: 'matching cells', smelt_item: 'items smelted',
+        fetch_items: 'items taken', harvest_replant: 'plots replanted', sow_field: 'cells sown', build_blueprint: 'matching cells', smelt_item: 'items smelted',
     });
     for (const skill of catalog.skills()) {
         assert.ok(skill.failures.length >= 3, `${skill.name} names too few failure reasons`);
@@ -384,6 +391,166 @@ test('harvest_replant: only mature crops in the field, checked again at every cr
     // wheat growing outside the field does not count
     h.world.set(30, 64, 0, 'wheat', { age: 7 });
     assert.equal(h.reason('harvest_replant:field'), 'no_mature_crop');
+});
+
+test('sow_field: offered when the field has unsown farmland and the agent holds seeds, and it sows with upstream\'s tillAndSow', async () => {
+    // the field as the bootstrap leaves it (decided): tilled farmland, nothing on it
+    const bare = (h) => { for (const block of [...h.world.blocks.values()]) if (block.name === 'wheat') h.world.set(block.x, block.y, block.z, 'air'); };
+    const h = setup({ agent: 'Mira', position: { x: 10, y: 64, z: 0 }, inventory: { wheat_seeds: 20, stone_hoe: 1 } });
+    // nothing to sow while every cell carries a crop
+    assert.equal(h.reason('sow_field:wheat_seeds'), 'no_bare_farmland');
+    assert.ok(!h.ids().includes('sow_field:wheat_seeds'));
+    bare(h);
+    assert.equal(h.reason('sow_field:wheat_seeds'), null);
+    assert.ok(h.ids().includes('sow_field:wheat_seeds'));
+    assert.ok(!h.ids().includes('harvest_replant:field'), 'there is nothing to harvest on a bare field');
+    assert.deepEqual(h.catalog.resolve('sow_field:wheat_seeds'), { skill: 'sow_field', args: { seed: 'wheat_seeds' } });
+    const option = h.catalog.check('sow_field:wheat_seeds', h.state()).option;
+    assert.equal(option.description, 'Sow 16 of the 49 bare cells of the field with wheat_seeds');
+
+    // the steps: one call of the skill harvest_replant sows back with, per bare cell, nearest first, a batch at a time
+    const plan = h.catalog.plan(option, h.state());
+    assert.equal(plan.steps.length, CATALOG_DEFAULTS.sow_batch);
+    assert.equal(CATALOG_DEFAULTS.sow_batch, 16);
+    assert.ok(plan.steps.every((step) => step.command === 'tillAndSow' && step.args[1] === 63 && step.args[3] === 'wheat_seeds'));
+    assert.equal(UPSTREAM_OPS.tillAndSow.line, 1589);
+    assert.deepEqual(plan.steps[0].args, [13, 63, 0, 'wheat_seeds'], 'the nearest bare cell comes first');
+    assert.ok(plan.steps.every((step) => h.zones.protectedAt({ x: step.args[0], y: step.args[1], z: step.args[2] }) === 'field'));
+    // no more steps than seeds held
+    h.body.inventory.wheat_seeds = 5;
+    assert.equal(h.catalog.plan(option, h.state()).steps.length, 5);
+
+    // carried out: the seeds go into the ground, the cells carry wheat at age 0, and progress counts the cells
+    const ops = h.world.ops('Mira');
+    const running = { steps: h.catalog.plan(option, h.state()).steps.map((step) => ({ ...step, status: 'pending' })) };
+    for (const step of running.steps) {
+        assert.equal(h.catalog.before('sow_field:wheat_seeds', step, h.state()), null);
+        const result = await ops.run(step.command, step.args);
+        assert.equal(result.ok, true, result.output);
+        step.status = 'done';
+    }
+    assert.equal(h.body.inventory.wheat_seeds, undefined);
+    assert.deepEqual(h.world.get(13, 64, 0), { name: 'wheat', x: 13, y: 64, z: 0, age: 0, planted_at: h.clock.now() });
+    assert.equal([...h.world.blocks.values()].filter((block) => block.name === 'wheat').length, 5);
+    assert.deepEqual(h.catalog.progress('sow_field:wheat_seeds', h.state(), {}, running), { done: 5, total: 5, unit: 'cells sown' });
+    assert.deepEqual(h.world.placed, [], 'sowing is not placing a block');
+    assert.deepEqual(h.world.broken, []);
+
+    // without seeds: not offered, and the reason says so (the routine fetches seeds on it)
+    assert.equal(h.reason('sow_field:wheat_seeds'), 'no_seed');
+    assert.ok(!h.ids().some((id) => id.startsWith('sow_field:')));
+    // each kind of seed held is a candidate; something that is not a seed never is
+    h.body.inventory = { carrot: 3, beetroot_seeds: 2, oak_log: 9 };
+    assert.deepEqual(h.catalog.candidates('sow_field', h.state()), [{ seed: 'carrot' }, { seed: 'beetroot_seeds' }]);
+    assert.equal(h.reason('sow_field:oak_log'), 'unknown_seed');
+    assert.equal(h.catalog.resolve('sow_field'), null);
+
+    // the guard before every cell: only farmland of the field that is still bare is ever handed to upstream,
+    // which would break whatever stands on other soil and till it (skills.js 1622-1645)
+    h.body.inventory = { wheat_seeds: 4 };
+    const step = (x, y, z) => ({ command: 'tillAndSow', args: [x, y, z, 'wheat_seeds'] });
+    assert.deepEqual(h.catalog.before('sow_field:wheat_seeds', step(13, 63, 0), h.state()), { skip: 'already_sown' });
+    assert.equal(h.catalog.before('sow_field:wheat_seeds', step(19, 63, 3), h.state()), null);
+    assert.deepEqual(h.catalog.before('sow_field:wheat_seeds', step(30, 63, 0), h.state()), { fail: 'outside_field' });
+    h.world.set(19, 63, 2, 'dirt');                              // farmland that was trampled back to dirt
+    assert.deepEqual(h.catalog.before('sow_field:wheat_seeds', step(19, 63, 2), h.state()), { skip: 'not_farmland' });
+    h.body.inventory = {};
+    assert.deepEqual(h.catalog.before('sow_field:wheat_seeds', step(19, 63, 3), h.state()), { skip: 'no_seed' });
+    // farmland outside the field does not count, and farmland out of the agent's range is never aimed at
+    const far = setup({ agent: 'Mira', position: { x: 10, y: 64, z: 0 }, inventory: { wheat_seeds: 4 } });
+    far.world.set(30, 63, 0, 'farmland');
+    assert.equal(far.reason('sow_field:wheat_seeds'), 'no_bare_farmland');
+});
+
+test('ask_agent and offer_agent: offered to the planner only while every precondition holds', () => {
+    assert.deepEqual(MESSAGE_TEMPLATES.map((template) => template.name), ['ask_agent', 'offer_agent']);
+    assert.ok(!TEMPLATE_NAMES.includes('ask_agent') && !TEMPLATE_NAMES.includes('offer_agent'), 'the messages are not skill templates');
+    assert.deepEqual(HANDOFF_TEMPLATES.map((template) => template.name), ['give_items']);
+    assert.deepEqual([CATALOG_DEFAULTS.per_skill.ask_agent, CATALOG_DEFAULTS.per_skill.offer_agent, CATALOG_DEFAULTS.ask_count, CATALOG_DEFAULTS.offer_count], [2, 1, 8, 8]);
+    for (const template of MESSAGE_TEMPLATES) {
+        for (const fn of ['id', 'parse', 'candidates', 'check', 'title', 'describe', 'steps', 'baseline', 'before', 'after', 'progress']) assert.equal(typeof template[fn], 'function', `${template.name}.${fn}`);
+        assert.ok(template.failures.every((reason) => /^[a-z_]+$/.test(reason)));
+    }
+    // the message desk's view, as genesis/relay/desk.js gives it (talk())
+    const talk = (over = {}) => ({ open: 0, max_open: 2, sent: 0, max_sent: 6, spare: (item) => ({ oak_log: 10, bread: 1 }[item] ?? 0), waiting: () => false, repeated: () => false, ...over });
+    // Arthur: his plot wants oak planks (the hut), he holds none; he carries logs he can spare, and tools he cannot
+    const h = setup({ inventory: { oak_log: 10, stone_axe: 1, bread: 5, torch: 3 } });
+    const state = (desk = talk()) => ({ ...h.state(), talk: desk });
+    const ids = (desk) => h.catalog.offer(state(desk)).map((option) => option.id).filter((id) => /^(ask|offer)_agent:/.test(id));
+    const reason = (id, desk) => { const checked = h.catalog.check(id, state(desk)); return checked.ok ? null : checked.reason; };
+
+    // without a message desk nothing of the kind exists
+    assert.deepEqual(h.catalog.offer(h.state()).map((option) => option.id).filter((id) => /^(ask|offer)_agent:/.test(id)), []);
+    assert.equal(h.catalog.check('ask_agent:Mira:oak_planks:8', h.state()).reason, 'no_messaging');
+    // with one: two agents to ask for what the build is short of, one offer of what is held most beyond the reserve
+    assert.deepEqual(ids(), ['ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_planks:8', 'offer_agent:Mira:oak_log:8']);
+    const options = h.catalog.offer(state());
+    assert.equal(options.at(-1).id, 'offer_agent:Mira:oak_log:8', 'the messages come after the work');
+    assert.equal(options.find((option) => option.id === 'ask_agent:Mira:oak_planks:8').description, 'Ask Mira for 8 oak_planks (for plot plot-1): Mira may say no');
+    assert.equal(options.find((option) => option.id === 'offer_agent:Mira:oak_log:8').description, 'Offer 8 of your 10 oak_log to Mira: handed over if Mira says yes');
+    assert.deepEqual(h.catalog.resolve('ask_agent:Mira:oak_planks:8'), { skill: 'ask_agent', args: { to: 'Mira', item: 'oak_planks', count: 8 } });
+    // the goal is one step, and it is not a skill of the bot
+    const plan = h.catalog.plan(h.catalog.check('ask_agent:Mira:oak_planks:8', state()).option, state());
+    assert.deepEqual(plan.steps, [{ command: 'relayMessage', args: ['request', 'Mira', 'oak_planks', 8] }]);
+    assert.deepEqual(h.catalog.plan(h.catalog.check('offer_agent:Mira:oak_log:8', state()).option, state()).steps, [{ command: 'relayMessage', args: ['offer', 'Mira', 'oak_log', 8] }]);
+    assert.deepEqual(h.catalog.progress('ask_agent:Mira:oak_planks:8', state(), {}, { steps: [{ command: 'relayMessage', status: 'done' }] }), { done: 1, total: 1, unit: 'messages sent' });
+
+    // the other agent exists and is not the sender
+    assert.equal(reason('ask_agent:Arthur:oak_planks:8'), 'self_message');
+    assert.equal(reason('offer_agent:Arthur:oak_log:4'), 'self_message');
+    assert.equal(reason('ask_agent:Herobrine:oak_planks:8'), 'unknown_agent');
+    assert.equal(reason('offer_agent:Herobrine:oak_log:4'), 'unknown_agent');
+    // an open conversation slot, and message budget
+    for (const id of ['ask_agent:Mira:oak_planks:8', 'offer_agent:Mira:oak_log:8']) {
+        assert.equal(reason(id), null);
+        assert.equal(reason(id, talk({ open: 2 })), 'no_conversation_slot');
+        assert.equal(reason(id, talk({ sent: 6 })), 'message_budget_spent');
+        assert.equal(reason(id, talk({ waiting: (type, to, item) => to === 'Mira' && (item === 'oak_planks' || item === 'oak_log') })), 'already_waiting');
+        assert.equal(reason(id, talk({ repeated: (type, to, item, count) => count === 8 })), 'repeat_blocked');
+    }
+    assert.deepEqual(ids(talk({ open: 2 })), []);
+    assert.deepEqual(ids(talk({ sent: 6 })), []);
+    assert.deepEqual(ids(talk({ waiting: (type, to) => to === 'Mira' })), ['ask_agent:Felix:oak_planks:8', 'ask_agent:Nova:oak_planks:8', 'offer_agent:Felix:oak_log:8']);
+    // for an ask: the item is something the catalog knows (what it gathers, crafts, sows or harvests)
+    for (const item of ['oak_planks', 'cobblestone', 'coal', 'wheat_seeds', 'wheat', 'bread', 'torch']) assert.equal(reason(`ask_agent:Mira:${item}:4`), null, item);
+    for (const item of ['diamond_block', 'netherite_sword', 'command_block']) assert.equal(reason(`ask_agent:Mira:${item}:4`), 'unknown_item', item);
+    // for an offer: the items are held beyond the agent's own reserve
+    assert.equal(reason('offer_agent:Mira:oak_log:10'), null);
+    assert.equal(reason('offer_agent:Mira:oak_log:11'), 'not_spare');
+    assert.equal(reason('offer_agent:Mira:bread:1'), null);
+    assert.equal(reason('offer_agent:Mira:bread:2'), 'not_spare');
+    assert.equal(reason('offer_agent:Mira:stone_axe:1'), 'not_spare');
+    assert.equal(reason('offer_agent:Mira:torch:1'), 'not_spare');
+    // ids that are not of this shape lead nowhere
+    for (const id of ['ask_agent:Mira:oak_planks', 'ask_agent:Mira:oak_planks:0', 'ask_agent:Mira:oak_planks:65', 'ask_agent:M:oak_planks:8', 'offer_agent:Mira:Oak Log:8']) assert.equal(h.catalog.resolve(id), null, id);
+
+    // what is asked for is what the agent's own work is short of and no chest has: with planks in the shared chest it is a fetch, not an ask
+    h.ledger.set('shared', { oak_planks: 20 });
+    assert.deepEqual(ids().filter((id) => id.startsWith('ask_agent:')), []);
+    assert.ok(h.catalog.offer(state()).some((option) => option.id.startsWith('fetch_items:shared:oak_planks:')));
+    h.ledger.set('shared', {});
+    // an agent that holds what its plot wants asks for nothing
+    h.body.inventory.oak_planks = 64;
+    assert.deepEqual(ids().filter((id) => id.startsWith('ask_agent:')), []);
+    delete h.body.inventory.oak_planks;
+    // seeds for a bare field are asked for by whoever the field is for (here: nobody in particular), while it holds none
+    for (const block of [...h.world.blocks.values()]) if (block.name === 'wheat') h.world.set(block.x, block.y, block.z, 'air');
+    h.body.inventory.oak_planks = 64;
+    h.body.position = { x: 10, y: 64, z: 0 };
+    assert.deepEqual(ids().filter((id) => id.startsWith('ask_agent:')), ['ask_agent:Mira:wheat_seeds:8', 'ask_agent:Felix:wheat_seeds:8']);
+    h.body.inventory.wheat_seeds = 2;
+    assert.deepEqual(ids().filter((id) => id.startsWith('ask_agent:')), []);
+    assert.equal(createZones({ ...WORLD_CONFIG, field: { ...WORLD_CONFIG.field, owner: 'Mira' } }).fieldOwner(), 'Mira');
+    assert.equal(h.zones.fieldOwner(), null);
+
+    // a long list of work never pushes the messages off the offer: their places are kept free, and the offer stays within its size
+    const busy = setup({ inventory: { oak_log: 30, wooden_pickaxe: 1, oak_planks: 2, raw_iron: 8, coal: 4, wheat: 9, cobblestone: 20, stick: 4 } });
+    busy.ledger.set('kits', { bread: 9, torch: 20 });
+    busy.ledger.set('shared', { sand: 64, gravel: 3 });
+    const crowded = busy.catalog.offer({ ...busy.state(), talk: talk({ spare: (item) => (item === 'oak_log' ? 30 : 0) }) }).map((option) => option.id);
+    assert.equal(busy.catalog.offer(busy.state()).length, CATALOG_DEFAULTS.max_options, 'the test world does not fill the offer');
+    assert.equal(crowded.length, CATALOG_DEFAULTS.max_options);
+    assert.deepEqual(crowded.slice(-3), ['ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_planks:8', 'offer_agent:Mira:oak_log:8']);
 });
 
 test('build_blueprint: only on a registered plot that overlaps no zone and holds only natural blocks where it differs', () => {

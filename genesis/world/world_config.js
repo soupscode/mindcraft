@@ -5,7 +5,8 @@
 //     "v": 2,
 //     "seed": "4815162342",                      the seed the world is generated from (whole number, as text or number)
 //     "dimension": "overworld",
-//     "home": [x, y, z],                         the home point: the world spawn
+//     "home": [x, y, z],                         the home point: the world spawn. The layer under it is the camp's
+//                                                floor: the bootstrap clears the camp area above it and lays it
 //     "border": { "center": [x, z], "size": 512 },
 //     "rules": { "difficulty": "easy", "keep_inventory": false, "mob_griefing": false,
 //                "fire_spread": false, "raids": false, "nether": false, "end": false },
@@ -20,11 +21,14 @@
 //     "field": { "min": [x, z], "max": [x, z],   protected zone, 9 by 9
 //                "y": 63,                        the layer of the farmland (crops grow on y + 1)
 //                "water": [[x, z]],              water cells in that layer
-//                "crop": "wheat",                sown once by the bootstrap, or null for bare farmland
+//                "crop": null,                   always null (or left out): the field is left BARE (decided). The
+//                                                bootstrap tills and waters it and sows nothing; the agents
+//                                                plant it from the seeds in the kit
 //                "owner": "Mira" },              whose range the field must lie in (optional)
 //     "plots": [ { "id", "owner", "min": [x, y, z], "max": [x, y, z], "blueprint" } ],   protected zones, 16 by 16
 //     "chests": { "shared": [x, y, z], "kits": [x, y, z] },
-//     "kits": [ { "item": "bread", "count": 16 }, ... ],   what the kits chest is filled with, once
+//     "kits": [ { "item": "bread", "count": 16 }, ... ],   what the kits chest is filled with, once. It must hold
+//                                                seeds (the field is bare and the agents sow it)
 //     "agents": { "Arthur": { "home": [x, y, z], "range": 48 }, ... }
 //   }
 //
@@ -75,7 +79,11 @@ export const WORLD_PROBLEMS = Object.freeze([
     'zone_overlap', 'plot_wrong_size', 'plot_too_small_for_blueprint', 'unknown_blueprint', 'field_wrong_size',
     'outside_border', 'outside_owner_range', 'outside_camp', 'outside_build_height', 'bad_double_chest',
     'blocks_collide', 'chests_too_close', 'water_on_field_edge', 'field_not_watered', 'bad_kit',
+    'off_camp_floor', 'kit_without_seeds',
 ]);
+
+// What can be sown on the field: the seed of every crop the catalog knows.
+export const SEED_ITEMS = Object.freeze(Object.values(CROPS).map((crop) => crop.seed));
 
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const isBlock = (value, size) => Array.isArray(value) && value.length === size && value.every((n) => Number.isInteger(n));
@@ -186,6 +194,9 @@ export function checkWorldConfig(config, { blueprints = null } = {}) {
         if (config.rules[key] !== decided) add('rule_not_as_decided', `rules.${key} is ${JSON.stringify(config.rules[key])}, decided is ${JSON.stringify(decided)}`);
     }
     if (config.border.size !== DECIDED_BORDER_SIZE) add('rule_not_as_decided', `border.size is ${config.border.size}, decided is ${DECIDED_BORDER_SIZE}`);
+    if (config.field.crop !== undefined && config.field.crop !== null) {
+        add('rule_not_as_decided', `field.crop is ${JSON.stringify(config.field.crop)}, decided is a bare field (null): the bootstrap sows nothing, the agents plant the field from the seeds in the kit`);
+    }
 
     // ---- the agents and their ranges ----
     for (const [agent, decided] of Object.entries(DECIDED_RANGES)) {
@@ -252,6 +263,10 @@ export function checkWorldConfig(config, { blueprints = null } = {}) {
     for (const cell of [...cells, { what: 'home', pos: config.home }]) {
         if (!flatInside(camp, cell.pos[0], cell.pos[2])) add('outside_camp', `${cell.what} at ${at(cell.pos)} is outside the camp`);
     }
+    // the bootstrap levels the camp: its floor is the layer under the home point, and the camp's blocks stand on it
+    for (const cell of cells) {
+        if (cell.pos[1] !== config.home[1]) add('off_camp_floor', `${cell.what} at ${at(cell.pos)} does not stand on the camp's floor: its y must be ${config.home[1]}, the y of "home"`);
+    }
     const seen = new Map();
     for (const cell of cells) {
         const key = cell.pos.join(',');
@@ -301,7 +316,8 @@ export function checkWorldConfig(config, { blueprints = null } = {}) {
     }
 
     // ---- heights ----
-    for (const cell of [...cells, { what: 'home', pos: config.home }, { what: 'field.y', pos: [0, field_y - 1, 0] }, { what: 'field.y', pos: [0, field_y + 1, 0] }]) {
+    for (const cell of [...cells, { what: 'home', pos: config.home }, { what: 'the camp\'s floor (under "home")', pos: [0, config.home[1] - 1, 0] },
+        { what: 'field.y', pos: [0, field_y - 1, 0] }, { what: 'field.y', pos: [0, field_y + 1, 0] }]) {
         if (cell.pos[1] < BUILD_HEIGHT.min || cell.pos[1] > BUILD_HEIGHT.max) add('outside_build_height', `${cell.what} leaves the build height (${BUILD_HEIGHT.min} to ${BUILD_HEIGHT.max})`);
     }
 
@@ -333,6 +349,10 @@ export function checkWorldConfig(config, { blueprints = null } = {}) {
             add('bad_kit', `kits[${index}]: ${stack.item} does not stack, list it once per piece`);
         }
     });
+    // the field is left bare (decided): without seeds in the kit the agents could never plant it
+    if (!config.kits.some((stack) => isPlainObject(stack) && SEED_ITEMS.includes(stack.item))) {
+        add('kit_without_seeds', `"kits" holds no seeds (one of ${SEED_ITEMS.join(', ')}): the field is left bare, and the agents sow it from the kit`);
+    }
     return problems;
 }
 

@@ -55,9 +55,13 @@ export function createOllamaPlanner({ url, model, options = null, probe_timeout_
     return {
         name: model,
         // format: the JSON schema of the reply (genesis/broker/planner_reply.js)
-        async chat({ messages, format, signal, timeout_ms = 90000 }) {
+        // max_tokens: the most tokens the reply may have, for the small calls (Ollama docs/api.md and
+        //   docs/modelfile.md: the option "num_predict", "Maximum number of tokens to predict when
+        //   generating text"). Left out for planning calls, whose size the schema bounds.
+        async chat({ messages, format, signal, timeout_ms = 90000, max_tokens = null }) {
             const body = { model, messages, stream: false, format };
             if (options) body.options = options;
+            if (Number.isInteger(max_tokens) && max_tokens > 0) body.options = { ...(body.options ?? {}), num_predict: max_tokens };
             const answer = await request(chat_url,
                 { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
                 { signal, timeout_ms });

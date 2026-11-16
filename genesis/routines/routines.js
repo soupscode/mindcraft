@@ -3,6 +3,8 @@
 //   Agent   Routine       Phases                                              Range
 //   Arthur  Site upkeep   Kit check, Gather, Craft, Stockpile, Shelter        48 blocks
 //   Mira    Field round   Kit check, Harvest, Bake, Stock, Shelter            32 blocks
+//           (the Harvest phase also SOWS: the starter field is left bare, decided, and Mira plants
+//           its bare cells with the seeds she holds, taking seeds from the kit chest when she has none)
 //   Felix   Ring patrol   Kit check, Patrol, Forage, Return, Unload, Shelter  128 blocks
 //   Nova    Stock round   Stocktake, Haul, Supply, Kits, Shelter              32 blocks
 //
@@ -21,6 +23,21 @@ const SHARED = 'shared';
 const KITS = 'kits';
 
 export const KIT_FOOD = Object.freeze({ item: 'bread', keep: 2, take: 4 });
+
+// What the field is sown with, in the order it is tried (the seeds of the catalog's crops:
+// genesis/catalog/defaults.js), and how many seeds are taken from the kit chest at a time (one stack).
+export const FIELD_SEEDS = Object.freeze(['wheat_seeds', 'beetroot_seeds', 'carrot', 'potato']);
+export const SEED_TAKE = 64;
+
+// The tools each role carries. Read by the Kit check phase below and by the re-equip after a
+// death (genesis/recovery/death.js): `suffix` is what the tool's name ends with, `craft` what
+// the routine makes when the kit chest has none.
+export const ROLE_KITS = Object.freeze({
+    Arthur: Object.freeze([{ suffix: '_axe', craft: ['stone_axe', 'wooden_axe'] }, { suffix: '_pickaxe', craft: ['stone_pickaxe', 'wooden_pickaxe'] }]),
+    Mira: Object.freeze([{ suffix: '_hoe', craft: ['stone_hoe', 'wooden_hoe'] }]),
+    Felix: Object.freeze([{ suffix: '_sword', craft: ['stone_sword', 'wooden_sword'] }]),
+    Nova: Object.freeze([]),
+});
 
 // The kit chest is read once per round, then a missing tool is fetched from it, or made,
 // and some food is taken along (upstream's auto-eat eats it, src/agent/agent.js lines 191-195).
@@ -98,7 +115,7 @@ export const ROUTINES = Object.freeze({
         food: KIT_FOOD.item,
         range: 48,
         phases: [
-            kitCheck([{ suffix: '_axe', craft: ['stone_axe', 'wooden_axe'] }, { suffix: '_pickaxe', craft: ['stone_pickaxe', 'wooden_pickaxe'] }]),
+            kitCheck(ROLE_KITS.Arthur),
             gather('Gather', ['oak_log', 'birch_log', 'spruce_log', 'stone'], 2),
             {
                 name: 'Craft',
@@ -123,13 +140,29 @@ export const ROUTINES = Object.freeze({
         food: KIT_FOOD.item,
         range: 32,
         phases: [
-            kitCheck([{ suffix: '_hoe', craft: ['stone_hoe', 'wooden_hoe'] }]),
+            kitCheck(ROLE_KITS.Mira),
             {
                 name: 'Harvest',
-                max_goals: 4,
+                max_goals: 6,
                 pick(ctx) {
                     const option = ctx.option('harvest_replant', {});
-                    return option ? { option, why: 'the field has mature crops' } : null;
+                    if (option) return { option, why: 'the field has mature crops' };
+                    // decided: the field starts bare, and Mira sows it. Bare cells are sown with the seeds she holds
+                    const sow = ctx.firstCandidate('sow_field');
+                    if (sow) return { option: sow, why: 'the field has bare cells' };
+                    // bare cells and no seeds: the kit chest has them (it is looked into first when nobody has yet)
+                    for (const seed of FIELD_SEEDS) {
+                        if (ctx.refusal('sow_field', { seed }) !== 'no_seed') continue;
+                        if (ctx.zones.chest(KITS) && !ctx.ledger.known(KITS) && !ctx.memo.kits_read) {
+                            ctx.memo.kits_read = true;
+                            const look = ctx.option('travel', { place: `chest-${KITS}` });
+                            if (look) return { option: look, why: 'looking into the kit chest for seeds' };
+                        }
+                        const count = Math.min(SEED_TAKE, ctx.ledger.count(KITS, seed));
+                        const fetched = count > 0 ? ctx.option('fetch_items', { chest: KITS, item: seed, count }) : null;
+                        if (fetched) return { option: fetched, why: `taking ${seed} from the kit chest for the bare field` };
+                    }
+                    return null;
                 },
             },
             {
@@ -153,7 +186,7 @@ export const ROUTINES = Object.freeze({
         food: KIT_FOOD.item,
         range: 128,
         phases: [
-            kitCheck([{ suffix: '_sword', craft: ['stone_sword', 'wooden_sword'] }]),
+            kitCheck(ROLE_KITS.Felix),
             {
                 name: 'Patrol',
                 max_goals: 3,

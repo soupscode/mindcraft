@@ -112,10 +112,15 @@ export function describeTrigger(trigger) {
             ? `a goal ended (${clip(detail.option_id, 40)}, ${clip(detail.outcome ?? 'completed', 12)}).`
             : 'the goals you had are finished.';
         case 'step_failed': return `a goal failed (${clip(detail.reason ?? 'unknown', 40)}).`;
-        case 'reflex_interrupt': return 'a reflex interrupted what you were doing.';
+        // (a death only asks when a goal the planner or the operator chose was given up over it: genesis/agent/runtime.js)
+        case 'reflex_interrupt': return detail.cause === 'death'
+            ? `you died${detail.gave_up ? `, and the goal you were on was given up (${clip(detail.gave_up, 40)})` : ''}.`
+            : 'a reflex interrupted what you were doing.';
         case 'agent_request': return `${clip(detail.from ?? 'another agent', 20)} asks: "${clip(detail.text ?? '', PROMPT_LIMITS.operator_message)}"`;
         case 'operator_message': return `the operator${detail.from ? ` (${clip(detail.from, 20)})` : ''} says: "${clip(detail.text ?? '', PROMPT_LIMITS.operator_message)}"`;
         case 'model_returned': return 'the planner is back; you were working from your routine.';
+        case 'request_declined': return `${clip(detail.to ?? 'the other agent', 20)} declined your request${detail.item ? ` for ${detail.count ?? ''} ${clip(detail.item, 30)}`.replace('  ', ' ') : ''}.`;
+        case 'request_expired': return `${clip(detail.to ?? 'the other agent', 20)} did not answer your request${detail.item ? ` for ${detail.count ?? ''} ${clip(detail.item, 30)}`.replace('  ', ' ') : ''} in time.`;
         default: return 'it is time to choose what to do next.';
     }
 }

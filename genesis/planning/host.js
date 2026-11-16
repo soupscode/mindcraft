@@ -24,6 +24,8 @@
 //   goal_storage              { load(agent), save(agent, goals, change) }   (createHostGoalStorage below)
 //   ledger                    the shared chest ledger (genesis/catalog/shared_ledger.js)
 //   emit(type, data, opts)    where the gate's own events go (optional)
+//   onGate(state, detail)     told when the model gate changed (optional): genesis/recovery/server.js
+//                             turns it into the model.away and model.available incident events
 // Depends only on other Genesis files.
 
 import { createPlannerBroker } from '../broker/broker.js';
@@ -98,7 +100,7 @@ export function createHostGoalStorage({ durable = null, max_waiting = 2000, retr
 
 export function createPlanningHost({
     model, clock = { now: Date.now, setTimeout, clearTimeout }, calls = { record() {} },
-    goal_storage = createHostGoalStorage(), ledger = null, emit = () => {}, broker: broker_options = {}, ...options
+    goal_storage = createHostGoalStorage(), ledger = null, emit = () => {}, onGate = null, broker: broker_options = {}, ...options
 } = {}) {
     const chest_ledger = ledger ?? createSharedLedger({ clock });
     const config = { ...HOST_DEFAULTS };
@@ -153,6 +155,7 @@ export function createPlanningHost({
         if (type !== 'agent.state' || typeof data?.state !== 'string' || !data.state.startsWith('model_')) return;
         const message = { state: broker.gate.state(), reason: data.detail?.reason ?? null };
         for (const agent of agents.keys()) toAgent(agent, 'genesis-gate', message);
+        if (onGate) { try { onGate(message.state, { ...(data.detail ?? {}) }); } catch { /* the listener's problem */ } }
     }
 
     const broker = createPlannerBroker({ model, clock, calls, buildContext, deliver, emit: gateEvent, ...broker_options });
@@ -241,6 +244,8 @@ export function createPlanningHost({
                 }
             });
         },
+        // The ledger was changed from inside this process (the relay moved a reservation): every agent is told.
+        ledgerUpdated: (chest = null) => ledgerChanged(chest),
         signal: (name) => broker.signal(name),
         start: (start_options) => broker.start(start_options),
         stop() { broker.stop(); goal_storage.stop?.(); },

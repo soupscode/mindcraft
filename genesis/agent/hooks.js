@@ -18,7 +18,19 @@
 //     Another agent's message is never the operator's.
 //   - the operator's !stop HOLDS the executor (genesisOperatorCommand) until the operator
 //     types !resume, a command that only exists for an agent with planning on (resumeCommand)
+//   - recovery (genesis/recovery; on with planning unless "genesis_recovery": { "enabled": false }):
+//     upstream's own stuck detection no longer kills the process, it is handed to the
+//     watchdog's ladder (genesisStuck); the process ends with an exit code that says why
+//     (genesisDisconnectCode, genesisExitCode), so the supervisor in the MindServer process
+//     can wait for a server that is down, send a refused login to the operator, and not count
+//     a restart that was asked for (genesisIntendedRestart) as a crash
+//   - no restart after smelting (src/agent/commands/actions.js asks genesisPlanningOn)
+//   - agent-to-agent talk goes ONLY through the structured relay (genesis/relay; on with planning
+//     unless "genesis_relay": { "enabled": false }): upstream's free-text conversation commands
+//     stay blocked, and what another agent says in chat is never listened to (genesisHears)
 // Depends only on Node built-ins and other Genesis files.
+
+import { EXIT_CODES, exitCodeForDisconnect } from '../recovery/exit_codes.js';
 
 export const DEFAULT_CHECKPOINT_DIR = './bots/genesis_checkpoints';
 export const DEFAULT_WORLD_FILE = './genesis/genesis.world.json';
@@ -109,6 +121,53 @@ export function genesisPlanningOn(settings) {
 }
 
 export const genesisRuntimeOf = (agent) => runtimes.get(agent) ?? null;
+
+// ---- recovery ----
+
+// Recovery goes with planning: it is on whenever planning is, unless the genesis_recovery
+// setting says "enabled": false (then upstream's own stuck detection and exit codes are back).
+export function genesisRecoveryOn(settings) {
+    return genesisPlanningOn(settings) && settings.genesis_recovery?.enabled !== false;
+}
+
+// Upstream's stuck detection fired (src/agent/modes.js, the "unstuck" mode, which would run
+// moveAway and kill the process after 10 seconds). Returns false with recovery off: upstream
+// then does what it always did. With it on the watchdog is told, and nothing is killed.
+export function genesisStuck(agent, settings) {
+    if (!genesisRecoveryOn(settings)) return false;
+    try { runtimes.get(agent)?.stuck?.('upstream_unstuck'); } catch { /* telling the watchdog must never break the mode loop */ }
+    return true;
+}
+
+// The exit code of a process whose connection to the Minecraft server ended
+// (src/agent/agent.js). `type` is what upstream's parseKickReason made of the reason
+// (src/agent/connection_handler.js). With recovery off: `code`, as upstream has it.
+export function genesisDisconnectCode(settings, type, code = 1) {
+    if (!genesisRecoveryOn(settings)) return code;
+    const mapped = exitCodeForDisconnect(type);
+    return mapped === EXIT_CODES.CRASH ? code : mapped;
+}
+
+// Agent messages go with planning too: on whenever planning is, unless the genesis_relay
+// setting says "enabled": false (then agents do not message each other at all).
+export function genesisRelayOn(settings) {
+    return genesisPlanningOn(settings) && settings.genesis_relay?.enabled !== false;
+}
+
+const intended_restart = new WeakSet(); // agents whose process is about to end because somebody asked for a restart
+
+// Called right before a restart somebody asked for (the operator's !restart, the panel's
+// restart button). `settings` may be null: then the agent's own settings decide in genesisExitCode.
+export function genesisIntendedRestart(agent) {
+    if (agent) intended_restart.add(agent);
+}
+
+// The exit code of cleanKill (src/agent/agent.js). With recovery on, a restart that was asked
+// for ends with its own code, so it is never counted as a crash. Otherwise: `code`, unchanged.
+export function genesisExitCode(agent, settings, code = 1) {
+    if (!genesisRecoveryOn(settings) || !agent || !intended_restart.has(agent)) return code;
+    return EXIT_CODES.INTENDED_RESTART;
+}
 
 // The seq of the last event the agent emitted before its process ended, from its checkpoint.
 // The event emitter starts from it, so seq goes on instead of starting at 1 again.

@@ -27,6 +27,21 @@
 // unless the world file passes its checks and a bootstrap manifest for exactly that file
 // exists (node genesis/world/bootstrap.js writes it once the starter camp is built and
 // checked). It also needs the operator's Minecraft username under "operators".
+//
+// Recovery ("genesis_recovery" in the settings file) goes with planning: it is on whenever
+// planning is, unless it says "enabled": false. Then a supervisor in this process restarts
+// an agent process that ended (after 5 seconds, 30 seconds, 2 minutes and 5 minutes; after 5
+// restarts in 30 minutes the agent stops and the operator is told), waits without limit for
+// a Minecraft server that is down, and each agent runs the watchdog and its recovery ladder.
+//
+// Agent messages ("genesis_relay" in the settings file) go with planning as well, unless it
+// says "enabled": false. Agents then coordinate through structured messages (request, offer,
+// accept, decline, inform, warn) that ONE relay in this process carries, limits and turns
+// into events; the line an agent says in the game chat is only how a message is shown.
+// The planner may choose to send a request or an offer as a goal (ask_agent, offer_agent), and
+// a request or offer that arrives is decided by the model with a small call of its own
+// ("genesis_relay.decision" holds its hourly limit and token limit; "model_decisions": false
+// leaves every such decision to the code rule, as it is whenever the model is away).
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -65,8 +80,29 @@ if (settings.genesis_events?.enabled === true) {
     event_hub = await startEventPublishing(settings.genesis_events);
 }
 if (settings.genesis_planning?.enabled === true) {
+    const event_sink = event_hub ? event_hub.accept : null;
+    const extensions = [];
+    let recovery = null;
+    if (settings.genesis_recovery?.enabled !== false) {
+        // the supervisor of the agent processes lives in this process too
+        const { startRecovery } = await import('./recovery/server.js');
+        recovery = await startRecovery(settings.genesis_recovery ?? {}, { event_sink });
+        extensions.push((socket, helpers) => recovery.attach(socket, helpers));
+    }
+    let relay = null;
+    if (settings.genesis_relay?.enabled !== false) {
+        // the ONE relay of agent-to-agent messages lives in this process as well
+        const { startRelay } = await import('./relay/server.js');
+        const names = settings.profiles.map((profile) => JSON.parse(readFileSync(path.resolve(repo_root, profile), 'utf8')).name);
+        relay = startRelay(settings.genesis_relay ?? {}, { agents: names, event_sink });
+        extensions.push((socket, helpers) => relay.attach(socket, helpers));
+    }
     // the planner broker lives in this (the MindServer's) process; the agents reach it over their sockets
     const { startPlanning } = await import('./planning/server.js');
-    await startPlanning(settings.genesis_planning, { event_sink: event_hub ? event_hub.accept : null });
+    const host = await startPlanning(settings.genesis_planning, {
+        event_sink, extensions, onGate: recovery ? (state, detail) => recovery.onGate(state, detail) : null,
+    });
+    // the model writes the spoken lines through the broker, and the chest ledger follows what the agents agree on
+    if (relay) relay.bind({ broker: host.broker, ledger: host.ledger, ledgerUpdated: () => host.ledgerUpdated() });
 }
 await import('../main.js');

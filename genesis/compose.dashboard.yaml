@@ -1,0 +1,111 @@
+# Genesis dashboard stack: the dashboard, the alerter, Redis and Postgres.
+#
+#   docker compose -f genesis/compose.dashboard.yaml up -d --build
+#
+# Two services on purpose: the alerter reads the event stream on its own, so alerts keep
+# coming when the dashboard is down.
+#
+# Nothing secret is written here. Set these in the environment or in an .env file next to
+# this file (never commit it):
+#   GENESIS_POSTGRES_PASSWORD   the password of the "genesis" database user      (required)
+#   GENESIS_NTFY_TOPIC          the ntfy topic the operator's phone subscribes to (required)
+#   GENESIS_NTFY_SERVER         default https://ntfy.sh
+#   GENESIS_NTFY_TOKEN          only for a protected topic; default none
+#   GENESIS_DIGEST_TZ           default America/Chicago
+#   GENESIS_DASHBOARD_BIND      host address the dashboard is published on; default 0.0.0.0
+#
+# The dashboard has NO password (decided): whoever can reach port 8080 can use the Controls
+# view. Publish it only where the LAN / Tailscale is the protection; to publish it on the
+# Tailscale address alone, set GENESIS_DASHBOARD_BIND to that address.
+#
+# The agents container (genesis/compose.agents.yaml) must be on the network "genesis" too:
+# it publishes to redis://redis:6379 and the dashboard reaches the MindServer at
+# http://agents:8081. See genesis/dashboard/README.md, "Joining the agents".
+
+name: genesis-dashboard
+
+services:
+  dashboard:
+    build:
+      context: ..
+      dockerfile: genesis/dashboard/Dockerfile
+    image: genesis-dashboard
+    init: true
+    restart: unless-stopped
+    environment:
+      DASHBOARD_PORT: "8080"
+      GENESIS_REDIS_URL: "redis://redis:6379"
+      GENESIS_DATABASE_URL: "postgres://genesis:${GENESIS_POSTGRES_PASSWORD:?set GENESIS_POSTGRES_PASSWORD}@postgres:5432/genesis"
+      GENESIS_EVENT_STREAM: "genesis:events"
+      GENESIS_MINDSERVER_URL: "${GENESIS_MINDSERVER_URL:-http://agents:8081}"
+      GENESIS_AGENTS: "${GENESIS_AGENTS:-Arthur:Builder,Mira:Farmer,Felix:Explorer,Nova:Merchant}"
+    ports:
+      - "${GENESIS_DASHBOARD_BIND:-0.0.0.0}:8080:8080"
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - genesis
+
+  alerter:
+    build:
+      context: ..
+      dockerfile: genesis/alerter/Dockerfile
+    image: genesis-alerter
+    init: true
+    restart: unless-stopped
+    environment:
+      GENESIS_REDIS_URL: "redis://redis:6379"
+      GENESIS_DATABASE_URL: "postgres://genesis:${GENESIS_POSTGRES_PASSWORD:?set GENESIS_POSTGRES_PASSWORD}@postgres:5432/genesis"
+      GENESIS_EVENT_STREAM: "genesis:events"
+      NTFY_SERVER: "${GENESIS_NTFY_SERVER:-https://ntfy.sh}"
+      NTFY_TOPIC: "${GENESIS_NTFY_TOPIC:?set GENESIS_NTFY_TOPIC}"
+      NTFY_TOKEN: "${GENESIS_NTFY_TOKEN:-}"
+      DIGEST_TZ: "${GENESIS_DIGEST_TZ:-America/Chicago}"
+      DIGEST_HOUR: "18"
+      GENESIS_AGENTS: "${GENESIS_AGENTS:-Arthur:Builder,Mira:Farmer,Felix:Explorer,Nova:Merchant}"
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - genesis
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
+    volumes:
+      - genesis-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - genesis
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: genesis
+      POSTGRES_DB: genesis
+      POSTGRES_PASSWORD: "${GENESIS_POSTGRES_PASSWORD:?set GENESIS_POSTGRES_PASSWORD}"
+    volumes:
+      - genesis-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U genesis -d genesis"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - genesis
+
+# Neither Redis nor Postgres publishes a port to the host: only this network reaches them.
+networks:
+  genesis:
+    name: genesis
+
+volumes:
+  genesis-redis:
+  genesis-postgres:

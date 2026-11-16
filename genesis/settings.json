@@ -34,6 +34,20 @@
         "postgres_url": ""
     },
 
+    "genesis_recovery": {
+        "enabled": true
+    },
+
+    "genesis_relay": {
+        "enabled": true,
+        "model_lines": true,
+        "model_decisions": true,
+        "decision": {
+            "max_calls_per_hour": 20,
+            "max_tokens": 80
+        }
+    },
+
     "allow_insecure_coding": false,
     "pathfinding_no_dig": true,
     "blocked_actions": [
