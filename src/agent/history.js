@@ -32,7 +32,13 @@ export class History {
 
     async summarizeMemories(turns) {
         console.log("Storing memories...");
-        this.memory = await this.agent.prompter.promptMemSaving(turns);
+        const new_memory = await this.agent.prompter.promptMemSaving(turns);
+        if (typeof new_memory !== 'string') {
+            // the model gave no reply (see prompter): keep the old memory
+            console.warn('Memory not updated: no model reply.');
+            return;
+        }
+        this.memory = new_memory;
 
         if (this.memory.length > 500) {
             this.memory = this.memory.slice(0, 500);

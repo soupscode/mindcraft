@@ -17,6 +17,14 @@ let server;
 const agent_connections = {};
 const agent_listeners = [];
 
+// Genesis: where structured events from the agent processes go (genesis/events/hub.js).
+// Null, the default, means they are ignored. Set by genesis/events/server.js when the
+// genesis_events setting is on.
+let event_sink = null;
+export function setEventSink(sink) {
+    event_sink = sink;
+}
+
 const settings_spec = JSON.parse(readFileSync(path.join(__dirname, 'public/settings_spec.json'), 'utf8'));
 
 class AgentConnection {
@@ -45,7 +53,7 @@ export function logoutAgent(agentName) {
 }
 
 // Initialize the server
-export function createMindServer(host_public = false, port = 8080) {
+export function createMindServer(host_public = false, port = 8080, listen_host = 'localhost') {
     const app = express();
     server = http.createServer(app);
     io = new Server(server);
@@ -274,12 +282,21 @@ export function createMindServer(host_public = false, port = 8080) {
         socket.on('listen-to-agents', () => {
             addListener(socket);
         });
+
+        socket.on('genesis-event', (event) => {
+            // only an agent's own process connection may hand in events, and only under its own name
+            if (event_sink && agent_connections[event?.agent]?.socket === socket) {
+                event_sink(event);
+            }
+        });
     });
 
     if (host_public) {
         console.log('Public hosting not supported yet. Using localhost.');
     }
-    const host = 'localhost';
+    // listen_host comes from the mindserver_host setting. Agents always connect through
+    // localhost (src/agent/mindserver_proxy.js), so it must be a loopback or wildcard address.
+    const host = listen_host || 'localhost';
     server.listen(port, host, () => {
         console.log(`MindServer running on port ${port} on host ${host}`);
     });

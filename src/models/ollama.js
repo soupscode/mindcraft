@@ -1,13 +1,19 @@
 import { strictFormat } from '../utils/text.js';
+import { ModelError, ModelUnavailableError, ModelTimeoutError, ModelInvalidResponseError } from '../../genesis/lib/model_errors.js';
+
+const DEFAULT_TIMEOUT_MS = 90000;
 
 export class Ollama {
     static prefix = 'ollama';
     constructor(model_name, url, params) {
         this.model_name = model_name;
-        this.params = params;
+        // request_timeout_ms is an option of this client, not an Ollama parameter: keep it out of the request body
+        const { request_timeout_ms, ...model_params } = params || {};
+        this.params = model_params;
+        this.timeout_ms = Number(request_timeout_ms) > 0 ? Number(request_timeout_ms) : DEFAULT_TIMEOUT_MS;
         this.url = url || 'http://127.0.0.1:11434';
         this.chat_endpoint = '/api/chat';
-        this.embedding_endpoint = '/api/embeddings';
+        this.embedding_endpoint = '/api/embed';
     }
 
     async sendRequest(turns, systemMessage) {
@@ -29,19 +35,16 @@ export class Ollama {
                     stream: false,
                     ...(this.params || {})
                 });
-                if (apiResponse) {
-                    res = apiResponse['message']['content'];
-                } else {
-                    res = 'No response data.';
+                res = apiResponse?.message?.content;
+                if (typeof res !== 'string') {
+                    throw new ModelInvalidResponseError('Ollama response has no message content.', this._details(this.chat_endpoint, model));
                 }
             } catch (err) {
                 if (err.message.toLowerCase().includes('context length') && turns.length > 1) {
                     console.log('Context length exceeded, trying again with shorter context.');
                     return await this.sendRequest(turns.slice(1), systemMessage);
-                } else {
-                    console.log(err);
-                    res = 'My brain disconnected, try again.';
                 }
+                throw err; // typed ModelError: callers decide what to do, no placeholder text
             }
 
             const hasOpenTag = res.includes("<think>");
@@ -49,7 +52,7 @@ export class Ollama {
 
             if ((hasOpenTag && !hasCloseTag)) {
                 console.warn("Partial <think> block detected. Re-generating...");
-                if (attempt < maxAttempts) continue;
+                continue; // after the last attempt this falls through to the error below
             }
             if (hasCloseTag && !hasOpenTag) {
                 res = '<think>' + res;
@@ -62,37 +65,60 @@ export class Ollama {
         }
 
         if (finalRes == null) {
-            console.warn("Could not get a valid response after max attempts.");
-            finalRes = 'I thought too hard, sorry, try again.';
+            throw new ModelInvalidResponseError(`Ollama gave no complete response after ${maxAttempts} attempts (unfinished <think> block).`, this._details(this.chat_endpoint, model));
         }
         return finalRes;
     }
 
     async embed(text) {
         let model = this.model_name || 'embeddinggemma';
+        // Ollama's embeddings API (docs/api.md, "Generate Embeddings"): POST /api/embed with
+        // {model, input}; the answer holds one vector per input in `embeddings`.
         let body = { model: model, input: text };
         let res = await this.send(this.embedding_endpoint, body);
-        return res['embedding'];
+        const embedding = Array.isArray(res?.embeddings) ? res.embeddings[0] : null;
+        if (!Array.isArray(embedding) || embedding.length === 0 || !embedding.every((value) => Number.isFinite(value))) {
+            throw new ModelInvalidResponseError('Ollama embedding response has no embedding.', this._details(this.embedding_endpoint, model));
+        }
+        return embedding;
     }
 
+    _details(endpoint, model) {
+        return { provider: 'ollama', model: model ?? null, url: `${this.url}${endpoint}`, timeout_ms: this.timeout_ms };
+    }
+
+    // Resolves with the parsed JSON body, or rejects with a typed ModelError.
+    // The timeout covers the whole exchange: connecting, waiting and reading the body.
     async send(endpoint, body) {
-        const url = new URL(endpoint, this.url);
-        let method = 'POST';
-        let headers = new Headers();
-        const request = new Request(url, { method, headers, body: JSON.stringify(body) });
-        let data = null;
+        const details = this._details(endpoint, body?.model);
+        const started = Date.now();
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), this.timeout_ms);
         try {
-            const res = await fetch(request);
-            if (res.ok) {
-                data = await res.json();
-            } else {
-                throw new Error(`Ollama Status: ${res.status}`);
+            const url = new URL(endpoint, this.url);
+            let method = 'POST';
+            let headers = new Headers();
+            const res = await fetch(url, { method, headers, body: JSON.stringify(body), signal: controller.signal });
+            if (!res.ok) {
+                const text = await res.text().catch(() => '');
+                throw new ModelUnavailableError(`Ollama Status: ${res.status}${text ? ' ' + text.slice(0, 300) : ''}`,
+                    { ...details, status: res.status, elapsed_ms: Date.now() - started });
             }
+            return await res.json();
         } catch (err) {
-            console.error('Failed to send Ollama request.');
-            console.error(err);
+            if (err instanceof ModelError) throw err;
+            const elapsed_ms = Date.now() - started;
+            if (controller.signal.aborted) {
+                throw new ModelTimeoutError(`Ollama request timed out after ${this.timeout_ms} ms.`, { ...details, elapsed_ms, cause: err });
+            }
+            if (err instanceof SyntaxError) {
+                throw new ModelInvalidResponseError('Ollama response was not valid JSON.', { ...details, elapsed_ms, cause: err });
+            }
+            const code = err?.cause?.code ? ` (${err.cause.code})` : '';
+            throw new ModelUnavailableError(`Ollama request failed: ${err?.message ?? err}${code}`, { ...details, elapsed_ms, cause: err });
+        } finally {
+            clearTimeout(timer);
         }
-        return data;
     }
 
     async sendVisionRequest(messages, systemMessage, imageBuffer) {

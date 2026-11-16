@@ -9,6 +9,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { selectAPI, createModel } from './_model_map.js';
+import { isModelError, logModelFailure } from '../../genesis/lib/model_errors.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -222,10 +223,10 @@ export class Prompter {
             }
 
             let prompt = this.profile.conversing;
-            prompt = await this.replaceStrings(prompt, messages, this.convo_examples);
             let generation;
 
             try {
+                prompt = await this.replaceStrings(prompt, messages, this.convo_examples);
                 generation = await this.chat_model.sendRequest(messages, prompt);
                 if (typeof generation !== 'string') {
                     console.error('Error: Generated response is not a string', generation);
@@ -235,6 +236,11 @@ export class Prompter {
                 await this._saveLog(prompt, messages, generation, 'conversation');
 
             } catch (error) {
+                if (isModelError(error)) {
+                    // model failure: no reply at all (nothing to chat or store), and no immediate retry
+                    this._modelFailed(error, 'conversation');
+                    return '';
+                }
                 console.error('Error during message generation or file writing:', error);
                 continue;
             }
@@ -267,21 +273,35 @@ export class Prompter {
             return '```//no response```';
         }
         this.awaiting_coding = true;
-        await this.checkCooldown();
-        let prompt = this.profile.coding;
-        prompt = await this.replaceStrings(prompt, messages, this.coding_examples);
+        try {
+            await this.checkCooldown();
+            let prompt = this.profile.coding;
+            prompt = await this.replaceStrings(prompt, messages, this.coding_examples);
 
-        let resp = await this.code_model.sendRequest(messages, prompt);
-        this.awaiting_coding = false;
-        await this._saveLog(prompt, messages, resp, 'coding');
-        return resp;
+            let resp = await this.code_model.sendRequest(messages, prompt);
+            await this._saveLog(prompt, messages, resp, 'coding');
+            return resp;
+        } catch (error) {
+            if (!isModelError(error)) throw error;
+            this._modelFailed(error, 'coding');
+            return null; // no model reply
+        } finally {
+            this.awaiting_coding = false;
+        }
     }
 
     async promptMemSaving(to_summarize) {
         await this.checkCooldown();
         let prompt = this.profile.saving_memory;
         prompt = await this.replaceStrings(prompt, null, null, to_summarize);
-        let resp = await this.chat_model.sendRequest([], prompt);
+        let resp;
+        try {
+            resp = await this.chat_model.sendRequest([], prompt);
+        } catch (error) {
+            if (!isModelError(error)) throw error;
+            this._modelFailed(error, 'memSaving');
+            return null; // no model reply: the caller must keep the old memory
+        }
         await this._saveLog(prompt, to_summarize, resp, 'memSaving');
         if (resp?.includes('</think>')) {
             const [_, afterThink] = resp.split('</think>')
@@ -296,7 +316,14 @@ export class Prompter {
         let messages = this.agent.history.getHistory();
         messages.push({role: 'user', content: new_message});
         prompt = await this.replaceStrings(prompt, null, null, messages);
-        let res = await this.chat_model.sendRequest([], prompt);
+        let res;
+        try {
+            res = await this.chat_model.sendRequest([], prompt);
+        } catch (error) {
+            if (!isModelError(error)) throw error;
+            this._modelFailed(error, 'botResponder');
+            return false; // no model reply: do not interrupt the current action
+        }
         return res.trim().toLowerCase() === 'respond';
     }
 
@@ -304,7 +331,13 @@ export class Prompter {
         await this.checkCooldown();
         let prompt = this.profile.image_analysis;
         prompt = await this.replaceStrings(prompt, messages, null, null, null);
-        return await this.vision_model.sendVisionRequest(messages, prompt, imageBuffer);
+        try {
+            return await this.vision_model.sendVisionRequest(messages, prompt, imageBuffer);
+        } catch (error) {
+            if (!isModelError(error)) throw error;
+            this._modelFailed(error, 'vision');
+            return null; // no model reply
+        }
     }
 
     async promptGoalSetting(messages, last_goals) {
@@ -317,7 +350,14 @@ export class Prompter {
         user_message = await this.replaceStrings(user_message, messages, null, null, last_goals);
         let user_messages = [{role: 'user', content: user_message}];
 
-        let res = await this.chat_model.sendRequest(user_messages, system_message);
+        let res;
+        try {
+            res = await this.chat_model.sendRequest(user_messages, system_message);
+        } catch (error) {
+            if (!isModelError(error)) throw error;
+            this._modelFailed(error, 'goalSetting');
+            return null; // no model reply, same as "no goal set"
+        }
 
         let goal = null;
         try {
@@ -332,6 +372,13 @@ export class Prompter {
         }
         goal.quantity = parseInt(goal.quantity);
         return goal;
+    }
+
+    // A model call failed with a typed error. Until the event bus exists, the only
+    // trace is one JSON line on the console. The failure is never chatted, never
+    // added to history and never written to the memory summary.
+    _modelFailed(error, call) {
+        logModelFailure(error, { agent: this.agent?.name ?? this.profile?.name ?? null, call });
     }
 
     async _saveLog(prompt, messages, generation, tag) {

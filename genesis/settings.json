@@ -1,0 +1,41 @@
+{
+    "minecraft_version": "1.21.6",
+    "host": "192.168.1.190",
+    "port": 25600,
+    "auth": "offline",
+
+    "mindserver_port": 8081,
+    "mindserver_host": "0.0.0.0",
+    "auto_open_ui": false,
+
+    "init_message": "",
+    "load_memory": true,
+
+    "genesis_events": {
+        "enabled": false,
+        "redis_url": "redis://REDIS_HOST:6379",
+        "stream": "genesis:events",
+        "stream_per_agent": false,
+        "stream_maxlen": 20000,
+        "buffer_size": 2000
+    },
+
+    "allow_insecure_coding": false,
+    "pathfinding_no_dig": true,
+    "blocked_actions": [
+        "!checkBlueprint",
+        "!checkBlueprintLevel",
+        "!getBlueprint",
+        "!getBlueprintLevel",
+        "!newAction",
+        "!startConversation",
+        "!endConversation"
+    ],
+
+    "profiles": [
+        "./genesis/profiles/arthur.json",
+        "./genesis/profiles/mira.json",
+        "./genesis/profiles/felix.json",
+        "./genesis/profiles/nova.json"
+    ]
+}
