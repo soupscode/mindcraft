@@ -40,9 +40,12 @@
 //
 // Agent messages (genesis/relay; only with `messaging: true`): the agent talks to other agents
 // through structured messages that the relay in the MindServer carries and limits. A contested
-// claim becomes a request to the holder; a request that arrives is a planning trigger whose
-// hand-over is one of the options offered (with the model away a code rule decides, source
-// "routine"); what the agent accepts becomes a goal the executor carries out.
+// claim becomes a request to the holder. The planner may choose to send a request or an offer
+// as a goal (ask_agent, offer_agent: the catalog offers them while the desk has room for one,
+// and the goal's one step is sent from here, never by the bot). A request or offer that
+// arrives is decided by the model with a small call of its own (source "planner"), and by a
+// code rule when the model cannot (source "routine"); what the agent accepts becomes a goal
+// the executor carries out.
 // Depends only on other Genesis files.
 
 import { createExecutor } from '../executor/executor.js';
@@ -58,6 +61,7 @@ import { createIncidentReporter, INCIDENT_KINDS } from '../recovery/incidents.js
 import { createWatchdog, progressSignature, SIGNATURE_DEFAULTS, BLOCKED_REASONS } from '../recovery/watchdog.js';
 import { createDeathRecovery, DEATH_RULES } from '../recovery/death.js';
 import { createMessageDesk } from '../relay/desk.js';
+import { MESSAGE_STEP } from '../catalog/ops.js';
 
 export function createAgentRuntime({
     agent, zones, catalog, view, ops, goal_storage, checkpoints, send, emit = () => null, getSeq = () => 0,
@@ -65,10 +69,10 @@ export function createAgentRuntime({
     routine: routine_definition = routineFor(agent), memory = () => '', ids = null,
     executor: executor_options = {}, planner: planner_options = {}, rules = {}, onContestedClaim = () => {},
     contested_quiet_ms = 60 * 1000, recovery_ops = null, watchdog: watchdog_options = {}, death: death_options = {},
-    messaging = false, desk: desk_options = {},
+    messaging = false, desk: desk_options = {}, relay_limits = {},
 } = {}) {
     const tracker = scaffold ?? createScaffoldTracker({ zones });
-    const stats = { deaths: 0, operator_messages: 0, agent_requests: 0, ignored_messages: 0, ignored_chat: 0, contested_claims: 0, contested_repeats: 0 };
+    const stats = { deaths: 0, deaths_without_request: 0, operator_messages: 0, agent_requests: 0, ignored_messages: 0, ignored_chat: 0, contested_claims: 0, contested_repeats: 0 };
     const ignored_by = new Map();      // who was not listened to -> how often (the newest 50 names)
     const contested_seen = new Map();  // "chest|item|holder" -> when the claim was last reported
     let long_term = [];
@@ -101,11 +105,12 @@ export function createAgentRuntime({
         ? createRoutine({ agent, definition: routine_definition, catalog, zones, clock, emit: say, rules })
         : null;
 
-    // The world as it is now, for the catalog. asks and duties: what other agents asked of this
-    // one and what it agreed to hand over (the give_items option only exists for those).
+    // The world as it is now, for the catalog. duties: what the agent agreed to hand over (the
+    // give_items option only exists for those). talk: the message desk's view of what may be sent
+    // right now (ask_agent and offer_agent are only offered with it); null without a desk.
     const state = () => ({
         agent, view, ledger, avoid: routine?.avoid() ?? [], now: clock.now(),
-        asks: desk?.asks() ?? [], duties: desk?.duties() ?? [], handedOver: (args, how) => desk?.handedOver(args, how),
+        duties: desk?.duties() ?? [], talk: desk?.talk() ?? null, handedOver: (args, how) => desk?.handedOver(args, how),
     });
 
     // The agent wanted items another agent has reserved. One event per claim and minute (a
@@ -147,6 +152,8 @@ export function createAgentRuntime({
         // a reply does not replace the goal in hand, unless the routine chose it: the routine gives way
         // (a goal kept through a recovery detour is still the goal in hand)
         inHand: () => { const kept = executor.mainPlan(); return kept && kept.source !== 'routine' ? kept.goal.id : null; },
+        // what the agent agreed with another agent is not the plan's to replace: an accepted hand-over stays queued
+        keeps: (goal) => desk?.owes(goal) ?? false,
         held: () => executor?.isHeld() ?? false,
         onGoals(queued, origin, { dropped = [] } = {}) {
             idle_since = null;
@@ -159,8 +166,6 @@ export function createAgentRuntime({
         },
         onGate({ opened, closed, state: gate_state, reason }) {
             if (closed) routine?.awayStarted();
-            // requests of other agents that waited for the planner's choice: the model is gone, the code rule answers them
-            if (closed && desk?.hasAsks()) desk.onPlanned(null).catch(() => {});
             if (opened) {
                 routine?.modelReturned();
                 // the routine finishes the step it is on, keeps its phase, and gives way
@@ -187,8 +192,20 @@ export function createAgentRuntime({
         return choice;
     }
 
+    // The step runner the executor is given. A step that is not an upstream skill never reaches the bot:
+    // the message of an ask_agent or offer_agent goal goes to the relay through the desk, which records
+    // who chose to send it (the origin of the goal in hand).
+    const stepper = {
+        run(command, args, context) {
+            if (command !== MESSAGE_STEP) return ops.run(command, args, context);
+            if (!desk) return Promise.resolve({ ok: false, interrupted: false, timedout: false, output: 'message_rejected: no_messaging' });
+            const goal = executor.plan()?.goal ?? null;
+            return desk.sendStep(args, { origin: goal ? { by: goal.origin ?? null, call_id: goal.call_id ?? null } : null });
+        },
+    };
+
     executor = createExecutor({
-        agent, catalog, goals, checkpoints, ops, state, emit: say, getSeq, clock, scaffold: tracker, zones, ids,
+        agent, catalog, goals, checkpoints, ops: stepper, state, emit: say, getSeq, clock, scaffold: tracker, zones, ids,
         onTrigger: ({ kind, detail }) => planner.trigger(kind, detail),
         chooseWork,
         onGoalEnd(end) {
@@ -218,7 +235,7 @@ export function createAgentRuntime({
     });
 
     if (messaging) {
-        desk = createMessageDesk({ agent, send, clock, catalog, state, goals, executor, planner, emit: say, rules: desk_options });
+        desk = createMessageDesk({ agent, send, clock, catalog, state, goals, executor, planner, emit: say, rules: desk_options, limits: relay_limits });
     }
 
     // ---- recovery ----
@@ -301,7 +318,8 @@ export function createAgentRuntime({
                     await recovery_ops.interrupt();
                     return { ok: true };
                 },
-                // 5: the process ends and is started again; the checkpoint carries the goal and this incident
+                // 5: the process ends and is started again; the checkpoint carries the goal and this incident.
+                // (decided: the supervisor does not count this restart toward its crash cap; the ladder's hourly cap bounds it)
                 async restart_process() {
                     await executor.saveNow();
                     await recovery_ops.restartProcess('the watchdog found no progress after four recovery steps');
@@ -346,9 +364,6 @@ export function createAgentRuntime({
         onPlanQueued: (message) => planner.onQueued(message),
         async onPlanResult(result) {
             const outcome = await planner.onResult(result);
-            // the reply decides about the requests of other agents that waited for it: the hand-over it
-            // chose is the accept; with no reply at all, the code rule decides
-            if (desk?.hasAsks() && outcome.kind !== 'replaced') await desk.onPlanned(outcome.kind === 'goals' ? outcome.added : null);
             executor.wake(); // goals to start, or nothing came and the routine goes on
             return outcome;
         },
@@ -376,6 +391,10 @@ export function createAgentRuntime({
         //     then that goal goes on at the step it was at. No planning trigger.
         //   - a goal the routine chose is given up: the routine starts again at its Kit check
         //   - the second death (in one model-away period, or on one goal) gives the goal up
+        // Decided: a death with no goal of the planner or the operator to resume (the agent was on its
+        // routine, or idle) sends NO planning request. The agent respawns, re-equips and returns to its
+        // routine. Only when a goal the planner or the operator chose is given up over a death (the
+        // second death on it, or the agent is parked) is the planner told, as for any goal of its own that ended.
         // Returns the routine's verdict: 'restart' or 'parked'.
         async died(point) {
             stats.deaths++;
@@ -395,7 +414,9 @@ export function createAgentRuntime({
             } else {
                 await executor.abandon('died');
                 died_on = null;
-                planner.trigger('reflex_interrupt', { cause: 'death' });
+                // only a goal the planner or the operator chose, given up here, is the planner's to hear of
+                if (kept !== null && kept.source !== 'routine') planner.trigger('reflex_interrupt', { cause: 'death', gave_up: kept.goal.option_id });
+                else stats.deaths_without_request++;
                 if (verdict !== 'parked') {
                     // the routine's own rule takes over (walk home, Kit check); told as one recovery step
                     reporter.step({ incident_id: reporter.newId(), source: { type: 'agent', name: agent }, kind: INCIDENT_KINDS.DEATH },

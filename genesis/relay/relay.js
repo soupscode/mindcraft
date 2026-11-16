@@ -86,6 +86,7 @@ export function createRelay({
     const sent = new Map();          // agent -> when its relayed messages were sent, within the rate window
     const repeats = new Map();       // sameKey -> when it was relayed, within the block time
     const stats = { relayed: 0, rejected: 0, expired: 0, accepted: 0, declined: 0, spoken: 0, model_lines: 0, template_lines: 0, rejected_by: {} };
+    const lines_pending = new Map(); // msg_id -> resolves when the line of that message has been spoken
     let waiting_lines = 0;           // lines not yet written
     let in_order = Promise.resolve(); // lines and events, one after the other
     let line_writer = line;
@@ -252,7 +253,8 @@ export function createRelay({
             const crowded = waiting_lines >= limits.max_lines_waiting;
             const state_when_sent = message.state;
             waiting_lines++;
-            later(() => speak(message, state_when_sent, crowded).finally(() => { waiting_lines--; }));
+            const line_spoken = later(() => speak(message, state_when_sent, crowded).finally(() => { waiting_lines--; lines_pending.delete(message.msg_id); }));
+            lines_pending.set(message.msg_id, line_spoken);
             hand(to, 'genesis-msg', copy(message));
             if (answered) {
                 // the request or offer changed its state: an event of its own, and both ends are told
@@ -274,6 +276,10 @@ export function createRelay({
             return { id: conv.id, members: [...conv.members], turns: conv.turns, open: isOpen(conv), over: conv.over, pending: conv.pending ? copy(conv.pending) : null, newest: copy(conv.newest) };
         },
         openConversations: (agent) => openFor(agent),
+        // Resolves when the line of this message has been spoken (at once when it already was, or for a
+        // message the relay does not know). The model's decision about a request waits for it, so the
+        // asker's line is written first and the two small calls never race (genesis/relay/server.js).
+        lineSettled: (msg_id) => lines_pending.get(msg_id) ?? Promise.resolve(),
         // Resolves when every line that is being written has been spoken (for tests and shutdown).
         async idle() { let seen; do { seen = in_order; await seen; } while (seen !== in_order); },
         stats: () => ({ ...stats, rejected_by: { ...stats.rejected_by }, conversations: conversations.size }),

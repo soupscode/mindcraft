@@ -40,7 +40,12 @@
 
     "genesis_relay": {
         "enabled": true,
-        "model_lines": true
+        "model_lines": true,
+        "model_decisions": true,
+        "decision": {
+            "max_calls_per_hour": 20,
+            "max_tokens": 80
+        }
     },
 
     "allow_insecure_coding": false,

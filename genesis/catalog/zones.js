@@ -31,6 +31,8 @@
 //   protectedAt(pos) -> 'camp' | 'field' | 'plot:<id>' | null
 //   isProtected(pos) -> boolean
 //   field() -> box                         camp() -> box
+//   fieldOwner() -> the agent the field is for ("field.owner" of the file), or null (nobody in particular)
+//   agents() -> [names]                    every agent the file lists
 //   plots() -> [plot]                      plot(id) -> plot | null
 //   plotOverlaps(id) -> [names of the zones and plots the plot overlaps]
 //   chests() -> [{ name, pos }]            chest(name) -> {x,y,z} | null
@@ -203,6 +205,7 @@ export function createZones(config) {
         isProtected: (pos) => protectedAt(pos) !== null,
         camp: () => camp,
         field: () => field,
+        fieldOwner: () => (typeof config.field.owner === 'string' && config.field.owner.length > 0 ? config.field.owner : null),
         plots: () => plots.map((plot) => ({ ...plot })),
         plot: (id) => plots.find((plot) => plot.id === id) ?? null,
         // The zones and other plots a plot shares at least one cell with.

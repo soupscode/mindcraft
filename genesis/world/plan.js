@@ -7,14 +7,25 @@
 //                    sets it, the command that reads it back, and whether it favours the agents
 //   server_settings  rules that are server.properties / bukkit.yml settings: the bootstrap never
 //                    edits server files, the operator must set these ({ file, key, value, lines, why })
+//   areas            the levelling of the camp (decided): whole layers the bootstrap fills ONCE, before
+//                    it places the camp: { id, kind, min, max, block, purpose }, both corners included.
+//                      kind "clear"  a layer above the floor, filled with air (the highest layer first)
+//                      kind "floor"  the layer the camp stands on, filled with the floor block
+//                    No area holds more blocks than one fill command may change (FILL_LIMIT).
+//   floor            what the check step verifies in EVERY run: { y, min: [x, z], max: [x, z], accepts }
+//                    every cell of the floor layer must be one of `accepts`
 //   blocks           every block of the starter camp: { id, pos, place, expect, purpose, once }
 //                      place   the block as it is put down       "minecraft:chest[facing=south,type=left]"
 //                      expect  what must be there afterwards (looser where the game changes the
 //                              block by itself: farmland dries, a furnace lights, a bed is slept in)
 //                      once    true: put down in the first run only and never looked at again,
-//                              because the agents change it from then on (the crops)
+//                              because the agents change it from then on (the layer the crops grow in)
 //   items            what goes into the kits chest, once: { id, pos, slot, item, count }
-//   favours          what favours the agents besides the rules (the camp itself, the kit, the crops)
+//   favours          what favours the agents besides the rules (the levelled camp, the camp itself,
+//                    the kit, the tilled field)
+//
+// The field is left BARE (decided): tilled farmland with its water, and nothing sown. The
+// field is Operator-built; every crop on it is agent-planted, from the seeds in the kit.
 //
 // MINECRAFT COMMANDS: written for Java Edition 1.21.6 from general knowledge of the game,
 // not from a source file in this repository, and NOT RUN AGAINST A REAL SERVER. The list,
@@ -37,21 +48,62 @@ export const COMMANDS_USED = Object.freeze([
     { command: 'setworldspawn <x> <y> <z>', answer: 'not read: the spawn point cannot be asked for' },
     { command: 'execute if block <x> <y> <z> <block[states]>', answer: 'Test passed | Test failed' },
     { command: 'setblock <x> <y> <z> <block[states]>', answer: 'not read: checked with execute if block' },
+    { command: 'fill <x1> <y1> <z1> <x2> <y2> <z2> <block>', answer: 'Successfully filled <n> block(s) | No blocks were filled' },
     { command: 'item replace block <x> <y> <z> container.<slot> with <item> <count>', answer: 'not read: checked with data get block' },
     { command: 'data get block <x> <y> <z> Items', answer: '<x>, <y>, <z> has the following block data: [{Slot: 0b, id: "minecraft:bread", count: 16}, ...]' },
 ]);
 
 export const GAME_RULES_USED = Object.freeze(['keepInventory', 'mobGriefing', 'doFireTick', 'disableRaids']);
 
+// Levelling the camp (decided: the bootstrap clears and floors the camp area before it places
+// the camp). The floor is the layer under the home point; the camp's blocks stand on it.
+// The numbers are proposed starting values.
+export const CAMP_LEVELLING = Object.freeze({
+    floor_block: 'grass_block',                             // proposed: what the floor is made of
+    // grass under a full block (the crafting table, the furnace) turns to dirt by itself
+    floor_accepts: Object.freeze(['grass_block', 'dirt']),
+    clear_height: 24,                                       // proposed: layers cleared above the floor (tall trees included)
+});
+// How many blocks ONE fill command may change: the vanilla default of the game rule
+// commandModificationBlockLimit. From general knowledge of the game, not from a source file here.
+export const FILL_LIMIT = 32768;
+const BUILD_TOP = 319; // the highest layer of the overworld
+
 const block = (name, states = {}) => {
     const list = Object.entries(states).map(([key, value]) => `${key}=${value}`);
     return `minecraft:${name}${list.length > 0 ? `[${list.join(',')}]` : ''}`;
 };
 
+// The areas that level the camp: the layers above the floor, highest first (so nothing that
+// falls, sand or gravel, drops into a layer that was already cleared), then the floor itself.
+// A layer larger than one fill command may change is cut into slabs along x.
+function levellingAreas(config) {
+    const [x1, z1] = config.camp.min;
+    const [x2, z2] = config.camp.max;
+    const floor_y = config.home[1] - 1;
+    const depth = z2 - z1 + 1;
+    const slab = Math.max(1, Math.floor(FILL_LIMIT / depth)); // columns along x in one fill
+    const slabs = [];
+    for (let x = x1; x <= x2; x += slab) slabs.push([x, Math.min(x2, x + slab - 1)]);
+    const areas = [];
+    const add = (id, kind, y, block_name, purpose) => slabs.forEach(([from, to], n) => areas.push({
+        id: slabs.length > 1 ? `${id}.${n + 1}` : id, kind, min: [from, y, z1], max: [to, y, z2], block: block(block_name), purpose,
+    }));
+    const top = Math.min(BUILD_TOP, floor_y + CAMP_LEVELLING.clear_height);
+    for (let y = top; y > floor_y; y--) add(`camp.clear.${y}`, 'clear', y, 'air', `camp cleared (layer ${y})`);
+    add('camp.floor', 'floor', floor_y, CAMP_LEVELLING.floor_block, `camp floor (layer ${floor_y})`);
+    return areas;
+}
+
 export function buildBootstrapPlan(config) {
     const facing = config.camp.facing ?? 'south';
     const blocks = [];
     const put = (id, pos, place, purpose, { expect = place, once = false } = {}) => blocks.push({ id, pos: [...pos], place, expect, purpose, once });
+    const areas = levellingAreas(config);
+    const floor = {
+        y: config.home[1] - 1, min: [...config.camp.min], max: [...config.camp.max],
+        accepts: CAMP_LEVELLING.floor_accepts.map((name) => block(name)),
+    };
 
     // ---- the shared double chest: two chests that face the same way, typed as its halves.
     // A chest of type "left" is joined to the block clockwise of the way it faces.
@@ -74,7 +126,8 @@ export function buildBootstrapPlan(config) {
     });
 
     // ---- the field: farmland with water in it, something solid under the water, and the
-    // layer above either sown or cleared so that the farmland stays farmland
+    // layer above cleared so that the farmland stays farmland. Nothing is sown (decided): the
+    // field is left bare, and the agents plant it from the seeds in the kit.
     const field = config.field;
     const is_water = (x, z) => field.water.some(([wx, wz]) => wx === x && wz === z);
     for (const [x, z] of field.water) {
@@ -90,8 +143,8 @@ export function buildBootstrapPlan(config) {
     for (let x = field.min[0]; x <= field.max[0]; x++) {
         for (let z = field.min[1]; z <= field.max[1]; z++) {
             if (is_water(x, z)) continue;
-            if (field.crop) put(`field.crop.${x}.${z}`, [x, field.y + 1, z], block(field.crop, { age: 0 }), `${field.crop} sown on the field (age 0)`, { once: true });
-            else put(`field.clear.${x}.${z}`, [x, field.y + 1, z], block('air'), 'cleared above the farmland', { once: true });
+            // once: from the first run on this layer is the agents' (what they sow grows here)
+            put(`field.clear.${x}.${z}`, [x, field.y + 1, z], block('air'), 'cleared above the farmland', { once: true });
         }
     }
 
@@ -132,13 +185,15 @@ export function buildBootstrapPlan(config) {
             why: 'the End is disabled (the key "allow-end" under "settings")' },
     ];
 
+    const clear_layers = new Set(areas.filter((area) => area.kind === 'clear').map((area) => area.min[1])).size;
     const favours = [
-        { id: 'starter_camp', what: 'The starter camp was built by the operator: one shared double chest, a kits chest, four beds, a crafting table, a furnace and a 9 by 9 field with water. The agents built none of it.' },
+        { id: 'levelled_camp', what: `The camp area was levelled by the operator before anything was placed: ${clear_layers} layers above the floor were cleared and the floor was laid with ${CAMP_LEVELLING.floor_block.replaceAll('_', ' ')}. Every block that changed is counted in this manifest, layer by layer. The agents levelled none of it.` },
+        { id: 'starter_camp', what: 'The starter camp was built by the operator: one shared double chest, a kits chest, four beds, a crafting table, a furnace and a 9 by 9 field of tilled farmland with water. The agents built none of it.' },
         ...(items.length > 0 ? [{ id: 'kits', what: `The kits chest was filled once by the operator with ${config.kits.map((stack) => `${stack.count} ${stack.item}`).join(', ')}. The agents restock it themselves from then on.` }] : []),
-        ...(field.crop ? [{ id: 'crops', what: `The field was sown once by the operator with ${field.crop} at age 0. The agents harvest and replant it themselves from then on.` }] : []),
+        { id: 'field', what: 'The field is Operator-built and was left bare: the operator tilled and watered it and sowed nothing. Every crop on it is agent-planted, from the seeds in the kit.' },
     ];
 
-    return { seed: seedText(config.seed), rules, server_settings, blocks, items, favours };
+    return { seed: seedText(config.seed), rules, server_settings, areas, floor, blocks, items, favours };
 }
 
 // The text of server-settings.required.txt.

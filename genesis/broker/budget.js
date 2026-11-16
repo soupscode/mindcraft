@@ -1,13 +1,16 @@
 // Genesis: the planning budget of each agent.
-//   - 20 planning calls per agent per real hour (a sliding hour). The call that would be
-//     the 21st is refused.
+//   - 40 planning calls per agent per real hour (a sliding hour; decided, it was 20). The
+//     call that would be the 41st is refused.
 //   - at least 90 seconds between an agent's calls, counted from the end of the last one.
-//     A call that comes sooner is delayed, not refused.
+//     A call that comes sooner is delayed, not refused. The one repair retry after an invalid
+//     reply need not wait, and it counts as a call.
+//   With these two numbers the 90 seconds alone hold an agent to 40 calls in an hour: the
+//   hourly limit is only ever reached when repair retries were made.
 // A call that was cancelled because the desktop left is given back (refund).
 // Times are milliseconds from the injected clock. No imports.
 
 export const BUDGET_DEFAULTS = Object.freeze({
-    max_calls: 20,
+    max_calls: 40,              // decided
     window_ms: 60 * 60 * 1000,
     min_gap_ms: 90 * 1000,
 });

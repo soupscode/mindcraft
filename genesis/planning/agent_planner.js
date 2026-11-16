@@ -26,6 +26,9 @@
 // "still queued" (a routine goal in hand is not kept: the routine gives way to the planner).
 // A request the budget refuses, a reply that is discarded, or a model that is away changes
 // nothing: the agent keeps the queue it has.
+// One kind of waiting goal is not the plan's to replace: what the agent has agreed with another
+// agent (a hand-over it accepted or offered, the fetch of items left for it: genesis/relay/desk.js).
+// `keeps(goal)` says so; such a goal stays in the queue, ahead of the reply's goals.
 //
 // While the operator holds the agent (!stop) no request is sent at all: `held()` says so.
 //
@@ -33,6 +36,7 @@
 // store), buildContext(input) (genesis/planning/context.js), describe() -> { role, long_term,
 // last_outcome, routine, home_distance, memory }, onGoals(queued goals, origin), onGate(state, before),
 // inHand() -> the id of the goal being carried out that a reply must not replace, or null,
+// keeps(goal) -> true for a waiting goal a reply must not replace (a commitment to another agent),
 // held() -> true while the operator holds the agent.
 // Depends only on other Genesis files.
 
@@ -51,7 +55,7 @@ const URGENT = new Set(['operator_message', 'agent_request', 'step_failed', 'ref
 
 export function createAgentPlanner({
     agent, send, clock, catalog, state, goals, describe = () => ({}), onGoals = () => {}, onGate = () => {},
-    buildContext = buildPlanContext, inHand = () => null, held = () => false, ...options
+    buildContext = buildPlanContext, inHand = () => null, held = () => false, keeps = () => false, ...options
 } = {}) {
     const config = { ...PLANNER_CLIENT_DEFAULTS };
     for (const key of Object.keys(PLANNER_CLIENT_DEFAULTS)) {
@@ -66,6 +70,8 @@ export function createAgentPlanner({
     let last_thought = null;    // { text, at } the model's own sentence, from its last valid reply
     let last_failure = null;    // { reason, at } of the last request that brought no goals
     let counter = 0;
+    // a goal a reply leaves where it is: the goal in hand, and what the agent agreed with another agent
+    const stays = (goal) => { try { return goal.id === inHand() || keeps(goal) === true; } catch { return goal.id === inHand(); } };
 
     function submit(trigger) {
         const now = clock.now();
@@ -163,9 +169,9 @@ export function createAgentPlanner({
             if (!before.ok) return { kind: 'not_stored', code: before.code, error: before.error };
             const dropped = [];
             for (const goal of before.goals.short_term) {
-                if (goal.id === inHand()) continue; // the goal in hand is finished first
+                if (stays(goal)) continue; // the goal in hand is finished first; a commitment to another agent is not the plan's to drop
                 // (asked again inside the change: the executor may have taken this goal in hand a moment ago)
-                const gone = await goals.setShortTerm(agent, (queue) => queue.filter((queued) => queued.id !== goal.id || queued.id === inHand()), {
+                const gone = await goals.setShortTerm(agent, (queue) => queue.filter((queued) => queued.id !== goal.id || stays(queued)), {
                     reason: `replaced by a new plan (asked because: ${why}): ${thought}`, source: 'planner', call_id: result.call_id,
                 });
                 if (gone.ok) dropped.push(goal);
@@ -173,9 +179,9 @@ export function createAgentPlanner({
             }
             stats.goals_dropped += dropped.length;
 
-            // 2. the planner's 1 to 3 goals follow the goal in hand (which the queue's size still counts)
+            // 2. the planner's 1 to 3 goals follow the goal in hand and the commitments (which the queue's size still counts)
             const change = await goals.setShortTerm(agent, (queue) => {
-                const kept = queue.filter((goal) => goal.id === inHand());
+                const kept = queue.filter((goal) => stays(goal));
                 // a goal the reply names again while it is being carried out is not queued a second time
                 const fresh = wanted.filter((goal) => !kept.some((mine) => mine.option_id === goal.option_id)).slice(0, GOAL_LIMITS.short_term_max - kept.length);
                 return [...kept, ...fresh];

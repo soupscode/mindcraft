@@ -56,7 +56,8 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
         blocked: () => false,     // (from, to) -> true when no dig-free path exists
         hang: null,               // (call) -> true: the skill never returns (a process that is about to be killed)
         fail: null,               // (call) -> { output } to make a skill fail, { interrupted: true } to interrupt it
-        scaffold: null,           // (call) -> [{ x, y, z, name, sticky? }] blocks the walk puts down
+        scaffold: null,           // (call) -> [{ x, y, z, name, sticky?, reflex_torch? }] blocks the walk puts down
+                                  //   reflex_torch: a torch upstream's idle torch reflex placed (reported as such)
         stall: null,              // (call) -> true: the skill gets nowhere; it ends when it is interrupted, or times out after stall_ms
         stall_ms: 5 * 60 * 1000,
         boxed: () => false,       // (agent) -> true: the agent is shut in; the recovery moves below get nowhere either
@@ -248,8 +249,9 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
             }
             for (const cell of world.scaffold?.(call) ?? []) {
                 world.set(cell.x, cell.y, cell.z, cell.name ?? 'dirt', { sticky: cell.sticky === true });
-                world.placed.push({ x: cell.x, y: cell.y, z: cell.z, name: cell.name ?? 'dirt', by: agent, how: 'scaffold' });
-                on_place({ x: cell.x, y: cell.y, z: cell.z }, 'scaffold');
+                const how = cell.reflex_torch ? 'reflex_torch' : 'scaffold';
+                world.placed.push({ x: cell.x, y: cell.y, z: cell.z, name: cell.name ?? 'dirt', by: agent, how });
+                on_place({ x: cell.x, y: cell.y, z: cell.z }, how);
             }
             if (dist(body.position, target) > near) body.position = { x: target.x + 1, y: target.y, z: target.z };
             return true;

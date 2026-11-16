@@ -31,6 +31,8 @@
 //   goals        the goal store (genesis/store/goal_store.js)
 //   checkpoints  the checkpoint store (genesis/store/checkpoint.js)
 //   ops          { run(command, args, { permit, corr, cleanup }) -> Promise<{ ok, interrupted, timedout, output }> }
+//                (a step that is not an upstream skill, the message of an ask_agent or offer_agent goal,
+//                is handed on by the agent runtime before it reaches the bot: genesis/agent/runtime.js)
 //                permit: null | { dig: (pos) -> true where digging stays forbidden, no_place: boolean }
 //   state        () -> { agent, view, ledger, avoid, now }   the world as it is (see genesis/catalog/templates.js)
 //   emit         (type, data, { corr, severity })            genesis/events/agent_emit.js shape
@@ -64,6 +66,10 @@ export const EXECUTOR_DEFAULTS = Object.freeze({
 const FINAL_REASONS = new Set(['protected_zone', 'outside_plot', 'outside_field', 'cell_occupied', 'unknown_command', 'unknown_option', 'plot_not_registered',
     'contested_claim', // another agent holds the items: trying again at once changes nothing
     'stuck']);         // the watchdog parked the step (genesis/recovery/watchdog.js): it was tried in every way already
+
+// A message the relay did not take (ask_agent, offer_agent: "relay_rate_limit", ...): sending it again at once
+// would only be refused again, and count against the agent's messages.
+const isFinal = (reason) => FINAL_REASONS.has(reason) || String(reason).startsWith('relay_');
 
 const copy = (value) => JSON.parse(JSON.stringify(value));
 
@@ -268,7 +274,7 @@ export function createExecutor({
     async function stepFailed(step, reason) {
         const failed = plan;
         stats.steps_failed++;
-        if (step.attempts < config.max_attempts && !FINAL_REASONS.has(reason)) {
+        if (step.attempts < config.max_attempts && !isFinal(reason)) {
             await boundary();
             return { kind: 'step_retry', step: step.i, reason, attempts: step.attempts, wait_ms: config.retry_gap_ms };
         }

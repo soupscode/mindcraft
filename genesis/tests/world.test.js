@@ -23,7 +23,7 @@ import { fileBlueprints, blueprintSize } from '../catalog/blueprints.js';
 import {
     checkWorldConfig, worldHash, WORLD_PROBLEMS, DECIDED_RANGES, DECIDED_RULES, DECIDED_BORDER_SIZE, PLOT_SIZE, borderBox, seedText,
 } from '../world/world_config.js';
-import { buildBootstrapPlan, serverSettingsText, GAME_RULES_USED } from '../world/plan.js';
+import { buildBootstrapPlan, serverSettingsText, GAME_RULES_USED, CAMP_LEVELLING, FILL_LIMIT, COMMANDS_USED } from '../world/plan.js';
 import { runBootstrap, reportLines, parseItems, ANSWERS } from '../world/bootstrap.js';
 import { OPERATOR, MANIFEST_KIND, checkManifest, parseManifest, manifestPaths, RESET_MARKER_FILE, SERVER_SETTINGS_FILE } from '../world/manifest.js';
 import { planReset, runReset, resetFiles, resetLines, RESET_FLAG, RESET_TABLES } from '../world/reset.js';
@@ -118,6 +118,11 @@ test('world file: each kind of invalid file is rejected with a named reason', ()
         ['outside_build_height', (c) => { c.plots[0].max[1] = 400; }, /leaves the build height/],
         ['bad_kit', (c) => { c.kits[0].count = 4; }, /stone_axe does not stack/],
         ['bad_kit', (c) => { c.kits = Array.from({ length: 28 }, () => ({ item: 'bread', count: 1 })); }, /a chest holds 27/],
+        // decided: the field is left bare, and the kit holds the seeds the agents sow it with
+        ['rule_not_as_decided', (c) => { c.field.crop = 'wheat'; }, /field\.crop is "wheat", decided is a bare field \(null\)/],
+        ['kit_without_seeds', (c) => { c.kits = c.kits.filter((stack) => stack.item !== 'wheat_seeds'); }, /"kits" holds no seeds/],
+        // the bootstrap levels the camp: its blocks stand on the floor, the layer under the home point
+        ['off_camp_floor', (c) => { c.camp.furnace = [-6, 65, 4]; }, /camp\.furnace at \[-6, 65, 4\] does not stand on the camp's floor: its y must be 64/],
         // the shape
         ['bad_shape', (c) => { c.seed = 'my favourite seed'; }, /"seed" must be a whole number/],
         ['bad_shape', (c) => { c.camp.beds.pop(); }, /camp\.beds must list 4 beds/],
@@ -156,8 +161,10 @@ test('plan: the starter camp is exactly what was decided, and the rules are the 
         "dirt under the field's water": 1,
         'water of the field': 1,
         'farmland of the field': 80,        // 9 by 9, less the water
-        'wheat sown on the field (age 0)': 80,
+        'cleared above the farmland': 80,   // decided: the field is left bare, nothing is sown
     });
+    assert.ok(!plan.blocks.some((block) => /wheat|carrots|potatoes|beetroots/.test(block.place)), 'the bootstrap sows a crop');
+    assert.equal(config.field.crop, null);
     // a double chest: both halves face the same way, one is "left" and one "right";
     // the left half is joined to the block clockwise of its facing (south -> west)
     const [half_1, half_2] = plan.blocks.filter((block) => block.id.startsWith('chest.shared'));
@@ -172,7 +179,8 @@ test('plan: the starter camp is exactly what was decided, and the rules are the 
     // what the game changes by itself is checked loosely; what the agents change is placed once
     assert.equal(plan.blocks.find((b) => b.id === 'furnace').expect, 'minecraft:furnace[facing=south]');
     assert.equal(plan.blocks.find((b) => b.id.startsWith('field.farmland')).expect, 'minecraft:farmland');
-    assert.ok(plan.blocks.filter((b) => b.once).every((b) => b.id.startsWith('field.crop')));
+    assert.ok(plan.blocks.filter((b) => b.once).every((b) => b.id.startsWith('field.clear') && b.place === 'minecraft:air'));
+    assert.equal(plan.blocks.filter((b) => b.once).length, 80);
     // no houses: the bootstrap builds nothing on a plot
     const zones = createZones(config);
     assert.ok(plan.blocks.every((b) => !String(zones.protectedAt({ x: b.pos[0], y: b.pos[1], z: b.pos[2] })).startsWith('plot:')));
@@ -193,11 +201,30 @@ test('plan: the starter camp is exactly what was decided, and the rules are the 
     // the kit: one stack per slot, as the file lists them
     assert.deepEqual(plan.items.map((item) => [item.slot, item.item, item.count]), [
         [0, 'minecraft:stone_axe', 1], [1, 'minecraft:stone_pickaxe', 1], [2, 'minecraft:stone_hoe', 1], [3, 'minecraft:stone_sword', 1],
-        [4, 'minecraft:bread', 16], [5, 'minecraft:torch', 16],
+        [4, 'minecraft:bread', 16], [5, 'minecraft:torch', 16], [6, 'minecraft:wheat_seeds', 64], [7, 'minecraft:wheat_seeds', 16],
     ]);
-    // without a crop the layer above the farmland is cleared instead, also once
-    const bare = buildBootstrapPlan(changed(config, (c) => { c.field.crop = null; }));
-    assert.equal(bare.blocks.filter((b) => b.place === 'minecraft:air' && b.once).length, 80);
+    assert.equal(plan.items.filter((item) => item.item === 'minecraft:wheat_seeds').reduce((n, item) => n + item.count, 0), 80, 'one seed for every cell of the field');
+
+    // decided: the camp is levelled before it is placed. 24 layers above the floor are cleared, the
+    // highest first, then the floor (the layer under the home point) is laid; one fill command each
+    assert.deepEqual({ ...CAMP_LEVELLING }, { floor_block: 'grass_block', floor_accepts: ['grass_block', 'dirt'], clear_height: 24 });
+    assert.equal(plan.areas.length, 25);
+    assert.deepEqual(plan.areas.map((area) => area.kind), [...Array(24).fill('clear'), 'floor']);
+    assert.deepEqual(plan.areas.slice(0, 24).map((area) => area.min[1]), Array.from({ length: 24 }, (_, i) => 87 - i));
+    assert.deepEqual(plan.areas[0], { id: 'camp.clear.87', kind: 'clear', min: [-12, 87, -12], max: [12, 87, 12], block: 'minecraft:air', purpose: 'camp cleared (layer 87)' });
+    assert.deepEqual(plan.areas.at(-1), { id: 'camp.floor', kind: 'floor', min: [-12, 63, -12], max: [12, 63, 12], block: 'minecraft:grass_block', purpose: 'camp floor (layer 63)' });
+    assert.deepEqual(plan.floor, { y: 63, min: [-12, -12], max: [12, 12], accepts: ['minecraft:grass_block', 'minecraft:dirt'] });
+    const volume = (area) => (area.max[0] - area.min[0] + 1) * (area.max[1] - area.min[1] + 1) * (area.max[2] - area.min[2] + 1);
+    assert.ok(plan.areas.every((area) => volume(area) === 625 && volume(area) <= FILL_LIMIT));
+    assert.equal(FILL_LIMIT, 32768);
+    // every block of the camp stands above the floor and inside what is cleared
+    for (const block of plan.blocks.filter((b) => zones.protectedAt({ x: b.pos[0], y: b.pos[1], z: b.pos[2] }) === 'camp')) assert.equal(block.pos[1], 64);
+    // a camp too large for one fill command per layer is cut into slabs, none over the limit
+    const huge = buildBootstrapPlan(changed(config, (c) => { c.camp.min = [-100, -100]; c.camp.max = [100, 100]; }));
+    assert.ok(huge.areas.length > 25);
+    assert.ok(huge.areas.every((area) => volume(area) <= FILL_LIMIT));
+    assert.equal(huge.areas.filter((area) => area.kind === 'floor').reduce((n, area) => n + volume(area), 0), 201 * 201);
+    assert.equal(new Set(huge.areas.map((area) => area.id)).size, huge.areas.length);
 });
 
 test('answers: what the server says is read tolerantly, and an answer that is not understood is null', () => {
@@ -215,6 +242,11 @@ test('answers: what the server says is read tolerantly, and an answer that is no
     assert.equal(parseItems('Found no elements matching Items').size, 0);
     assert.equal(parseItems('8, 64, 4 has the following block data: []').size, 0);
     assert.equal(parseItems('The target block is not a block entity'), null);
+    assert.equal(ANSWERS.fill('Successfully filled 625 block(s)'), 625);
+    assert.equal(ANSWERS.fill('Successfully filled 1 block'), 1);
+    assert.equal(ANSWERS.fill('No blocks were filled'), 0);
+    assert.equal(ANSWERS.fill('That position is not loaded'), null);
+    assert.equal(ANSWERS.fill('Too many blocks in the specified area (maximum 32768, specified 40401)'), null);
 });
 
 // ---- the bootstrap ------------------------------------------------------------------------
@@ -224,11 +256,45 @@ async function bootstrap(config = exampleWorld(), { server = fakeMinecraft({ see
     return { config, server, files, clock, result };
 }
 
-test('bootstrap: against the stand-in server it places the camp, sets the rules, fills the kit and verifies every block', async () => {
-    const { server, files, result } = await bootstrap();
+// What a new world has where the camp will be: a tree, a hillock, a pit in the ground, grass on part of the floor layer.
+function wildServer(seed = '20261116') {
+    const server = fakeMinecraft({ seed });
+    const put = (x, y, z, name) => server.blocks.set(`${x},${y},${z}`, { name, states: {} });
+    for (let y = 64; y <= 69; y++) put(3, y, 3, 'oak_log');                               // 6 logs
+    for (const [x, z] of [[2, 3], [4, 3], [3, 2], [3, 4]]) put(x, 69, z, 'oak_leaves');     // 4 leaves
+    for (let x = -10; x <= -8; x++) for (let z = 5; z <= 7; z++) put(x, 64, z, 'stone');    // a 3 by 3 hillock: 9 blocks
+    put(0, 90, 0, 'oak_leaves');                                                            // above what is cleared: stays
+    for (let x = -12; x <= 12; x++) for (let z = -12; z <= 0; z++) put(x, 63, z, 'grass_block'); // 325 of the 625 floor cells are grass already
+    put(5, 63, 5, 'stone');                                                                 // stone in the floor layer: replaced
+    put(-13, 64, 0, 'oak_log');                                                             // right outside the camp: stays
+    return server;
+}
+
+test('bootstrap: against the stand-in server it levels the camp, places it, sets the rules, fills the kit and verifies every block', async () => {
+    const { server, files, result } = await bootstrap(exampleWorld(), { server: wildServer() });
     assert.equal(result.ok, true, result.problems.join('; '));
     assert.equal(result.stage, 'done');
-    assert.deepEqual(result.placed, { blocks: 175, items: 6, rules: 7 });
+    // cleared: 6 logs, 4 leaves, 9 stone. floored: the 300 cells that were not grass yet (one of them stone)
+    assert.deepEqual(result.placed, { blocks: 95, items: 8, rules: 7, cleared: 19, floored: 300 });
+
+    // decided: the camp area is cleared and floored BEFORE the camp is placed, with one fill per layer
+    const fills = server.log.filter((command) => command.startsWith('fill '));
+    assert.equal(fills.length, 25);
+    assert.equal(fills[0], 'fill -12 87 -12 12 87 12 minecraft:air');
+    assert.equal(fills[23], 'fill -12 64 -12 12 64 12 minecraft:air');
+    assert.equal(fills[24], 'fill -12 63 -12 12 63 12 minecraft:grass_block');
+    assert.ok(server.log.lastIndexOf(fills[24]) < server.log.findIndex((command) => command.startsWith('setblock ')), 'the camp was placed before the ground was levelled');
+    assert.ok(server.log.indexOf('setworldspawn 0 64 0') < server.log.indexOf(fills[0]), 'the spawn point (whose chunks stay loaded) is set before the camp is levelled');
+    for (let x = -12; x <= 12; x++) for (let z = -12; z <= 12; z++) assert.equal(server.blockAt(x, 63, z).name, 'grass_block', `the floor at ${x}, ${z}`);
+    let above = 0;
+    for (let x = -12; x <= 12; x++) for (let y = 64; y <= 87; y++) for (let z = -12; z <= 12; z++) if (server.blockAt(x, y, z).name !== 'air') above++;
+    assert.equal(above, 13, 'above the floor only the 13 blocks of the camp stand');
+    assert.equal(server.blockAt(0, 90, 0).name, 'oak_leaves', 'above the cleared layers nothing is touched');
+    assert.equal(server.blockAt(-13, 64, 0).name, 'oak_log', 'outside the camp nothing is touched');
+    // the floor is verified cell by cell in the check step, after everything was placed
+    const floor_checks = server.log.filter((command) => /^execute if block -?\d+ 63 -?\d+ minecraft:grass_block$/.test(command) && Math.abs(Number(command.split(' ')[3])) <= 12 && Math.abs(Number(command.split(' ')[5])) <= 12);
+    assert.equal(floor_checks.length, 625);
+    assert.ok(server.log.indexOf(floor_checks[0]) > server.log.findLastIndex((command) => command.startsWith('item replace ')));
 
     // the camp stands
     const at = (x, y, z) => server.blockAt(x, y, z);
@@ -241,18 +307,19 @@ test('bootstrap: against the stand-in server it places the camp, sets the rules,
         assert.deepEqual([at(x, 64, -10).name, at(x, 64, -10).states.part, at(x, 64, -11).states.part], [`${color}_bed`, 'foot', 'head']);
     }
     let farmland = 0;
-    let wheat = 0;
+    let sown = 0;
     for (let x = 16; x <= 24; x++) {
         for (let z = -4; z <= 4; z++) {
             if (at(x, 63, z).name === 'farmland') farmland++;
-            if (at(x, 64, z).name === 'wheat') wheat++;
+            if (at(x, 64, z).name !== 'air') sown++;
         }
     }
-    assert.deepEqual([farmland, wheat, at(20, 63, 0).name, at(20, 62, 0).name], [80, 80, 'water', 'dirt']);
-    assert.equal(server.blocks.size, 175, 'something else was placed');
+    // decided: the field is left bare. Tilled farmland with its water, and nothing on it
+    assert.deepEqual([farmland, sown, at(20, 63, 0).name, at(20, 62, 0).name], [80, 0, 'water', 'dirt']);
+    assert.equal(server.blocks.size, 625 + 95 + 2, 'something else was placed'); // the floor, the camp and the field, and the two blocks left outside
     assert.deepEqual([...server.containers.get('8,64,4')].map(([slot, stack]) => [slot, stack.item, stack.count]), [
         [0, 'minecraft:stone_axe', 1], [1, 'minecraft:stone_pickaxe', 1], [2, 'minecraft:stone_hoe', 1], [3, 'minecraft:stone_sword', 1],
-        [4, 'minecraft:bread', 16], [5, 'minecraft:torch', 16],
+        [4, 'minecraft:bread', 16], [5, 'minecraft:torch', 16], [6, 'minecraft:wheat_seeds', 64], [7, 'minecraft:wheat_seeds', 16],
     ]);
     // the rules
     assert.equal(server.difficulty, 'easy');
@@ -261,17 +328,24 @@ test('bootstrap: against the stand-in server it places the camp, sets the rules,
 
     // every block was looked at before it was placed, and checked again afterwards
     const log = server.log;
-    for (const [x, y, z] of [[-2, 64, -6], [4, 64, -11], [20, 63, 0], [16, 64, -4]]) {
+    // (a block of the camp is looked at once more, before the levelling: is a camp standing here already?)
+    for (const [x, y, z, times] of [[-2, 64, -6, 3], [4, 64, -11, 3], [20, 63, 0, 2], [16, 63, -4, 2]]) {
         const looks = log.map((command, index) => (command.startsWith(`execute if block ${x} ${y} ${z} `) ? index : -1)).filter((index) => index >= 0);
         const set = log.findIndex((command) => command.startsWith(`setblock ${x} ${y} ${z} `));
-        assert.equal(looks.length, 2, `${x} ${y} ${z} was not looked at twice`);
-        assert.ok(looks[0] < set && set < looks[1], 'the block was not checked after it was placed');
+        assert.equal(looks.length, times, `${x} ${y} ${z} was not looked at ${times} times`);
+        assert.ok(looks.at(-2) < set && set < looks.at(-1), 'the block was not checked after it was placed');
+        if (times === 3) assert.ok(looks[0] < log.findIndex((command) => command.startsWith('fill ')), 'the camp was not looked for before the levelling');
     }
+    // the layer above the farmland is the agents' from the first run on: looked at, found clear, never set
+    assert.equal(log.some((command) => command.startsWith('setblock 16 64 -4 ')), false);
     assert.equal(log[0], 'seed', 'the seed is asked for before anything is touched');
     // only commands the plan knows went out, and nothing that edits a server file or deletes anything
     const verbs = new Set(log.map((command) => command.split(' ').slice(0, command.startsWith('execute') ? 3 : command.startsWith('item') || command.startsWith('data') ? 3 : 1).join(' ')));
-    assert.deepEqual([...verbs].sort(), ['data get block', 'difficulty', 'execute if block', 'gamerule', 'item replace block', 'seed', 'setblock', 'setworldspawn', 'worldborder']);
-    assert.ok(!log.some((command) => /^(op|stop|save-off|kill|fill|clone|give|tp|gamemode)\b/.test(command)));
+    assert.deepEqual([...verbs].sort(), ['data get block', 'difficulty', 'execute if block', 'fill', 'gamerule', 'item replace block', 'seed', 'setblock', 'setworldspawn', 'worldborder']);
+    assert.ok(!log.some((command) => /^(op|stop|save-off|kill|clone|give|tp|gamemode)\b/.test(command)));
+    // fill is only ever used for the levelling: whole layers of the camp, air above the floor and the floor block in it
+    assert.ok(fills.every((command) => /^fill -12 \d+ -12 12 \d+ 12 minecraft:(air|grass_block)$/.test(command)));
+    assert.ok(COMMANDS_USED.some((entry) => entry.command.startsWith('fill ')));
 
     // next to the manifest: the settings only the operator can set, reported as "operator must set"
     const required = files.store.get(manifestPaths(MANIFEST).server_settings);
@@ -285,11 +359,12 @@ test('bootstrap: against the stand-in server it places the camp, sets the rules,
     ]);
     const report = reportLines(result, { manifest_file: MANIFEST }).join('\n');
     assert.match(report, /Bootstrap PASSED/);
+    assert.match(report, /Levelled the camp: 19 blocks cleared, 300 floor blocks placed\./);
     assert.equal(report.split('\n').filter((line) => line.includes('operator must set: ')).length, 4);
 });
 
 test('manifest: every placed block and item is listed as the Operator\'s, with every rule that favours the agents', async () => {
-    const { config, server, files, result } = await bootstrap();
+    const { config, server, files, result } = await bootstrap(exampleWorld(), { server: wildServer() });
     const manifest = parseManifest(files.store.get(MANIFEST));
     assert.deepEqual(manifest, JSON.parse(JSON.stringify(result.manifest)));
     assert.equal(manifest.kind, MANIFEST_KIND);
@@ -301,12 +376,26 @@ test('manifest: every placed block and item is listed as the Operator\'s, with e
 
     // one record per block the server was told to set, at the same place, and nothing else
     const set = server.log.filter((command) => command.startsWith('setblock ')).map((command) => command.split(' ').slice(1, 5).join(' '));
-    assert.equal(set.length, 175);
+    assert.equal(set.length, 95);
     assert.deepEqual(manifest.blocks.filter((record) => record.placed).map((record) => `${record.pos.join(' ')} ${record.block}`).sort(), [...set].sort());
     assert.equal(manifest.blocks.length, 175);
+    // the 80 cells above the farmland were clear already: recorded as looked at, not as placed
+    assert.equal(manifest.blocks.filter((record) => !record.placed && record.id.startsWith('field.clear')).length, 80);
     const items = server.log.filter((command) => command.startsWith('item replace '));
     assert.equal(manifest.items.length, items.length);
-    for (const record of [...manifest.blocks, ...manifest.items, ...manifest.rules]) {
+    // the levelling: one record per fill command, with the box, the block and how many blocks changed
+    const fills = server.log.filter((command) => command.startsWith('fill '));
+    assert.deepEqual(manifest.areas.map((record) => `fill ${record.min.join(' ')} ${record.max.join(' ')} ${record.block}`), fills);
+    assert.deepEqual(manifest.areas.filter((record) => record.changed > 0).map((record) => [record.id, record.kind, record.changed, record.placed, record.status]), [
+        ['camp.clear.69', 'clear', 5, true, 'filled'],                                        // the top of the trunk and its four leaves
+        ...[68, 67, 66, 65].map((y) => [`camp.clear.${y}`, 'clear', 1, true, 'filled']),
+        ['camp.clear.64', 'clear', 10, true, 'filled'],                                       // the foot of the trunk and the hillock
+        ['camp.floor', 'floor', 300, true, 'filled'],
+    ]);
+    assert.ok(manifest.areas.filter((record) => record.changed === 0).every((record) => record.placed === false && record.status === 'nothing to change'));
+    assert.equal(manifest.areas.reduce((n, record) => n + record.changed, 0), result.placed.cleared + result.placed.floored);
+    assert.deepEqual([manifest.runs[0].blocks_cleared, manifest.runs[0].floor_blocks_placed], [19, 300]);
+    for (const record of [...manifest.areas, ...manifest.blocks, ...manifest.items, ...manifest.rules]) {
         assert.equal(record.by, 'Operator');
         assert.equal(record.run, 1);
     }
@@ -325,43 +414,63 @@ test('manifest: every placed block and item is listed as the Operator\'s, with e
     ]);
     assert.match(rule('mobGriefing').why, /cannot destroy or take blocks/);
     const favours = manifest.favours_agents.join('\n');
-    for (const expected of [/starter camp was built by the operator/, /kits chest was filled once by the operator with 1 stone_axe/, /sown once by the operator with wheat/,
+    for (const expected of [/camp area was levelled by the operator before anything was placed: 24 layers above the floor were cleared and the floor was laid with grass block/,
+        /starter camp was built by the operator/, /kits chest was filled once by the operator with 1 stone_axe.*64 wheat_seeds, 16 wheat_seeds/,
+        /field is Operator-built and was left bare: the operator tilled and watered it and sowed nothing\. Every crop on it is agent-planted/,
         /Easy difficulty/, /No mob griefing/, /No fire spread/, /No raids/, /world spawn is the home point/]) assert.match(favours, expected);
+    assert.ok(!/sown once by the operator/.test(favours), 'the operator sowed nothing');
     assert.ok(!/keepInventory/.test(favours), 'keepInventory off does not favour the agents');
     assert.deepEqual(checkManifest(manifest, config), []);
     // a manifest that credits anything to someone else is not accepted
     const forged = JSON.parse(text);
     forged.blocks[3].by = 'Arthur';
     assert.match(checkManifest(forged, config).join('\n'), /attributes something to someone other than "Operator"/);
+    const forged_floor = JSON.parse(text);
+    forged_floor.areas.at(-1).by = 'Arthur';
+    assert.match(checkManifest(forged_floor, config).join('\n'), /attributes something to someone other than "Operator"/);
+    // a manifest from before the bootstrap levelled the camp does not let planning start
+    const old = JSON.parse(text);
+    delete old.areas;
+    assert.match(checkManifest(old, config).join('\n'), /has no record of the levelled camp/);
 });
 
 test('bootstrap: a second run on a bootstrapped world issues no placing commands, changes nothing and passes', async () => {
-    const first = await bootstrap();
+    const first = await bootstrap(exampleWorld(), { server: wildServer() });
     const blocks_before = JSON.stringify([...first.server.blocks]);
     const manifest_before = parseManifest(first.files.store.get(MANIFEST));
     first.server.log.length = 0;
-    // the agents have been at work: a tool was taken from the kit, the wheat grew, one was harvested
+    // the agents have been at work: a tool was taken from the kit, Mira sowed wheat and it grew, a torch
+    // stands in the camp, and the grass under the crafting table turned to dirt by itself
     first.server.containers.get('8,64,4').delete(0);
     first.server.blocks.set('16,64,-4', { name: 'wheat', states: { age: '7' } });
-    first.server.blocks.delete('17,64,-4');
+    first.server.blocks.set('17,64,-4', { name: 'wheat', states: { age: '2' } });
     first.server.blocks.set('-6,64,4', { name: 'furnace', states: { facing: 'south', lit: 'true' } });
+    first.server.blocks.set('2,64,2', { name: 'torch', states: {} });
+    first.server.blocks.set('-6,63,2', { name: 'dirt', states: {} });
     await first.clock.advance(60 * 60 * 1000);
 
     const second = await bootstrap(first.config, first);
     assert.equal(second.result.ok, true, second.result.problems.join('; '));
-    assert.deepEqual(second.result.placed, { blocks: 0, items: 0, rules: 0 });
+    assert.deepEqual(second.result.placed, { blocks: 0, items: 0, rules: 0, cleared: 0, floored: 0 });
     assert.deepEqual(first.server.changing(), [], 'the second run sent a command that changes the world');
     assert.ok(second.result.commands.every((entry) => entry.changes === false));
-    // what the agents changed stays as they left it: nothing is refilled, resown or reset
+    assert.equal(first.server.log.some((command) => command.startsWith('fill ')), false, 'the camp was levelled a second time');
+    assert.deepEqual(second.result.warnings, []);
+    // what the agents changed stays as they left it: nothing is refilled, cleared again or reset
     assert.equal(first.server.containers.get('8,64,4').has(0), false, 'the kit was refilled');
-    assert.equal(first.server.blocks.has('17,64,-4'), false, 'the harvested crop was sown again');
+    assert.equal(first.server.blocks.get('17,64,-4').name, 'wheat', 'what an agent sowed was cleared away');
     assert.equal(first.server.blocks.get('16,64,-4').states.age, '7');
+    assert.equal(first.server.blocks.get('2,64,2').name, 'torch', 'the torch in the camp was cleared away');
+    // the floor is verified again in every run: all 625 cells, grass or (under a full block) dirt
+    assert.equal(first.server.log.filter((command) => /^execute if block -?\d+ 63 -?\d+ minecraft:grass_block$/.test(command) && Math.abs(Number(command.split(' ')[5])) <= 12 && Math.abs(Number(command.split(' ')[3])) <= 12).length, 625);
+    assert.ok(first.server.log.includes('execute if block -6 63 2 minecraft:dirt'));
+    assert.deepEqual(parseManifest(first.files.store.get(MANIFEST)).areas, manifest_before.areas);
     // the record of who placed what is carried over unchanged, and the run is noted
     const manifest = parseManifest(first.files.store.get(MANIFEST));
     assert.deepEqual(manifest.blocks, manifest_before.blocks);
     assert.deepEqual(manifest.items, manifest_before.items);
     assert.deepEqual(manifest.rules.filter((rule) => rule.kind !== 'server_setting'), manifest_before.rules.filter((rule) => rule.kind !== 'server_setting'));
-    assert.deepEqual(manifest.runs.map((run) => [run.run, run.blocks_placed, run.items_placed, run.result]), [[1, 175, 6, 'ok'], [2, 0, 0, 'ok']]);
+    assert.deepEqual(manifest.runs.map((run) => [run.run, run.blocks_placed, run.items_placed, run.blocks_cleared, run.floor_blocks_placed, run.result]), [[1, 95, 8, 19, 300, 'ok'], [2, 0, 0, 0, 0, 'ok']]);
     assert.equal(manifest.verified, true);
     assert.notEqual(JSON.stringify([...first.server.blocks]), blocks_before); // only by what the test did as "the agents"
 
@@ -373,6 +482,51 @@ test('bootstrap: a second run on a bootstrapped world issues no placing commands
     assert.deepEqual(first.server.changing(), ['setblock -6 64 2 minecraft:crafting_table']);
     const record = parseManifest(first.files.store.get(MANIFEST)).blocks.find((entry) => entry.id === 'crafting_table');
     assert.deepEqual([record.by, record.placed, record.run], ['Operator', true, 3]);
+
+    // a hole in the camp's floor fails the check, with its position, and the manifest lets nothing start
+    first.server.blocks.delete('7,63,-3');
+    first.server.log.length = 0;
+    const holed = await bootstrap(first.config, first);
+    assert.deepEqual([holed.result.ok, holed.result.stage, holed.result.failed.id, holed.result.failed.pos], [false, 'check', 'camp.floor', [7, 63, -3]]);
+    assert.match(holed.result.problems[0], /floor check failed at 7, 63, -3: the camp floor should be minecraft:grass_block or minecraft:dirt, the server says "Test failed"/);
+    assert.deepEqual(first.server.changing(), [], 'a check never repairs: the floor is the operator\'s to put right');
+    assert.equal(parseManifest(first.files.store.get(MANIFEST)).verified, false);
+});
+
+test('bootstrap: levelling never runs over a camp that stands, and a fill the server does not take stops the run', async () => {
+    // the manifest is lost, the camp stands, an agent's torch stands in it
+    const first = await bootstrap(exampleWorld(), { server: wildServer() });
+    first.server.blocks.set('2,64,2', { name: 'torch', states: {} });
+    first.server.log.length = 0;
+    const again = await bootstrap(first.config, { server: first.server });   // new files: no manifest
+    assert.equal(again.result.ok, true, again.result.problems.join('; '));
+    assert.equal(first.server.log.some((command) => command.startsWith('fill ')), false, 'a standing camp was cleared');
+    assert.equal(first.server.blocks.get('2,64,2').name, 'torch');
+    assert.equal(first.server.containers.get('8,64,4').size, 8, 'the kits chest was wiped');
+    assert.match(again.result.warnings.join('\n'), /The camp was NOT levelled: the manifest has no record of the levelling, but the shared chest \(half 1 of 2\) already stands at -2, 64, -6/);
+    const areas = parseManifest(again.files.store.get(MANIFEST)).areas;
+    assert.equal(areas.length, 25);
+    assert.ok(areas.every((record) => record.changed === 0 && record.placed === false && record.status === 'not levelled: the camp was already standing' && record.by === 'Operator'));
+    // (the two rules that cannot be read back are set again when no manifest says they were)
+    assert.deepEqual(again.result.placed, { blocks: 0, items: 0, rules: 2, cleared: 0, floored: 0 });
+
+    // the server refuses a fill (the chunks are not loaded): the run stops there, nothing of the camp is placed
+    const unloaded = wildServer();
+    unloaded.refuse = (command) => command.startsWith('fill ') && command.endsWith('minecraft:grass_block');
+    const stopped = await bootstrap(exampleWorld(), { server: unloaded });
+    assert.deepEqual([stopped.result.ok, stopped.result.stage, stopped.result.failed.id], [false, 'level', 'camp.floor']);
+    assert.match(stopped.result.problems[0], /the camp floor \(layer 63\) could not be filled: the server's answer to "fill -12 63 -12 12 63 12 minecraft:grass_block" was not understood: "That position is not loaded"/);
+    assert.equal(unloaded.log.some((command) => command.startsWith('setblock ')), false);
+    const partial = parseManifest(stopped.files.store.get(MANIFEST));
+    assert.equal(partial.verified, false);
+    assert.equal(partial.areas.length, 24, 'the layers that were cleared are recorded');
+    // run again once the server takes it: only the floor is still to do
+    unloaded.refuse = () => false;
+    unloaded.log.length = 0;
+    const resumed = await bootstrap(exampleWorld(), { server: unloaded, files: stopped.files, clock: stopped.clock });
+    assert.equal(resumed.result.ok, true, resumed.result.problems.join('; '));
+    assert.deepEqual(unloaded.log.filter((command) => command.startsWith('fill ')), ['fill -12 63 -12 12 63 12 minecraft:grass_block']);
+    assert.deepEqual(resumed.result.placed, { blocks: 95, items: 8, rules: 0, cleared: 0, floored: 300 });
 });
 
 test('bootstrap: a failed block check stops with the block\'s position, and the manifest does not let planning start', async () => {
@@ -555,7 +709,8 @@ test('reset: with the flag it removes only the listed Genesis data, writes the m
     const config = exampleWorld();
     const done = await runBootstrap({ config, rcon: fakeMinecraft({ seed: '20261116' }), files, clock, manifest_file });
     assert.equal(done.ok, true, done.problems.join('; '));
-    assert.equal(done.placed.blocks, 175, 'after a reset nothing an older manifest says is carried over');
+    assert.equal(done.placed.blocks, 95, 'after a reset nothing an older manifest says is carried over');
+    assert.equal(done.placed.floored, 625, 'after a reset the camp of the new world is levelled');
     assert.equal(existsSync(marker), false, 'the marker is still there after a bootstrap that passed');
     assert.equal(readdirSync(path.dirname(manifest_file)).filter((name) => name.startsWith('bootstrap.manifest.before-reset-')).length, 1);
 

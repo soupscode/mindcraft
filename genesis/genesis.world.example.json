@@ -27,7 +27,7 @@
             { "foot": [10, 64, -10], "facing": "north", "color": "yellow" }
         ]
     },
-    "field": { "min": [16, -4], "max": [24, 4], "y": 63, "water": [[20, 0]], "crop": "wheat", "owner": "Mira" },
+    "field": { "min": [16, -4], "max": [24, 4], "y": 63, "water": [[20, 0]], "crop": null, "owner": "Mira" },
     "plots": [
         { "id": "arthur-1", "owner": "Arthur", "min": [-34, 64, 14], "max": [-19, 77, 29], "blueprint": "small_wood_house" },
         { "id": "mira-1", "owner": "Mira", "min": [-4, 64, 14], "max": [11, 77, 29], "blueprint": null },
@@ -45,7 +45,9 @@
         { "item": "stone_hoe", "count": 1 },
         { "item": "stone_sword", "count": 1 },
         { "item": "bread", "count": 16 },
-        { "item": "torch", "count": 16 }
+        { "item": "torch", "count": 16 },
+        { "item": "wheat_seeds", "count": 64 },
+        { "item": "wheat_seeds", "count": 16 }
     ],
     "agents": {
         "Arthur": { "home": [0, 64, 0], "range": 48 },

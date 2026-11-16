@@ -38,6 +38,10 @@
 // says "enabled": false. Agents then coordinate through structured messages (request, offer,
 // accept, decline, inform, warn) that ONE relay in this process carries, limits and turns
 // into events; the line an agent says in the game chat is only how a message is shown.
+// The planner may choose to send a request or an offer as a goal (ask_agent, offer_agent), and
+// a request or offer that arrives is decided by the model with a small call of its own
+// ("genesis_relay.decision" holds its hourly limit and token limit; "model_decisions": false
+// leaves every such decision to the code rule, as it is whenever the model is away).
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';

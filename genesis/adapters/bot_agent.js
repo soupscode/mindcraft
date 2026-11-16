@@ -16,7 +16,7 @@ import { loadZones } from '../catalog/zones.js';
 import { createCatalog } from '../catalog/catalog.js';
 import { createLedgerClient } from '../catalog/ledger_client.js';
 import { fileBlueprints } from '../catalog/blueprints.js';
-import { createScaffoldTracker } from '../executor/scaffold.js';
+import { createScaffoldTracker, placementSink } from '../executor/scaffold.js';
 import { createCheckpointStore } from '../store/checkpoint.js';
 import { nodeFiles } from '../store/node_files.js';
 import { socketGoalStorage } from '../planning/host.js';
@@ -43,7 +43,9 @@ export async function buildBotRuntime(agent, settings) {
     if (!zones.home(agent.name)) throw new Error(`${agent.name} has no entry under "agents" in the world config`);
 
     const scaffold = createScaffoldTracker({ zones });
-    const guards = installBotGuards(bot, { zones, onPlace: (pos) => scaffold.placed(pos) });
+    // every block the bot places is tracked as scaffolding, except a torch of upstream's idle torch reflex
+    // (decided: those may stay in the camp, the field and the plots; genesis/executor/scaffold.js)
+    const guards = installBotGuards(bot, { zones, onPlace: placementSink(scaffold, () => agent.actions?.currentActionLabel ?? null) });
     const socket = serverProxy.getSocket();
     const send = (event, ...args) => {
         if (!socket.connected) throw new Error('not connected to MindServer');
@@ -74,6 +76,8 @@ export async function buildBotRuntime(agent, settings) {
         death: settings.genesis_recovery?.death ?? {},
         // agent messages through the relay in the MindServer (off only with "genesis_relay": { "enabled": false })
         messaging: genesisRelayOn(settings),
+        // the relay's limits as the settings have them: the agent's desk knows beforehand what the relay would reject
+        relay_limits: settings.genesis_relay?.limits ?? {},
     });
 
     socket.on('genesis-plan-context', (request, ack) => runtime.onPlanContext(request, ack));
