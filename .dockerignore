@@ -4,3 +4,10 @@ genesis/node_modules
 bots/*/
 !bots/*
 keys.json
+# Genesis: never in the agents image (the two services have images of their own; an .env file holds secrets)
+genesis/dashboard/node_modules
+genesis/dashboard/dist
+genesis/alerter/node_modules
+genesis/alerter/dist
+.env
+**/.env

@@ -1,5 +1,6 @@
 # Genesis dashboard stack: the dashboard, the alerter, Redis and Postgres.
 #
+#   docker network create genesis        (once)
 #   docker compose -f genesis/compose.dashboard.yaml up -d --build
 #
 # Two services on purpose: the alerter reads the event stream on its own, so alerts keep
@@ -18,9 +19,11 @@
 # view. Publish it only where the LAN / Tailscale is the protection; to publish it on the
 # Tailscale address alone, set GENESIS_DASHBOARD_BIND to that address.
 #
-# The agents container (genesis/compose.agents.yaml) must be on the network "genesis" too:
+# The agents container (genesis/compose.agents.yaml) is on the network "genesis" too:
 # it publishes to redis://redis:6379 and the dashboard reaches the MindServer at
 # http://agents:8081. See genesis/dashboard/README.md, "Joining the agents".
+# The network is made once, by hand, and no compose file owns it:
+#   docker network create genesis
 
 name: genesis-dashboard
 
@@ -105,6 +108,7 @@ services:
 networks:
   genesis:
     name: genesis
+    external: true
 
 volumes:
   genesis-redis:

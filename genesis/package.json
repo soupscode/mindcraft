@@ -2,7 +2,7 @@
     "name": "genesis-agents",
     "private": true,
     "type": "module",
-    "description": "Client packages that only the Genesis adapters import (genesis/adapters). Installed next to the upstream packages, never instead of them: the root package.json is left as upstream has it.",
+    "description": "Client packages that only the Genesis adapters import (genesis/adapters). Installed next to the upstream packages, never instead of them: the root package.json gets none of them (its one Genesis change is the exact mineflayer version, the one patches/ was made for).",
     "dependencies": {
         "pg": "^8.11.0",
         "redis": "^4.7.0"

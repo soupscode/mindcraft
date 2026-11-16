@@ -1,0 +1,74 @@
+# Genesis Minecraft server: Paper 1.21.6 in offline mode, for the agents only.
+#
+#   docker network create genesis        (once)
+#   docker compose -f genesis/compose.minecraft.yaml up -d
+#
+# The image is itzg/minecraft-server. Every variable below was read in its documentation
+# (docker-minecraft-server.readthedocs.io: "Variables", "Server properties", "Data directory",
+# "Sending commands"); the lines marked UNVERIFIED were not. NOT RUN: there was no Docker
+# daemon and no Minecraft server where this file was written; it was checked with
+# `docker compose config` only.
+#
+# Nothing secret is written here. Set these in the environment or in an .env file (never
+# commit it), and pass it with --env-file:
+#   GENESIS_MINECRAFT_EULA   TRUE once you have read and accept the Minecraft EULA
+#                            (https://aka.ms/MinecraftEULA). There is no default: the server
+#                            does not start until you set it yourself.                (required)
+#   GENESIS_RCON_PASSWORD    the RCON password; the bootstrap reads the same variable   (required)
+#   GENESIS_MINECRAFT_SEED   the world seed: the "seed" of genesis/genesis.world.json   (required)
+#   GENESIS_MINECRAFT_BIND   the LAN address of this machine that port 25600 is published
+#                            on. Never 0.0.0.0: the server is in offline mode.          (required)
+#   GENESIS_MINECRAFT_DATA   the folder on this machine that holds the server's files
+#                            (world, server.properties, bukkit.yml, whitelist.json), for
+#                            example /opt/genesis/data/minecraft. Keep it outside this
+#                            repository: the agents image is built from the repository. (required)
+#   GENESIS_MINECRAFT_MEMORY the Java heap; default 6G
+#
+# Ports. The server listens on 25600 (decided: never 25565), inside the container as well, so
+# one number is right everywhere: the agents connect to minecraft:25600 inside the network
+# "genesis", the operator's own client to <GENESIS_MINECRAFT_BIND>:25600, and a firewall rule
+# on port 25600 matches both. The bootstrap reaches RCON at minecraft:25575. Only the game
+# port is published. RCON is NOT published: do not add it to "ports:".
+#
+# What this file cannot set, and the operator sets by hand in GENESIS_MINECRAFT_DATA after the
+# first start (then restarts the server):
+#   bukkit.yml   settings: allow-end: false
+# The whitelist is on and starts empty. Add the four agents and yourself over RCON:
+#   docker compose -f genesis/compose.minecraft.yaml exec minecraft rcon-cli whitelist add Arthur
+# (WHITELIST is left unset on purpose: the image looks usernames up online, and this server is
+# in offline mode, where a player's id is worked out from the name alone.)
+
+name: genesis-minecraft
+
+services:
+  minecraft:
+    image: itzg/minecraft-server:java21   # UNVERIFIED: the tag (Paper 1.21.6 needs Java 21). Pin an exact tag once it has run.
+    restart: unless-stopped
+    stop_grace_period: 60s                # time to save the world
+    environment:
+      EULA: "${GENESIS_MINECRAFT_EULA:?set GENESIS_MINECRAFT_EULA=TRUE once you have read and accept the Minecraft EULA}"
+      TYPE: "PAPER"
+      VERSION: "1.21.6"
+      MEMORY: "${GENESIS_MINECRAFT_MEMORY:-6G}"
+      ONLINE_MODE: "FALSE"
+      SERVER_PORT: "25600"
+      ENABLE_RCON: "true"
+      RCON_PASSWORD: "${GENESIS_RCON_PASSWORD:?set GENESIS_RCON_PASSWORD}"
+      ENABLE_WHITELIST: "true"
+      SEED: "${GENESIS_MINECRAFT_SEED:?set GENESIS_MINECRAFT_SEED to the seed in genesis/genesis.world.json}"
+      DIFFICULTY: "easy"
+      ALLOW_NETHER: "false"
+      # the camp stands at the world spawn: with spawn protection the agents (never operators) could not use it
+      SPAWN_PROTECTION: "0"
+      MAX_PLAYERS: "8"
+    ports:
+      - "${GENESIS_MINECRAFT_BIND:?set GENESIS_MINECRAFT_BIND to this machine's LAN address}:25600:25600"
+    volumes:
+      - "${GENESIS_MINECRAFT_DATA:?set GENESIS_MINECRAFT_DATA to the folder for the server's files}:/data"
+    networks:
+      - genesis
+
+networks:
+  genesis:
+    name: genesis
+    external: true

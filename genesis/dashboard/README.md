@@ -15,6 +15,7 @@ consumer group, and check every entry with the shared contract `genesis/shared/e
 GENESIS_POSTGRES_PASSWORD=<POSTGRES_PASSWORD>
 GENESIS_NTFY_TOPIC=<NTFY_TOPIC>
 
+docker network create genesis     # once
 docker compose -f genesis/compose.dashboard.yaml up -d --build
 ```
 
@@ -27,11 +28,11 @@ A password with characters such as `@ : / ?` must be URL-encoded: it is put insi
 
 ### Joining the agents
 
-The agents container (genesis/compose.agents.yaml, not changed by this work) has to be on the
-network `genesis` under the name `agents`:
+The agents container (genesis/compose.agents.yaml) joins the same named network, `genesis`,
+under the service name `agents`. No compose file owns that network; make it once:
 
 ```
-docker network connect --alias agents genesis <agents container>
+docker network create genesis
 ```
 
 and `genesis/settings.json` needs `genesis_events.enabled: true` with

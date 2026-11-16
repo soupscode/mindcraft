@@ -2,7 +2,10 @@
 #   - Node 20 LTS instead of Node 22
 #   - starts through the Genesis launcher, which applies genesis/settings.json
 #   - a second npm install, for the Redis and Postgres clients listed in genesis/package.json
-#     (they land in /app/genesis/node_modules; the root package.json is upstream's, untouched)
+#     (they land in /app/genesis/node_modules)
+#   - the libstdc++ that the prebuilt canvas package brings is removed, so canvas uses the system's:
+#     with the bundled one loaded first the prebuilt gl package cannot load ("GLIBCXX_3.4.29 not
+#     found") and every agent process ends at its first import (src/agent/vision/camera.js)
 # Build from the repository root:
 #   docker build -f genesis/Dockerfile -t genesis-agents .
 FROM node:20-bookworm-slim
@@ -34,7 +37,8 @@ WORKDIR /app
 
 COPY package*.json .
 COPY patches ./patches
-RUN npm install
+RUN npm install && rm -f node_modules/canvas/build/Release/libstdc++.so.6 \
+    && node -e "require('node-canvas-webgl/lib/index.js')"
 
 # Genesis-only packages (redis, pg): imported by genesis/adapters and by nothing else.
 COPY genesis/package.json ./genesis/package.json
