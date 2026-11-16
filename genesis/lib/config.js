@@ -16,6 +16,7 @@ import { SUPERVISOR_DEFAULTS } from '../recovery/supervisor.js';
 import { DEATH_RULES } from '../recovery/death.js';
 import { RELAY_LIMITS } from '../relay/relay.js';
 import { LINE_LIMITS } from '../relay/lines.js';
+import { DECISION_LIMITS } from '../relay/decisions.js';
 
 // Actions Genesis agents must never have, whatever the settings file says.
 export const REQUIRED_BLOCKED_ACTIONS = ['!newAction', '!startConversation', '!endConversation'];
@@ -80,20 +81,24 @@ export function checkSettings(settings) {
 }
 
 // The values of genesis_relay that may be given other than their starting value, by part.
-export const RELAY_SETTINGS = Object.freeze({ limits: RELAY_LIMITS, line: LINE_LIMITS });
+export const RELAY_SETTINGS = Object.freeze({ limits: RELAY_LIMITS, line: LINE_LIMITS, decision: DECISION_LIMITS });
+// The switches of genesis_relay: each is true or false.
+export const RELAY_FLAGS = Object.freeze(['enabled', 'model_lines', 'model_decisions']);
 
 // Checks the genesis_relay setting (structured agent-to-agent messages). The relay goes with
 // planning: no setting at all means on, with every starting value. "enabled": false switches
-// it off; "model_lines": false makes every spoken line a template line.
+// it off; "model_lines": false makes every spoken line a template line; "model_decisions":
+// false lets the code rule decide every incoming request and offer. "decision" holds the
+// limits of the model's accept-or-decline call (its own hourly limit and token limit).
 function checkRelaySettings(relay) {
     if (relay === undefined) return [];
     if (relay === null || typeof relay !== 'object' || Array.isArray(relay)) return ['settings: "genesis_relay" must be an object'];
     const problems = [];
-    for (const flag of ['enabled', 'model_lines']) {
+    for (const flag of RELAY_FLAGS) {
         if (relay[flag] !== undefined && typeof relay[flag] !== 'boolean') problems.push(`settings: "genesis_relay.${flag}" must be true or false`);
     }
     for (const key of Object.keys(relay)) {
-        if (!['enabled', 'model_lines'].includes(key) && !Object.hasOwn(RELAY_SETTINGS, key)) problems.push(`settings: "genesis_relay.${key}" is not a setting (known: enabled, model_lines, ${Object.keys(RELAY_SETTINGS).join(', ')})`);
+        if (!RELAY_FLAGS.includes(key) && !Object.hasOwn(RELAY_SETTINGS, key)) problems.push(`settings: "genesis_relay.${key}" is not a setting (known: ${RELAY_FLAGS.join(', ')}, ${Object.keys(RELAY_SETTINGS).join(', ')})`);
     }
     for (const [part, defaults] of Object.entries(RELAY_SETTINGS)) {
         problems.push(...checkOverrides(`genesis_relay.${part}`, relay[part], defaults));

@@ -51,7 +51,9 @@ test('launcher: the relay is started with planning inside the MindServer process
     }
     const settings_file = path.join(dir, 'settings.json');
     const shipped = JSON.parse(readFileSync(path.join(GENESIS, 'settings.json'), 'utf8'));
-    assert.deepEqual(shipped.genesis_relay, { enabled: true, model_lines: true });
+    // (the decision call's own hourly limit and token limit are named in the shipped setting: decided, values proposed)
+    const SHIPPED_RELAY = { enabled: true, model_lines: true, model_decisions: true, decision: { max_calls_per_hour: 20, max_tokens: 80 } };
+    assert.deepEqual(shipped.genesis_relay, SHIPPED_RELAY);
     writeFileSync(settings_file, JSON.stringify({ ...shipped, profiles }));
     const { world_file, manifest_file } = await bootstrappedWorld(dir);
     const planning = { ...PLANNING, world_file, manifest_file, checkpoint_dir: path.join(dir, 'checkpoints'), ledger_file: path.join(dir, 'ledger.json') };
@@ -61,7 +63,7 @@ test('launcher: the relay is started with planning inside the MindServer process
     assert.equal(on.extensions.length, 1, 'the MindServer has one place for socket handlers: planning, recovery and the relay share it');
     assert.equal(on.agents.length, 4);
     for (const agent of on.agents) {
-        assert.deepEqual(agent.genesis_relay, { enabled: true, model_lines: true });
+        assert.deepEqual(agent.genesis_relay, SHIPPED_RELAY);
         for (const action of ['!newAction', '!startConversation', '!endConversation']) assert.ok(agent.blocked_actions.includes(action));
     }
 

@@ -12,6 +12,10 @@
 //                   at most two attempts (decided).
 //   intended        a restart somebody asked for is carried out at once and never counted
 //                   as a crash (decided).
+//   watchdog        a restart the watchdog's ladder ordered (rung 5: the agent made no progress
+//                   after four recovery steps) is carried out and does NOT count toward the
+//                   5-restarts-in-30-minutes cap (decided): only crashes count. What bounds these
+//                   restarts is the ladder's own hourly cap (genesis/recovery/watchdog.js).
 //   stop            a deliberate stop (SIGINT, or exit code 0 after a stop was asked for) is left
 //                   alone. An exit with code 0 that nobody asked for is a crash: upstream ends
 //                   the process that way when its spawn handler throws (src/agent/agent.js
@@ -40,6 +44,7 @@ export const SUPERVISOR_DEFAULTS = Object.freeze({
     login_attempts: 2,                      // decided: a refused login goes to the operator after at most two attempts
     login_retry_ms: 15 * 1000,              // proposed: the pause before the second attempt
     intended_delay_ms: 1000,                // proposed: the pause before a restart that was asked for
+    watchdog_delay_ms: 5 * 1000,            // proposed: the pause before a restart the watchdog ordered (as after a first crash)
 });
 
 export function createRestartSupervisor({ clock = { now: Date.now, setTimeout, clearTimeout }, emit = () => null, ids = null, ...options } = {}) {
@@ -49,7 +54,7 @@ export function createRestartSupervisor({ clock = { now: Date.now, setTimeout, c
     }
     const reporter = createIncidentReporter({ emit, clock, ids, source: { type: 'service', name: 'supervisor' } });
     const agents = new Map(); // name -> state
-    const stats = { exits: 0, crashes: 0, restarts: 0, intended: 0, reconnects: 0, refused: 0, stopped: 0, operator_incidents: 0, logins: 0 };
+    const stats = { exits: 0, crashes: 0, restarts: 0, intended: 0, watchdog: 0, reconnects: 0, refused: 0, stopped: 0, operator_incidents: 0, logins: 0 };
 
     const of = (name) => {
         if (!agents.has(name)) {
@@ -115,6 +120,14 @@ export function createRestartSupervisor({ clock = { now: Date.now, setTimeout, c
                 reporter.step(incident, { step: 'restart', attempt: 1, max: 1, result: 'pending' }, { is_failure: false, outcome: 'expected', code, intended: true });
                 schedule(name, state, config.intended_delay_ms);
                 decision = { action: 'restart', kind, delay_ms: config.intended_delay_ms, attempt: 0, counted: false };
+            } else if (kind === 'watchdog') {
+                // decided: only crashes count toward the restart cap. This restart is part of the watchdog's own
+                // incident (its fifth rung, which is in the agent's checkpoint); here it is told as one step, uncounted
+                stats.watchdog++;
+                const incident = { incident_id: reporter.newId(), source: about(name), kind: INCIDENT_KINDS.PROCESS_EXIT };
+                reporter.step(incident, { step: 'restart', attempt: 1, max: 1, result: 'pending' }, { code, ordered_by: 'watchdog', counted: false, delay_ms: config.watchdog_delay_ms });
+                schedule(name, state, config.watchdog_delay_ms);
+                decision = { action: 'restart', kind, delay_ms: config.watchdog_delay_ms, attempt: 0, counted: false };
             } else if (kind === 'server_down') {
                 stats.reconnects++;
                 state.down ??= { incident: reporter.detected({ kind: INCIDENT_KINDS.SERVER_DOWN, source: about(name), code }), attempts: 0, since: now };

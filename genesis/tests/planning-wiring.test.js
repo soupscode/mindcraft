@@ -34,7 +34,9 @@ import { installBotGuards } from '../lib/bot_guards.js';
 import { noDigPathingPlugin, pathingPermit } from '../lib/no_dig_pathing.js';
 import { createBotOps } from '../adapters/bot_ops.js';
 import { createBotView } from '../adapters/bot_world.js';
-import { createScaffoldTracker } from '../executor/scaffold.js';
+import { createScaffoldTracker, placementSink, TORCH_REFLEX_ACTION } from '../executor/scaffold.js';
+import { readFileSync } from 'node:fs';
+import { REPO_ROOT } from './helpers/stubs.mjs';
 
 function socketPair() {
     const make = () => {
@@ -412,6 +414,44 @@ test('bot_guards: nothing in a protected zone is broken except the one cell a st
     assert.deepEqual(bot.placed, [[5, 65, 5], [-39, 64, 0]]);
     assert.deepEqual(scaffold.snapshot(), [[5, 65, 5]], 'only what stands inside a zone has to be taken away again');
     assert.throws(() => installBotGuards({}, { zones }), /cannot be installed/);
+});
+
+test('bot_guards: a torch placed while upstream\'s torch mode runs is reported as a reflex torch and stays; anything else is scaffolding', LIMIT, async () => {
+    // upstream: the torch_placing mode places through skills.placeBlock, and every mode runs under the label `mode:<name>`
+    const modes = readFileSync(path.join(REPO_ROOT, 'src/agent/modes.js'), 'utf8').split('\n');
+    assert.match(modes[225], /name: 'torch_placing'/);
+    assert.match(modes[237], /await skills\.placeBlock\(agent\.bot, 'torch', pos\.x, pos\.y, pos\.z, 'bottom', true\);/);
+    assert.match(modes[316], /agent\.actions\.runAction\(`mode:\$\{mode\.name\}`/);
+    assert.match(readFileSync(path.join(REPO_ROOT, 'src/agent/action_manager.js'), 'utf8').split('\n')[100], /this\.currentActionLabel = actionLabel;/);
+
+    const zones = createZones(WORLD_CONFIG);
+    const agent = botAgent(OPEN);
+    const { bot } = agent;
+    const scaffold = createScaffoldTracker({ zones });
+    // wired as genesis/adapters/bot_agent.js wires it
+    installBotGuards(bot, { zones, onPlace: placementSink(scaffold, () => agent.actions?.currentActionLabel ?? null) });
+    const real_place = bot.placed;
+    const place = (x, y, z, item) => async () => {
+        bot.heldItem = { name: item };
+        const done = bot.placeBlock({ position: pos(x, y - 1, z) }, { x: 0, y: 1, z: 0 });
+        bot.heldItem = null; // the last one of the stack: gone from the hand by the time the block is confirmed
+        await done;
+    };
+    // the reflex, through upstream's real action manager: the torch is in the camp and is not tracked
+    await quietly(() => agent.actions.runAction(TORCH_REFLEX_ACTION, place(3, 65, 3, 'torch'), {}));
+    assert.deepEqual([scaffold.count(), scaffold.exempted()], [0, 1]);
+    await pause();
+    // a block the pathfinder puts down during a Genesis step, in the camp: tracked, to be taken away
+    await quietly(() => agent.actions.runAction('action:genesis_goToPosition', place(4, 65, 3, 'cobblestone'), {}));
+    await pause();
+    // a torch that is not the reflex's (another action runs) is scaffolding like everything else
+    await quietly(() => agent.actions.runAction('action:genesis_goToPosition', place(5, 65, 3, 'torch'), {}));
+    await pause();
+    // while the torch mode runs, something that is not a torch is not exempt either
+    await quietly(() => agent.actions.runAction(TORCH_REFLEX_ACTION, place(6, 65, 3, 'dirt'), {}));
+    assert.deepEqual(scaffold.snapshot(), [[4, 65, 3], [5, 65, 3], [6, 65, 3]]);
+    assert.equal(scaffold.exempted(), 1);
+    assert.equal(real_place.length, 4, 'a block was not really placed');
 });
 
 test('bot_world: the view reads the bot through upstream\'s helpers, and its path check never digs', LIMIT, async () => {

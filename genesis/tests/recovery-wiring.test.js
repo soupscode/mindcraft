@@ -19,7 +19,7 @@ import { pathToFileURL } from 'node:url';
 import { stubModules, captureConsole, REPO_ROOT } from './helpers/stubs.mjs';
 import { settle } from './helpers/fakes.mjs';
 import { bootstrappedWorld } from './helpers/bootstrapped.mjs';
-import { EXIT_CODES } from '../recovery/exit_codes.js';
+import { EXIT_CODES, classifyExit } from '../recovery/exit_codes.js';
 
 const seen = { skills: [], spawned: [], logouts: [], move_ok: true, home_ok: true };
 globalThis.genesis_test = seen;
@@ -255,11 +255,14 @@ test('adapters: the ladder\'s moves go through the action manager, and a smeltin
     seen.move_ok = true;
     seen.home_ok = true;
 
-    // rung 5 ends the process the way upstream does: a crash, for the supervisor to count
+    // rung 5 ends the process through upstream's cleanKill, with the exit code of a restart the watchdog ordered:
+    // decided, the supervisor carries it out and does not count it toward the crash cap
     setSettings({ genesis_planning: PLANNING });
     await recovery.restartProcess('the watchdog found no progress');
     assert.equal(agent.kills.length, 1);
-    assert.equal(agent.kills[0].code, 1);
+    assert.equal(agent.kills[0].code, EXIT_CODES.WATCHDOG_RESTART);
+    assert.equal(EXIT_CODES.WATCHDOG_RESTART, 67);
+    assert.equal(classifyExit({ code: agent.kills[0].code }), 'watchdog');
     assert.match(agent.kills[0].msg, /^Genesis watchdog: the watchdog found no progress/);
 
     // the executor's smelting step calls the skill itself: nothing restarts afterwards

@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { fakeClock, settle } from './helpers/fakes.mjs';
 import { httpServer, silentServer, refusedPort, closeAllServers } from './helpers/stubs.mjs';
-import { createPlannerBroker, BROKER_DEFAULTS } from '../broker/broker.js';
+import { createPlannerBroker, BROKER_DEFAULTS, SMALL_CALL_DEFAULTS, DECISION_CALL_DEFAULTS, SMALL_KINDS } from '../broker/broker.js';
 import { createModelGate, GATE_STATES, GATE_DEFAULTS } from '../broker/gate.js';
 import { createRequestQueue } from '../broker/queue.js';
 import { createBudget, BUDGET_DEFAULTS } from '../broker/budget.js';
@@ -99,7 +99,7 @@ const SECOND = 1000;
 const MINUTE = 60 * SECOND;
 
 test('the decided numbers are the defaults', () => {
-    assert.deepEqual({ ...BUDGET_DEFAULTS }, { max_calls: 20, window_ms: 3600000, min_gap_ms: 90000 });
+    assert.deepEqual({ ...BUDGET_DEFAULTS }, { max_calls: 40, window_ms: 3600000, min_gap_ms: 90000 });
     assert.equal(BROKER_DEFAULTS.call_timeout_ms, 90000);
     assert.equal(BROKER_DEFAULTS.repair_retries, 1);
     assert.deepEqual({ ...REPLY_LIMITS }, { thought: 160, title: 60, reason: 140, min_goals: 1, max_goals: 3 });
@@ -157,7 +157,7 @@ test('gate: a call in flight at desktop_leaving is cancelled and re-queued once'
     assert.deepEqual(h.delivered, []);                              // the agent is not told anything failed
     assert.deepEqual(h.calls.map((c) => [c.outcome, c.attempt, c.valid]), [['cancelled', 1, false]]);
     assert.equal(h.calls[0].latency_ms, 20 * SECOND);
-    assert.deepEqual(h.broker.budget.usage('Arthur', h.clock.now()), { used: 0, limit: 20 }); // a cancelled call is not counted
+    assert.deepEqual(h.broker.budget.usage('Arthur', h.clock.now()), { used: 0, limit: 40 }); // a cancelled call is not counted
     assert.deepEqual(h.broker.pendingFor('Arthur'), { id: request.id, kind: 'plan', queued_at: new Date(request.queued_at).toISOString() });
 
     await h.clock.advance(10 * MINUTE);
@@ -333,38 +333,42 @@ test('gate: the broker takes the desktop signals from an injected event source',
 
 // ---- the budget ----
 
-test('budget: the 21st call in an hour for one agent is refused and recorded', async () => {
+test('budget: the 41st call in an hour for one agent is refused and recorded (a repair retry counts)', async () => {
     const h = await setupAvailable();
     const first_call_at = h.clock.now();
+    // 90 seconds between calls allow at most 40 in an hour, so the limit is only reached with repair
+    // retries: each of these 20 requests gets an invalid reply first, and its one retry counts as a call
     for (let i = 0; i < 20; i++) {
+        h.model.replies.push('this is not JSON');
         h.broker.submit({ agent: 'Arthur', trigger: `need ${i + 1}` });
         await h.clock.advance(91 * SECOND);
     }
-    assert.equal(h.model.requests.length, 20);
+    assert.equal(h.model.requests.length, 40);
     assert.equal(h.delivered.filter((d) => d.ok).length, 20);
+    assert.deepEqual(h.calls.map((c) => c.attempt), Array.from({ length: 40 }, (_, i) => (i % 2) + 1));
     assert.ok(h.clock.now() - first_call_at < 60 * MINUTE);
 
     const { request } = h.broker.submit({ agent: 'Arthur', trigger: 'need 21' });
     await h.clock.advance(5 * MINUTE);
-    assert.equal(h.model.requests.length, 20, 'the 21st call reached the model');
+    assert.equal(h.model.requests.length, 40, 'the 41st call reached the model');
     const refused = h.delivered.at(-1);
     assert.deepEqual([refused.ok, refused.reason, refused.request.id], [false, 'budget_exhausted', request.id]);
     assert.equal(refused.retry_at, new Date(first_call_at + 60 * MINUTE).toISOString());
     const record = h.calls.at(-1);
-    assert.equal(h.calls.length, 21);
+    assert.equal(h.calls.length, 41);
     assert.equal(record.outcome, 'refused_budget');
     assert.equal(record.agent, 'Arthur');
     assert.equal(record.trigger, 'need 21');
     assert.equal(record.request_id, request.id);
     assert.equal(record.valid, false);
     assert.equal(record.raw_output, null);
-    assert.match(record.errors[0], /hourly budget used up \(20 calls per hour\)/);
+    assert.match(record.errors[0], /hourly budget used up \(40 calls per hour\)/);
     assert.equal(h.broker.pending().length, 0); // refused, not parked
 
     // the budget is per agent: Mira is not affected
     h.broker.submit({ agent: 'Mira', trigger: 'idle' });
     await settle();
-    assert.equal(h.model.requests.length, 21);
+    assert.equal(h.model.requests.length, 41);
     assert.equal(h.calls.at(-1).agent, 'Mira');
     assert.equal(h.calls.at(-1).outcome, 'ok');
 
@@ -372,8 +376,20 @@ test('budget: the 21st call in an hour for one agent is refused and recorded', a
     await h.clock.advance(first_call_at + 60 * MINUTE - h.clock.now() + SECOND);
     h.broker.submit({ agent: 'Arthur', trigger: 'need 22' });
     await settle();
-    assert.equal(h.model.requests.length, 22);
+    assert.equal(h.model.requests.length, 42);
     assert.equal(h.delivered.at(-1).ok, true);
+});
+
+test('budget: 40 calls an hour is what the 90 seconds allow: without a repair retry no call is ever refused', async () => {
+    const h = await setupAvailable();
+    for (let i = 0; i < 45; i++) {
+        h.broker.submit({ agent: 'Arthur', trigger: `need ${i + 1}` });
+        await h.clock.advance(90 * SECOND); // each goes out the moment the 90 seconds are over
+    }
+    assert.equal(h.model.requests.length, 45);
+    assert.equal(h.calls.filter((c) => c.outcome === 'refused_budget').length, 0);
+    // 90 seconds after the 45th call the sliding hour holds the 39 calls before it that are not an hour old yet
+    assert.deepEqual(h.broker.budget.usage('Arthur', h.clock.now()), { used: 39, limit: 40 });
 });
 
 test('budget: a second call inside 90 seconds is delayed, not dropped', async () => {
@@ -409,9 +425,9 @@ test('budget: a second call inside 90 seconds is delayed, not dropped', async ()
 test('budget: usage survives a restart through the checkpoint snapshot', () => {
     const budget = createBudget();
     const t0 = 1_000_000;
-    for (let i = 0; i < 20; i++) budget.finish(budget.spend('Arthur', t0 + i * 100_000), t0 + i * 100_000 + 5000);
+    for (let i = 0; i < 40; i++) budget.finish(budget.spend('Arthur', t0 + i * 50_000), t0 + i * 50_000 + 5000);
     budget.finish(budget.spend('Mira', t0), t0 + 1000);
-    const now = t0 + 20 * 100_000;
+    const now = t0 + 40 * 50_000;
     const snapshot = JSON.parse(JSON.stringify(budget.snapshot(now)));
 
     const restored = createBudget();
@@ -700,6 +716,121 @@ test('broker: stop() ends the timers and keeps the queue', async () => {
 });
 
 // ---- the thin Ollama client (a real HTTP exchange with a local server) ----
+
+// ---- the small calls: the spoken line, and the decision about a request or offer ----
+
+const DECISION_FORMAT = { type: 'object', properties: { decision: { type: 'string', enum: ['accept', 'decline'] }, reason: { type: 'string' } }, required: ['decision', 'reason'] };
+const decide = (broker, agent, more = {}) => broker.small({
+    agent, kind: 'message_decision', trigger: { kind: 'message_decision', detail: { msg_id: 'm-0001-1' } },
+    messages: [{ role: 'system', content: 'decide' }, { role: 'user', content: `for ${agent}` }], format: DECISION_FORMAT,
+    validate: (raw) => { try { return ['accept', 'decline'].includes(JSON.parse(raw).decision); } catch { return false; } }, ...more,
+});
+const YES = JSON.stringify({ decision: 'accept', reason: 'It can be spared.' });
+
+test('small calls: the decision is a kind of its own, with its own named hourly limit and token limit', async () => {
+    assert.deepEqual([...SMALL_KINDS], ['chat_line', 'message_decision']);
+    assert.deepEqual({ ...DECISION_CALL_DEFAULTS }, { max_calls: 20, window_ms: 3600000, min_gap_ms: 0, timeout_ms: 15000, max_tokens: 80, wait_ms: 20000 });
+    const h = await setupAvailable({ decision: { max_calls: 2 } });
+    assert.deepEqual(h.broker.smallLimits('message_decision'), { ...DECISION_CALL_DEFAULTS, max_calls: 2 });
+    assert.equal(h.broker.smallLimits('chat_line').max_calls, SMALL_CALL_DEFAULTS.max_calls);
+    assert.equal(h.broker.smallLimits('gossip'), null);
+
+    h.model.replies.push(YES);
+    const first = await decide(h.broker, 'Felix');
+    assert.deepEqual([first.ok, first.content], [true, YES]);
+    // the model was given the decision's own token limit and time-out, and the reply's schema
+    assert.deepEqual([h.model.requests[0].max_tokens, h.model.requests[0].timeout_ms, h.model.requests[0].format], [80, 15000, DECISION_FORMAT]);
+    // recorded like every call, as its own kind
+    assert.deepEqual([h.calls[0].agent, h.calls[0].trigger.kind, h.calls[0].outcome, h.calls[0].valid, h.calls[0].call_id], ['Felix', 'message_decision', 'ok', true, first.call_id]);
+    // a reply that fails validation is not used, and it counts
+    h.model.replies.push('{"decision":"perhaps","reason":"hm"}');
+    const second = await decide(h.broker, 'Felix');
+    assert.deepEqual([second.ok, second.reason], [false, 'invalid_reply']);
+    assert.equal(h.calls[1].outcome, 'invalid');
+
+    // the limit is spent (2 an hour here): refused at once, the model is not asked
+    const third = await decide(h.broker, 'Felix');
+    assert.deepEqual([third.ok, third.reason], [false, 'budget_exhausted']);
+    assert.equal(h.model.requests.length, 2);
+    assert.deepEqual(h.broker.decisionBudget.usage('Felix', h.clock.now()), { used: 2, limit: 2 });
+    // it is per agent, and it is not the line budget or the planning budget
+    h.model.replies.push(YES);
+    assert.equal((await decide(h.broker, 'Mira')).ok, true);
+    assert.equal(h.broker.smallBudget.usage('Felix', h.clock.now()).used, 0);
+    assert.equal(h.broker.budget.usage('Felix', h.clock.now()).used, 0);
+    h.model.replies.push('{"line":"Hello."}');
+    const line = await h.broker.small({ agent: 'Felix', messages: [{ role: 'user', content: 'say hello' }], validate: () => true });
+    assert.equal(line.ok, true, 'a line was refused because the decisions were spent');
+    assert.equal(h.model.requests.at(-1).max_tokens, SMALL_CALL_DEFAULTS.max_tokens);
+    assert.deepEqual([h.broker.stats().decision_calls, h.broker.stats().decision_refused, h.broker.stats().small_calls], [3, 1, 4]);
+
+    // an hour later the agent may decide again; the limits can be set from a setting, and only known kinds have any
+    await h.clock.advance(60 * MINUTE + SECOND);
+    h.model.replies.push(YES);
+    assert.equal((await decide(h.broker, 'Felix')).ok, true);
+    assert.deepEqual(h.broker.setSmallLimits('message_decision', { max_calls: 5, max_tokens: 40, timeout_ms: 9000, wait_ms: 1000, min_gap_ms: 77, nonsense: 1 }),
+        { ...DECISION_CALL_DEFAULTS, max_calls: 5, max_tokens: 40, timeout_ms: 9000, wait_ms: 1000 });
+    assert.equal(h.broker.decisionBudget.usage('Felix', h.clock.now()).limit, 5);
+    assert.equal(h.broker.setSmallLimits('gossip', { max_calls: 99 }), null);
+    assert.deepEqual((await h.broker.small({ agent: 'Felix', kind: 'gossip', messages: [] })), { ok: false, reason: 'bad_request' });
+});
+
+test('small calls: a decision waits its turn behind a busy model, goes before the next planning call, and never waits for a model that is away', async () => {
+    const h = await setupAvailable();
+    h.model.delay_ms = 10 * SECOND;
+    // Arthur's planning call is out, Mira's request waits behind it
+    h.model.replies.push(reply('gather_wood'), YES, reply('rest'));
+    h.broker.submit({ agent: 'Arthur', trigger: 'idle' });
+    await settle();
+    h.broker.submit({ agent: 'Mira', trigger: 'idle' });
+    await settle();
+    assert.equal(h.model.requests.length, 1);
+
+    // a line never waits: the template is used
+    assert.deepEqual(await h.broker.small({ agent: 'Felix', messages: [{ role: 'user', content: 'say hello' }] }), { ok: false, reason: 'model_busy' });
+    // a decision waits (20 seconds at most), and is next when the model is free: before Mira's planning call
+    let decided = null;
+    decide(h.broker, 'Felix').then((result) => { decided = result; });
+    await h.clock.advance(9 * SECOND);
+    assert.equal(decided, null);
+    assert.equal(h.model.requests.length, 1, 'two calls at the same time');
+    await h.clock.advance(2 * SECOND);  // Arthur's call has ended
+    assert.equal(h.model.requests.length, 2);
+    assert.deepEqual(h.model.requests[1].format, DECISION_FORMAT, 'the planning call that waited went before the decision');
+    assert.equal(h.model.max_active, 1);
+    await h.clock.advance(10 * SECOND); // the decision has ended, Mira's call is out
+    assert.deepEqual([decided.ok, decided.content], [true, YES]);
+    assert.equal(h.model.requests.length, 3);
+    await h.clock.advance(11 * SECOND);
+    assert.deepEqual(h.delivered.map((d) => [d.request.agent, d.ok]), [['Arthur', true], ['Mira', true]]);
+    assert.equal(h.model.max_active, 1, 'more than one model call at a time');
+    assert.equal(h.broker.stats().small_waited, 1);
+
+    // a model that stays busy longer than the wait: the decision is given up (the caller's code rule decides)
+    h.model.delay_ms = 60 * SECOND;
+    h.broker.submit({ agent: 'Arthur', trigger: 'again' });
+    await h.clock.advance(91 * SECOND); // (past the 90 seconds between Arthur's calls: his call is out now)
+    const calls = h.model.requests.length;
+    let late = null;
+    decide(h.broker, 'Felix').then((result) => { late = result; });
+    await h.clock.advance(19 * SECOND);
+    assert.equal(late, null);
+    await h.clock.advance(2 * SECOND);
+    assert.deepEqual(late, { ok: false, reason: 'model_busy' });
+    assert.equal(h.model.requests.length, calls, 'the decision went out after it was given up');
+    assert.equal(h.broker.decisionBudget.usage('Felix', h.clock.now()).used, 1, 'a decision that was never made was counted');
+
+    // the desktop leaves while a decision waits: answered at once, nothing is sent
+    let left = null;
+    decide(h.broker, 'Felix').then((result) => { left = result; });
+    await settle();
+    await h.broker.signal('desktop_leaving');
+    await settle();
+    assert.deepEqual(left, { ok: false, reason: 'model_away' });
+    // and with the gate shut no decision is ever sent
+    assert.deepEqual(await decide(h.broker, 'Felix'), { ok: false, reason: 'model_away' });
+    assert.equal(h.model.requests.length, calls);
+});
 
 test('ollama planner: sends the schema in the documented `format` field and reads the reply and token counts', async () => {
     const seen = [];

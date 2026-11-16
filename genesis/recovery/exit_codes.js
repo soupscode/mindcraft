@@ -15,6 +15,8 @@ export const EXIT_CODES = Object.freeze({
     INTENDED_RESTART: 64,   // a restart somebody asked for (the operator's !restart, the panel): never counted as a crash
     SERVER_DOWN: 65,        // the Minecraft server cannot be reached or closed the connection: wait and reconnect
     LOGIN_REFUSED: 66,      // the server answered and refused the login (whitelist, ban, name in use, version)
+    WATCHDOG_RESTART: 67,   // the watchdog's ladder ordered the restart (rung 5): carried out, and NOT counted toward the
+                            // crash cap (decided). The ladder's own hourly cap bounds how often this can happen.
 });
 
 // What upstream's parseKickReason calls the reason for a disconnect (src/agent/connection_handler.js
@@ -29,11 +31,12 @@ export function exitCodeForDisconnect(type) {
     return EXIT_CODES.CRASH;
 }
 
-// What an exit means: 'stop' | 'intended' | 'server_down' | 'login_refused' | 'crash'.
+// What an exit means: 'stop' | 'intended' | 'server_down' | 'login_refused' | 'watchdog' | 'crash'.
 export function classifyExit({ code = null, signal = null } = {}) {
     if (signal === 'SIGINT' || code === EXIT_CODES.STOP) return 'stop';
     if (code === EXIT_CODES.INTENDED_RESTART) return 'intended';
     if (code === EXIT_CODES.SERVER_DOWN) return 'server_down';
     if (code === EXIT_CODES.LOGIN_REFUSED) return 'login_refused';
+    if (code === EXIT_CODES.WATCHDOG_RESTART) return 'watchdog';
     return 'crash';
 }

@@ -25,6 +25,17 @@ export const UPSTREAM_OPS = Object.freeze({
 
 export const OP_NAMES = Object.freeze(Object.keys(UPSTREAM_OPS));
 
+// Steps that are NOT an upstream skill: Genesis code in the agent's own process carries them out
+// (genesis/agent/runtime.js hands them on; the step runner of a bot never sees them).
+//   relayMessage   the one step of an ask_agent or offer_agent goal: a structured request or offer
+//                  goes to the relay through the agent's message desk (genesis/relay/desk.js, sendStep)
+export const LOCAL_OPS = Object.freeze({
+    relayMessage: { file: 'genesis/relay/desk.js', args: ['type', 'to', 'item', 'count'], places_blocks: false },
+});
+export const MESSAGE_STEP = 'relayMessage';
+// Every command a template step may name.
+export const STEP_NAMES = Object.freeze([...OP_NAMES, ...Object.keys(LOCAL_OPS)]);
+
 // craftRecipe and smeltItem place a crafting table or a furnace from the inventory when
 // none is within 16 blocks (skills.js lines 56-69 and 162-169). The templates never let
 // that happen: their step guard refuses the step unless one stands within this distance.
@@ -73,13 +84,14 @@ const LOG_REASONS = [
     [/it was never received|too close\./, 'not_received', 'skills.js:1042, 1067'],
     [/You do not have any \S+ to discard/, 'not_held', 'skills.js:861'],
     [/Unable to reach|Pathfinding stopped|Missing coordinates/, 'not_reached', 'skills.js:1208, 1222, 1241, 1245'],
+    [/message_rejected: /, 'message_rejected', 'genesis/relay/desk.js'],
     [/!!Code threw exception!!/, 'skill_error', 'src/agent/action_manager.js'],
 ];
 
 // The named reason for a step that did not succeed.
 //   result: { ok, interrupted, timedout, output }
 export function classifyFailure(command, result) {
-    if (!Object.hasOwn(UPSTREAM_OPS, command)) return 'unknown_command';
+    if (!Object.hasOwn(UPSTREAM_OPS, command) && !Object.hasOwn(LOCAL_OPS, command)) return 'unknown_command';
     if (result?.timedout === true) return 'timed_out';
     if (result?.interrupted === true) return 'interrupted';
     const output = String(result?.output ?? '');

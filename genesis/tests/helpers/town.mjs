@@ -50,8 +50,27 @@ export function stubModel(clock) {
         // `lines` queues answers: a line, a function (request, template) -> line, or an Error.
         // By default the model says the plain version with a word of its own in front.
         line_requests: [], lines: [], line_delay_ms: 0,
+        // the small calls that decide a request or offer (genesis/relay/decisions.js): kept apart as well.
+        // `decisions` queues answers: 'accept' | 'decline', { decision, reason }, a raw string, an Error, or a
+        // function (request) -> one of those. By default the model accepts.
+        decision_requests: [], decisions: [], decision_delay_ms: 0,
         async probe() { model.probes++; return model.probe_ok; },
         chat(request) {
+            if (request.format?.properties?.decision) {
+                model.decision_requests.push(request);
+                let next = model.decisions.length > 0 ? model.decisions.shift() : 'accept';
+                if (typeof next === 'function') next = next(request);
+                const answer = () => {
+                    if (next instanceof Error) throw next;
+                    const content = next === 'accept' || next === 'decline' ? JSON.stringify({ decision: next, reason: next === 'accept' ? 'It can be spared.' : 'It is needed here.' })
+                        : (typeof next === 'string' ? next : JSON.stringify(next));
+                    return { content, prompt_tokens: 150, completion_tokens: 15, model: 'stub-model:latest' };
+                };
+                if (model.decision_delay_ms <= 0) return Promise.resolve().then(answer);
+                return new Promise((resolve, reject) => {
+                    clock.setTimeout(() => { try { resolve(answer()); } catch (err) { reject(err); } }, model.decision_delay_ms);
+                });
+            }
             if (request.format?.properties?.line) {
                 model.line_requests.push(request);
                 const template = /Plain version: (.*)$/m.exec(request.messages.at(-1).content)?.[1] ?? '';
@@ -90,7 +109,7 @@ export const BLUEPRINTS = { get: (name) => (name === 'hut' ? HUT : null) };
 // recovery: true gives every agent the watchdog and its ladder (the fake world's recovery moves).
 // relay: true (or the relay's settings) adds the message relay to the host, as the launcher does, and
 //   gives every agent its message desk; what an agent is told to say is kept in a.said.
-export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, world = null, inventories = {}, positions = {}, host: host_options = {}, runtime: runtime_options = {}, recovery = false, relay = false } = {}) {
+export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, world = null, inventories = {}, positions = {}, host: host_options = {}, runtime: runtime_options = {}, recovery = false, relay = false, blueprints = BLUEPRINTS } = {}) {
     const town = { clock, calls: [], broker_events: [], agents: {} };
     town.world = world ?? campWorld(clock);
     town.zones = createZones(config);
@@ -131,18 +150,18 @@ export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, wo
             remove: async (...args) => (a.dead ? undefined : town.files.remove(...args)),
         };
         a.scaffold = createScaffoldTracker({ zones: town.zones });
-        a.ops = town.world.ops(agent, { on_place: (pos, how) => { if (how !== 'skill') a.scaffold.placed(pos); } });
+        a.ops = town.world.ops(agent, { on_place: (pos, how) => { if (how !== 'skill') a.scaffold.placed(pos, { reflex_torch: how === 'reflex_torch' }); } });
         // the agent's copy of the one chest ledger the host holds
         a.ledger = createLedgerClient({ agent, send: (event, ...args) => client.emit(event, ...args), clock });
         client.on('genesis-ledger-update', (message) => a.ledger.onUpdate(message));
         a.claims = [];
         a.runtime = createAgentRuntime({
-            agent, zones: town.zones, catalog: createCatalog({ zones: town.zones, blueprints: BLUEPRINTS }),
+            agent, zones: town.zones, catalog: createCatalog({ zones: town.zones, blueprints }),
             view: town.world.view(agent), ops: a.ops, scaffold: a.scaffold,
             goal_storage: socketGoalStorage({ socket: client, clock }),
             checkpoints: createCheckpointStore({ files, dir: '/checkpoints', clock }),
             ...(recovery ? { recovery_ops: town.world.recovery(agent) } : {}),
-            ...(relay ? { messaging: true } : {}),
+            ...(relay ? { messaging: true, relay_limits: relay === true ? {} : relay.limits ?? {} } : {}),
             send: (event, ...args) => client.emit(event, ...args),
             emit: a.emitter.emit, getSeq: () => a.emitter.stats().seq, clock,
             ledger: a.ledger, onContestedClaim: (claim) => a.claims.push(claim),

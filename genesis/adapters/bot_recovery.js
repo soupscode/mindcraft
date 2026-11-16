@@ -10,12 +10,16 @@
 //   moveAway(blocks)          upstream's moveAway (src/agent/library/skills.js line 1411)
 //   surfaceOrHome(home)       walks home (goToPosition, line 1194); when that fails, goes to the
 //                             surface (goToSurface, line 1977)
-//   restartProcess(reason)    ends the process the way upstream does (agent.cleanKill, exit code 1):
-//                             the supervisor starts it again, and counts it
+//   restartProcess(reason)    ends the process through upstream's agent.cleanKill (src/agent/agent.js line 543)
+//                             with the exit code of a restart the watchdog ordered: the supervisor starts
+//                             it again and does NOT count it toward the crash cap (decided: only crashes
+//                             count; the ladder's own hourly cap bounds these restarts)
 //
 // With the pathfinding_no_dig setting on (always, for Genesis) none of these breaks a block.
 // Injected: skills (src/agent/library/skills.js).
-// Depends on nothing else.
+// Depends only on genesis/recovery/exit_codes.js.
+
+import { EXIT_CODES } from '../recovery/exit_codes.js';
 
 export const RECOVERY_OPS_DEFAULTS = Object.freeze({
     move_timeout_min: 1,
@@ -45,7 +49,7 @@ export function createBotRecovery(agent, { skills, ...options } = {}) {
             return skills.goToSurface(agent.bot);
         }, config.home_timeout_min),
         async restartProcess(reason) {
-            agent.cleanKill(`Genesis watchdog: ${reason}. Restarting the agent process.`, 1);
+            agent.cleanKill(`Genesis watchdog: ${reason}. Restarting the agent process.`, EXIT_CODES.WATCHDOG_RESTART);
         },
     };
 }

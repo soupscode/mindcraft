@@ -101,6 +101,11 @@ export function createRoutine({ agent, definition, catalog, zones, clock, emit =
                 if (!found.ok || skip.has(found.option.id)) return null;
                 return found.option;
             },
+            // why the catalog does not offer this right now (a named reason), or null when it does
+            refusal(skill, args) {
+                const found = catalog.option(skill, args, world);
+                return found.ok ? null : found.reason;
+            },
             // the first of the catalog's own candidates for a skill that holds and passes `filter`
             firstCandidate(skill, filter = () => true) {
                 for (const args of catalog.candidates(skill, world)) {

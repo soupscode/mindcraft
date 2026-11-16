@@ -35,6 +35,7 @@ function assertEventsValid(events) {
 const incidents = (events, kind) => events.filter((event) => ['agent.failure', 'agent.recovery'].includes(event.type) && event.data.incident_id !== undefined && (!kind || event.data.kind === kind));
 const steps = (events, kind) => incidents(events, kind).filter((event) => event.data.phase === 'recovery_step').map((event) => `${event.data.recovery.step}:${event.data.recovery.result}`);
 const planRequests = (agent) => agent.socket.sent.filter(([name]) => name === 'genesis-plan-request').length;
+const planKinds = (agent) => agent.socket.sent.filter(([name]) => name === 'genesis-plan-request').map(([, message]) => message.trigger.kind);
 
 // Puts a goal in an agent's queue the way the operator (or a planner reply) would.
 async function seed(a, option_id, source = 'operator') {
@@ -375,8 +376,8 @@ test('supervisor: a deliberate stop is left alone, and a restart that was asked 
     let started = 0;
     const restart = () => { started++; };
 
-    assert.deepEqual([classifyExit({ code: 0 }), classifyExit({ code: null, signal: 'SIGINT' }), classifyExit({ code: 64 }), classifyExit({ code: 65 }), classifyExit({ code: 66 }), classifyExit({ code: 1 }), classifyExit({ code: 4 })],
-        ['stop', 'stop', 'intended', 'server_down', 'login_refused', 'crash', 'crash']);
+    assert.deepEqual([classifyExit({ code: 0 }), classifyExit({ code: null, signal: 'SIGINT' }), classifyExit({ code: 64 }), classifyExit({ code: 65 }), classifyExit({ code: 66 }), classifyExit({ code: 67 }), classifyExit({ code: 1 }), classifyExit({ code: 4 })],
+        ['stop', 'stop', 'intended', 'server_down', 'login_refused', 'watchdog', 'crash', 'crash']);
 
     // ten restarts somebody asked for, one after the other: every one is carried out
     for (let i = 0; i < 10; i++) {
@@ -403,6 +404,131 @@ test('supervisor: a deliberate stop is left alone, and a restart that was asked 
     await clock.advance(10 * MINUTE);
     assert.equal(started, 10);
     assertShapes(events);
+});
+
+test('supervisor: a restart the watchdog ordered does not count toward the 5-restarts-in-30-minutes cap; only crashes do', async () => {
+    const clock = fakeClock();
+    const events = [];
+    const supervisor = createRestartSupervisor({ clock, emit: (type, data, opts) => events.push({ type, data, ...opts }) });
+    let started = 0;
+    const restart = () => { started++; };
+    assert.equal(SUPERVISOR_DEFAULTS.watchdog_delay_ms, 5 * SECOND);
+
+    // eight restarts ordered by the watchdog inside 30 minutes (more than the cap of 5): every one is carried out
+    for (let i = 0; i < 8; i++) {
+        const decision = supervisor.exited('Felix', { code: EXIT_CODES.WATCHDOG_RESTART }, restart);
+        assert.deepEqual(decision, { action: 'restart', kind: 'watchdog', delay_ms: 5 * SECOND, attempt: 0, counted: false });
+        await clock.advance(4 * SECOND);
+        assert.equal(started, i, 'the process was started before its pause was over');
+        await clock.advance(2 * MINUTE);
+        assert.equal(started, i + 1);
+        supervisor.loggedIn('Felix');
+    }
+    assert.deepEqual([supervisor.state('Felix').restarts_in_window, supervisor.state('Felix').stopped], [0, null]);
+    assert.equal(events.filter((event) => event.data.needs_operator).length, 0);
+    assert.deepEqual([supervisor.stats().watchdog, supervisor.stats().crashes, supervisor.stats().stopped], [8, 0, 0]);
+    // each is told as one recovery step that says who ordered it and that it was not counted
+    const told = events.filter((event) => event.data.ordered_by === 'watchdog');
+    assert.equal(told.length, 8);
+    assert.ok(told.every((event) => event.type === 'agent.recovery' && event.data.kind === 'process.exit' && event.data.counted === false
+        && event.data.recovery.step === 'restart' && event.data.recovery.result === 'pending' && event.data.code === 67 && event.data.source.name === 'Felix'));
+
+    // crashes count as before, and alone: five restarts, each after its decided pause, with watchdog restarts in between
+    const waits = [];
+    for (let i = 0; i < 5; i++) {
+        const crash = supervisor.exited('Felix', { code: 1 }, restart);
+        assert.deepEqual([crash.action, crash.counted, crash.attempt], ['restart', true, i + 1], 'a watchdog restart was counted as a crash');
+        waits.push(crash.delay_ms);
+        await clock.advance(crash.delay_ms + SECOND);
+        assert.equal(supervisor.exited('Felix', { code: EXIT_CODES.WATCHDOG_RESTART }, restart).counted, false);
+        await clock.advance(6 * SECOND);
+    }
+    assert.deepEqual(waits, [5 * SECOND, 30 * SECOND, 2 * MINUTE, 5 * MINUTE, 5 * MINUTE]);
+    assert.equal(supervisor.state('Felix').restarts_in_window, 5);
+    // a watchdog restart is still carried out with the crash count at its cap...
+    assert.equal(supervisor.exited('Felix', { code: EXIT_CODES.WATCHDOG_RESTART }, restart).action, 'restart');
+    await clock.advance(6 * SECOND);
+    // ...and the sixth CRASH inside 30 minutes stops the agent, with one operator incident
+    const sixth = supervisor.exited('Felix', { code: 1 }, restart);
+    assert.deepEqual([sixth.action, sixth.reason], ['stop', 'restart_limit']);
+    assert.equal(events.filter((event) => event.data.needs_operator).length, 1);
+    // the pause can be set, like the supervisor's other values
+    assert.deepEqual(checkSettings({ genesis_recovery: { supervisor: { watchdog_delay_ms: 10000 } } }), []);
+    assertShapes(events);
+});
+
+test('watchdog restarts are bounded by the ladder\'s own hourly cap, and after rung 6 the agent keeps trying and recovers by itself', async () => {
+    const t = await awayTown({ inventories: { Arthur: { oak_log: 5, wooden_axe: 1, wooden_pickaxe: 1, bread: 4 } }, positions: { Arthur: { x: 30, y: 64, z: 0 } } });
+    t.world.boxed = () => true;
+    t.world.stall = () => true; // nothing the agent starts gets anywhere
+    const supervisor = createRestartSupervisor({ clock: t.clock });
+    let arthur = t.agents.Arthur;
+    const restarts = [];
+    const all_events = [];
+    // the process ends with the watchdog's exit code; the supervisor decides, and starts a new process from the same files
+    t.world.on_restart = (agent) => {
+        const old = t.kill(agent);
+        all_events.push(...old.events);
+        const decision = supervisor.exited(agent, { code: EXIT_CODES.WATCHDOG_RESTART }, () => {
+            const seq = decodeCheckpoint(t.files.store.get(`/checkpoints/${agent}.checkpoint.json`)).checkpoint.seq;
+            t.join(agent, { last_seq: seq }).then((a) => { arthur = a; supervisor.loggedIn(agent); t.running.push(a.runtime.run()); });
+        });
+        restarts.push({ at: t.clock.now(), decision });
+    };
+    await seed(arthur, 'store_items:shared:oak_log');
+    t.run();
+    await t.clock.advance(4 * MINUTE);
+    // the ladder was climbed through the restart to rung 6: the operator was told once
+    const stuck = () => incidents([...all_events, ...arthur.events], INCIDENT_KINDS.STUCK);
+    assert.equal(restarts.length, 1);
+    assert.deepEqual([restarts[0].decision.action, restarts[0].decision.counted], ['restart', false]);
+    assert.equal(stuck().filter((event) => event.data.needs_operator).length, 1);
+    assert.equal(arthur.runtime.watchdog().stats().rung, 6);
+
+    // ---- after rung 6 the agent KEEPS TRYING: it is not held, not parked, not stopped; it goes on choosing work and starting steps ----
+    const calls_at_6 = t.world.calls.length;
+    const decisions_at_6 = arthur.eventsOf('agent.decision').length;
+    // (a step that gets nowhere is ended by the action manager's time-out after 5 minutes, then tried again: 3 tries, then the next goal)
+    await t.clock.advance(20 * MINUTE);
+    assert.deepEqual([arthur.runtime.isHeld(), arthur.runtime.executor.isPaused(), supervisor.state('Arthur').stopped], [false, false, null]);
+    assert.ok(t.world.calls.length >= calls_at_6 + 3, `the agent stopped trying after the operator was told (${t.world.calls.length - calls_at_6} steps in 20 minutes)`);
+    assert.ok(arthur.eventsOf('agent.decision').length > decisions_at_6, 'the agent chose no more work after rung 6');
+    assert.equal(arthur.runtime.routine.isParked(), false);
+    // ...without the ladder looping: no more recovery moves, no second restart, the operator told once
+    assert.equal(restarts.length, 1);
+    assert.equal(stuck().filter((event) => event.data.needs_operator).length, 1);
+
+    // ---- what blocked it goes away: the agent gets on by itself, and the incident ends as auto-recovered ----
+    t.world.boxed = () => false;
+    t.world.stall = null;
+    t.world.durations = () => 2 * SECOND;
+    const done_before = arthur.runtime.executor.stats().goals_completed;
+    await t.clock.advance(5 * MINUTE);
+    assert.ok(arthur.runtime.executor.stats().goals_completed > done_before, 'the agent did not get back to work once the way was free');
+    const resolved = stuck().filter((event) => event.data.phase === 'resolved');
+    assert.equal(resolved.length, 1);
+    assert.deepEqual([resolved[0].data.outcome, resolved[0].data.rung], ['auto_recovered', 6]);
+    assert.equal(arthur.runtime.watchdog().incident(), null);
+
+    // ---- shut in again, for hours: the ladder's hourly cap (12 rungs) bounds the restarts the watchdog can order.
+    // The supervisor counts none of them, and never stops the agent for them ----
+    t.world.boxed = () => true;
+    t.world.stall = () => true;
+    const before = restarts.length;
+    const from = t.clock.now();
+    await t.clock.advance(3 * 60 * MINUTE);
+    const ordered = restarts.slice(before);
+    assert.ok(ordered.length >= 1, 'the watchdog never restarted the agent again');
+    for (let i = 0; i < ordered.length; i++) {
+        const in_hour = ordered.filter((entry) => entry.at >= ordered[i].at && entry.at < ordered[i].at + 60 * MINUTE).length;
+        assert.ok(in_hour <= Math.floor(WATCHDOG_DEFAULTS.max_climbs_per_hour / 5), `${in_hour} watchdog restarts within one hour`);
+    }
+    assert.ok(ordered.length <= 3 * Math.floor(WATCHDOG_DEFAULTS.max_climbs_per_hour / 5) + 1, `${ordered.length} restarts in ${(t.clock.now() - from) / MINUTE} minutes`);
+    assert.ok(ordered.every((entry) => entry.decision.action === 'restart' && entry.decision.counted === false));
+    assert.deepEqual([supervisor.state('Arthur').restarts_in_window, supervisor.state('Arthur').stopped, supervisor.stats().crashes], [0, null, 0]);
+    assert.equal(t.model.requests.length, 0);
+    assertEventsValid([...all_events, ...arthur.events]);
+    await t.stop();
 });
 
 function assertShapes(events) {
@@ -611,6 +737,60 @@ test('a death leads back to the same plan step with zero model requests: respawn
     await t.stop();
 });
 
+test('a death with no goal of the planner or the operator to resume sends NO planning request: respawn, re-equip, back to the routine', async () => {
+    for (const available of [false, true]) {
+        const clock = fakeClock();
+        const t = makeTown({ clock, recovery: true, inventories: { Arthur: { stone_axe: 1, stone_pickaxe: 1, bread: 3 } } });
+        t.world.get(-2, 64, 2).contents = { stone_axe: 2, stone_pickaxe: 2, bread: 12 }; // the kits chest
+        t.world.durations = (command, args, far) => (command === 'breakBlockAt' ? 4 * SECOND + far * 200 : 1 * SECOND + far * 200);
+        // with the model there, its one reply fails: the agent works from its routine while it does not ask again (3 minutes)
+        if (available) t.model.replies.push(new Error('the model fell over'));
+        await t.start({ available });
+        if (!available) await t.host.signal('desktop_leaving');
+        const arthur = t.agents.Arthur;
+        t.run();
+        await clock.advance(40 * SECOND);
+        // the agent is on a goal its ROUTINE chose
+        const plan = arthur.runtime.executor.plan();
+        assert.equal(plan.source, 'routine', `model ${available ? 'there' : 'away'}: the agent is not on a routine goal`);
+        assert.match(plan.goal.option_id, /^gather_blocks:/);
+        const kinds_before = planKinds(arthur);
+        const model_before = t.model.requests.length;
+        const decided_before = arthur.eventsOf('agent.decision').length;
+
+        // ---- it dies, and respawns away from home with nothing ----
+        arthur.runtime.deathBegan();
+        const point = t.world.kill('Arthur');
+        t.world.interrupt('Arthur');
+        t.world.body('Arthur').position = { x: 20, y: 64, z: 20 };
+        await settle();
+        assert.equal(await arthur.runtime.died(point), 'restart');
+        // decided: the routine's goal is given up, and NO planning request is sent because of the death
+        assert.equal(arthur.runtime.executor.mainPlan(), null);
+        assert.equal(arthur.runtime.executor.isDetouring(), false);
+        assert.deepEqual(planKinds(arthur), kinds_before, 'a planning request was sent because of a death on a routine goal');
+        assert.equal(arthur.runtime.stats().deaths_without_request, 1);
+
+        // it walks home, re-equips from the kit chest and is back on its routine: all by code
+        await clock.advance(60 * SECOND);
+        const decided = arthur.eventsOf('agent.decision').slice(decided_before);
+        assert.deepEqual(decided.slice(0, 4).map((event) => event.data.args[0]),
+            ['travel:home', 'travel:chest-kits', 'fetch_items:kits:stone_axe:1', 'fetch_items:kits:stone_pickaxe:1']);
+        assert.ok(decided.every((event) => event.data.trigger === 'routine'));
+        assert.ok(decided.slice(4).some((event) => event.data.args[0].startsWith('gather_blocks:')), 'the agent did not return to its routine');
+        assert.deepEqual([t.world.body('Arthur').inventory.stone_axe, t.world.body('Arthur').inventory.stone_pickaxe], [1, 1]);
+        assert.equal(arthur.runtime.routine.isParked(), false);
+        // still no request about the death, and the model was not asked
+        assert.ok(!planKinds(arthur).slice(kinds_before.length).includes('reflex_interrupt'), 'the death reached the planner after all');
+        assert.equal(t.model.requests.length, model_before, 'the model was asked because of a death');
+        // the death is told as one recovery step, auto-recovered, never as a failure for the operator
+        const death = incidents(arthur.events, INCIDENT_KINDS.DEATH);
+        assert.deepEqual(death.map((event) => [event.type, event.data.recovery.step, event.data.outcome, event.data.needs_operator]), [['agent.recovery', 'respawn', 'auto_recovered', false]]);
+        assertEventsValid(arthur.events);
+        await t.stop();
+    }
+});
+
 test('deaths agree with the two-deaths rule: a second death on the same goal gives it up, and a restart in the middle of a re-equip finishes it', async () => {
     const clock = fakeClock();
     const t = makeTown({ clock, recovery: true, inventories: { Arthur: { stone_axe: 1, bread: 3 } } });
@@ -650,6 +830,7 @@ test('deaths agree with the two-deaths rule: a second death on the same goal giv
     assert.deepEqual([resolved.data.incident_id, resolved.data.phase, resolved.data.plan_id], [incident_id, 'resolved', plan.id]);
 
     // the second death on the same goal: the goal is given up, as the two-deaths rule has it
+    const kinds_before = planKinds(arthur);
     arthur.runtime.deathBegan();
     const again = t.world.kill('Arthur');
     t.world.interrupt('Arthur');
@@ -657,6 +838,9 @@ test('deaths agree with the two-deaths rule: a second death on the same goal giv
     assert.equal(arthur.runtime.executor.isDetouring(), false);
     assert.equal(arthur.runtime.executor.mainPlan(), null);
     assert.equal(arthur.changes().at(-1).reason, 'abandoned: died');
+    // a goal the operator (or the planner) chose was given up over the death: of that the planner is told, once
+    assert.deepEqual(planKinds(arthur).slice(kinds_before.length), ['reflex_interrupt']);
+    assert.deepEqual(arthur.socket.sent.filter(([name]) => name === 'genesis-plan-request').at(-1)[1].trigger.detail, { cause: 'death', gave_up: 'gather_blocks:oak_log:8' });
     assertEventsValid(arthur.events);
     await t.stop();
 });
