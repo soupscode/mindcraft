@@ -3,6 +3,7 @@ import convoManager from './conversation.js';
 import { setSettings } from './settings.js';
 import { getFullState } from './library/full_state.js';
 import { initAgentEvents } from '../../genesis/events/agent_emit.js';
+import { genesisLastSeq, asPanelMessage, genesisIntendedRestart } from '../../genesis/agent/hooks.js';
 
 // agent's individual connection to the mindserver
 // always connect to localhost
@@ -59,12 +60,14 @@ class MindServerProxy {
 
         this.socket.on('restart-agent', (agentName) => {
             console.log(`Restarting agent: ${agentName}`);
+            genesisIntendedRestart(this.agent, null); // Genesis: a restart asked for from the panel is not a crash. Does nothing unless the genesis_planning setting is on
             this.agent.cleanKill();
         });
 		
         this.socket.on('send-message', (data) => {
             try {
-                this.agent.respondFunc(data.from, data.message);
+                // Genesis: a message from the panel is the operator's (only matters when the genesis_planning setting is on)
+                asPanelMessage(this.agent, () => this.agent.respondFunc(data.from, data.message));
             } catch (error) {
                 console.error('Error: ', JSON.stringify(error, Object.getOwnPropertyNames(error)));
             }
@@ -86,7 +89,7 @@ class MindServerProxy {
                 reject(new Error('Settings request timed out after 5 seconds'));
             }, 5000);
 
-            this.socket.emit('get-settings', name, (response) => {
+            this.socket.emit('get-settings', name, async (response) => {
                 clearTimeout(timeout);
                 if (response.error) {
                     return reject(new Error(response.error));
@@ -94,7 +97,8 @@ class MindServerProxy {
                 setSettings(response.settings);
                 this.socket.emit('connect-agent-process', name);
                 // structured events go to the mindserver over this socket. does nothing unless the genesis_events setting is on
-                initAgentEvents({ agent: name, settings: response.settings, send: (event) => {
+                // last_seq: with the genesis_planning setting on, seq goes on from the agent's checkpoint (0 otherwise)
+                initAgentEvents({ agent: name, settings: response.settings, last_seq: await genesisLastSeq(name, response.settings), send: (event) => {
                     if (!this.socket.connected) throw new Error('not connected to MindServer');
                     this.socket.emit('genesis-event', event);
                 } });

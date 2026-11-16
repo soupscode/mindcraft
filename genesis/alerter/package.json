@@ -1,0 +1,25 @@
+{
+    "name": "genesis-alerter",
+    "private": true,
+    "type": "module",
+    "description": "Genesis alerter: reads the event stream on its own, pings the operator once per critical problem through ntfy, batches warnings on the hour and writes the daily digest. Separate from the dashboard so alerts survive a dashboard crash.",
+    "engines": { "node": ">=20" },
+    "scripts": {
+        "build": "node scripts/build.mjs",
+        "typecheck": "tsc --noEmit",
+        "test": "node --import tsx --test test/*.test.ts",
+        "start": "node dist/alerter.mjs",
+        "migrate": "node dist/alerter.mjs --migrate-only"
+    },
+    "dependencies": {
+        "pg": "^8.11.0",
+        "redis": "^4.7.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "@types/pg": "^8.11.0",
+        "esbuild": "^0.25.0",
+        "tsx": "^4.19.0",
+        "typescript": "~5.9.0"
+    }
+}

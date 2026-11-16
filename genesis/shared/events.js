@@ -16,7 +16,16 @@
 //   goal.changed    { scope, before, after, reason, source, call_id }
 //   agent.failure   { kind, error, message, ... }     kind "model" carries the model_failure log fields
 //   agent.recovery  { kind, message? }
+//     Both also come in the incident shape (decided, genesis/recovery/incidents.js): a `data`
+//     with an incident_id is checked as
+//       { incident_id, source: { type, name }, kind, phase, is_failure,
+//         recovery: { step, attempt, max, result } | null, outcome, needs_operator }
+//     model.away and model.available use it with is_failure false and outcome "expected".
 //   agent.message   { to, text }                      the envelope's agent is the sender
+//     The structured message of the relay (decided, genesis/relay/relay.js): a `data` with a
+//     msg_id is checked as
+//       { msg_id, conv, from, to, type, body, chat_line, expires_at, state, reason? }
+//     state "rejected" carries the named reason and never has a chat line.
 //   agent.state     { state, detail? }
 
 export const EVENT_VERSION = 1;
@@ -34,6 +43,19 @@ export const GOAL_SOURCES = Object.freeze(['planner', 'executor', 'routine', 'op
 // An event larger than this (as JSON text) is refused: one event must never fill the buffer.
 export const MAX_EVENT_BYTES = 16 * 1024;
 
+// ---- the incident shape of agent.failure and agent.recovery ----
+export const INCIDENT_PHASES = Object.freeze(['detected', 'recovery_step', 'resolved', 'escalated']);
+export const INCIDENT_OUTCOMES = Object.freeze(['pending', 'auto_recovered', 'needs_operator', 'expected', 'gave_up']);
+export const RECOVERY_RESULTS = Object.freeze(['ok', 'failed', 'pending', 'skipped']);
+
+// ---- the structured message of agent.message ----
+export const MESSAGE_TYPES = Object.freeze(['request', 'offer', 'accept', 'decline', 'inform', 'warn']);
+// only these expect a reply (decided)
+export const REPLY_EXPECTED = Object.freeze(['request', 'offer']);
+// pending: a request or offer that waits for its reply. delivered: a message that expects none.
+// accepted, declined, expired: how a request or offer ended. rejected: the relay refused it.
+export const MESSAGE_STATES = Object.freeze(['pending', 'delivered', 'accepted', 'declined', 'expired', 'rejected']);
+
 const ENVELOPE_KEYS = ['v', 'id', 'ts', 'agent', 'seq', 'type', 'corr', 'severity', 'data'];
 const ULID_PATTERN = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/;
 // The form Date.prototype.toISOString() writes: UTC, milliseconds, "Z".
@@ -43,6 +65,38 @@ const isText = (value) => typeof value === 'string';
 const isFilledText = (value) => typeof value === 'string' && value.trim().length > 0;
 const isCount = (value) => Number.isInteger(value) && value >= 0;
 const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+function incidentProblems(d) {
+    const recovery = d.recovery;
+    return [
+        !isFilledText(d.incident_id) && 'data.incident_id must be a non-empty string',
+        (!isPlainObject(d.source) || !isFilledText(d.source.type) || !isFilledText(d.source.name)) && 'data.source must be { type, name }',
+        !isFilledText(d.kind) && 'data.kind must be a non-empty string',
+        !INCIDENT_PHASES.includes(d.phase) && `data.phase must be one of ${INCIDENT_PHASES.join(', ')}`,
+        typeof d.is_failure !== 'boolean' && 'data.is_failure must be true or false',
+        recovery !== null && (!isPlainObject(recovery) || !isFilledText(recovery.step) || !isCount(recovery.attempt) || !isCount(recovery.max)
+            || !RECOVERY_RESULTS.includes(recovery.result)) && `data.recovery must be null or { step, attempt, max, result: ${RECOVERY_RESULTS.join(' | ')} }`,
+        !INCIDENT_OUTCOMES.includes(d.outcome) && `data.outcome must be one of ${INCIDENT_OUTCOMES.join(', ')}`,
+        typeof d.needs_operator !== 'boolean' && 'data.needs_operator must be true or false',
+    ];
+}
+
+function messageProblems(d) {
+    return [
+        !isFilledText(d.msg_id) && 'data.msg_id must be a non-empty string',
+        !isFilledText(d.conv) && 'data.conv must be a non-empty string',
+        !isFilledText(d.from) && 'data.from must be a non-empty string',
+        !isFilledText(d.to) && 'data.to must be a non-empty string',
+        // (a rejected message is shown as it was handed in, so its type may be one that does not exist)
+        (d.state === 'rejected' ? !isFilledText(d.type) : !MESSAGE_TYPES.includes(d.type)) && `data.type must be one of ${MESSAGE_TYPES.join(', ')}`,
+        !isPlainObject(d.body) && 'data.body must be an object',
+        d.chat_line !== null && !isText(d.chat_line) && 'data.chat_line must be a string or null',
+        d.expires_at !== null && (!isText(d.expires_at) || !ISO_PATTERN.test(d.expires_at)) && 'data.expires_at must be an ISO-8601 UTC time or null',
+        !MESSAGE_STATES.includes(d.state) && `data.state must be one of ${MESSAGE_STATES.join(', ')}`,
+        d.state === 'rejected' && !isFilledText(d.reason) && 'data.reason must name why the message was rejected',
+        d.state === 'rejected' && d.chat_line !== null && 'a rejected message has no chat line',
+    ];
+}
 
 // Each check returns a list of problems with `data` (empty = fine).
 const DATA_CHECKS = {
@@ -78,19 +132,19 @@ const DATA_CHECKS = {
         !GOAL_SOURCES.includes(d.source) && `data.source must be one of ${GOAL_SOURCES.join(', ')}`,
         d.call_id !== null && !isFilledText(d.call_id) && 'data.call_id must be a non-empty string or null',
     ],
-    'agent.failure': (d) => [
+    'agent.failure': (d) => (d.incident_id !== undefined ? incidentProblems(d) : [
         !isFilledText(d.kind) && 'data.kind must be a non-empty string',
         !isFilledText(d.error) && 'data.error must be a non-empty string',
         !isText(d.message) && 'data.message must be a string',
-    ],
-    'agent.recovery': (d) => [
+    ]),
+    'agent.recovery': (d) => (d.incident_id !== undefined ? incidentProblems(d) : [
         !isFilledText(d.kind) && 'data.kind must be a non-empty string',
         d.message !== undefined && !isText(d.message) && 'data.message must be a string',
-    ],
-    'agent.message': (d) => [
+    ]),
+    'agent.message': (d) => (d.msg_id !== undefined ? messageProblems(d) : [
         !isFilledText(d.to) && 'data.to must be a non-empty string',
         !isText(d.text) && 'data.text must be a string',
-    ],
+    ]),
     'agent.state': (d) => [
         !isFilledText(d.state) && 'data.state must be a non-empty string',
         d.detail !== undefined && !isPlainObject(d.detail) && 'data.detail must be an object',

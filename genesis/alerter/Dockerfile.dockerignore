@@ -1,0 +1,8 @@
+# Build context for genesis/alerter/Dockerfile: the event contract and this folder, nothing else.
+*
+!genesis
+genesis/*
+!genesis/shared
+!genesis/alerter
+genesis/alerter/node_modules
+genesis/alerter/dist

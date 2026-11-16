@@ -1,0 +1,58 @@
+{
+    "v": 2,
+    "seed": "20261116",
+    "dimension": "overworld",
+    "home": [0, 64, 0],
+    "border": { "center": [0, 0], "size": 512 },
+    "rules": {
+        "difficulty": "easy",
+        "keep_inventory": false,
+        "mob_griefing": false,
+        "fire_spread": false,
+        "raids": false,
+        "nether": false,
+        "end": false
+    },
+    "camp": {
+        "min": [-12, -12],
+        "max": [12, 12],
+        "facing": "south",
+        "shared_chest_second_half": [-1, 64, -6],
+        "crafting_table": [-6, 64, 2],
+        "furnace": [-6, 64, 4],
+        "beds": [
+            { "foot": [4, 64, -10], "facing": "north", "color": "red" },
+            { "foot": [6, 64, -10], "facing": "north", "color": "green" },
+            { "foot": [8, 64, -10], "facing": "north", "color": "blue" },
+            { "foot": [10, 64, -10], "facing": "north", "color": "yellow" }
+        ]
+    },
+    "field": { "min": [16, -4], "max": [24, 4], "y": 63, "water": [[20, 0]], "crop": null, "owner": "Mira" },
+    "plots": [
+        { "id": "arthur-1", "owner": "Arthur", "min": [-34, 64, 14], "max": [-19, 77, 29], "blueprint": "small_wood_house" },
+        { "id": "mira-1", "owner": "Mira", "min": [-4, 64, 14], "max": [11, 77, 29], "blueprint": null },
+        { "id": "felix-1", "owner": "Felix", "min": [30, 64, 14], "max": [45, 77, 29], "blueprint": null },
+        { "id": "nova-1", "owner": "Nova", "min": [-12, 64, -30], "max": [3, 77, -15], "blueprint": null },
+        { "id": "spare-1", "owner": null, "min": [-34, 64, -30], "max": [-19, 77, -15], "blueprint": null }
+    ],
+    "chests": {
+        "shared": [-2, 64, -6],
+        "kits": [8, 64, 4]
+    },
+    "kits": [
+        { "item": "stone_axe", "count": 1 },
+        { "item": "stone_pickaxe", "count": 1 },
+        { "item": "stone_hoe", "count": 1 },
+        { "item": "stone_sword", "count": 1 },
+        { "item": "bread", "count": 16 },
+        { "item": "torch", "count": 16 },
+        { "item": "wheat_seeds", "count": 64 },
+        { "item": "wheat_seeds", "count": 16 }
+    ],
+    "agents": {
+        "Arthur": { "home": [0, 64, 0], "range": 48 },
+        "Mira": { "home": [4, 64, 0], "range": 32 },
+        "Felix": { "home": [0, 64, 4], "range": 128 },
+        "Nova": { "home": [-4, 64, 0], "range": 32 }
+    }
+}

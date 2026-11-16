@@ -4,6 +4,15 @@ import { logoutAgent } from '../mindcraft/mindserver.js';
 
 const init_agent_path = fileURLToPath(new URL('./init_agent.js', import.meta.url));
 
+// Genesis: who decides what happens when an agent process ends (genesis/recovery/supervisor.js:
+// restarts with growing pauses and a limit, waiting for a Minecraft server that is down).
+// Null, the default, leaves upstream's own rule below in charge. Set by genesis/recovery/server.js
+// when the genesis_planning setting is on.
+let restart_supervisor = null;
+export function setRestartSupervisor(supervisor) {
+    restart_supervisor = supervisor;
+}
+
 export class AgentProcess {
     constructor(name, port) {
         this.name = name;
@@ -33,6 +42,11 @@ export class AgentProcess {
             console.log(`Agent process exited with code ${code} and signal ${signal}`);
             this.running = false;
             logoutAgent(this.name);
+
+            if (restart_supervisor) {
+                restart_supervisor.exited(this.name, { code, signal }, () => this.start(true, 'Agent process restarted.', count_id, this.port));
+                return;
+            }
             
             if (code > 1) {
                 console.log(`Ending task`);
@@ -59,6 +73,7 @@ export class AgentProcess {
     }
 
     stop() {
+        if (restart_supervisor) restart_supervisor.stopRequested(this.name); // a restart that waits is called off
         if (!this.running) return;
         this.process.kill('SIGINT');
     }

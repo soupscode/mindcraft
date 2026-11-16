@@ -17,11 +17,21 @@ register('./stub-hooks.mjs', {
                     console.log('GENESIS_TEST_AGENT ' + JSON.stringify(settings));
                     return { success: true, error: null };
                 }`,
-            // only loaded by the launcher when the genesis_events setting is on
+            // only loaded by the launcher when the genesis_events or the genesis_planning setting is on
             'src/mindcraft/mindserver.js': `
                 export function setEventSink(sink) {
                     console.log('GENESIS_TEST_EVENT_SINK ' + JSON.stringify({ is_function: typeof sink === 'function' }));
+                }
+                export function setSocketExtension(extension) {
+                    console.log('GENESIS_TEST_SOCKET_EXTENSION ' + JSON.stringify({ is_function: typeof extension === 'function' }));
                 }`,
+            // only loaded by the launcher when recovery is on (genesis/recovery/server.js)
+            'src/process/agent_process.js': `
+                export function setRestartSupervisor(supervisor) {
+                    console.log('GENESIS_TEST_RESTART_SUPERVISOR ' + JSON.stringify({ exited: typeof supervisor?.exited === 'function' }));
+                }`,
+            // as if the package was not installed, also on a machine where it is
+            'pg': "throw Object.assign(new Error(\"Cannot find package 'pg' (test stand-in)\"), { code: 'ERR_MODULE_NOT_FOUND' });",
             // as if the package was not installed, also on a machine where it is
             'redis': "throw Object.assign(new Error(\"Cannot find package 'redis' (test stand-in)\"), { code: 'ERR_MODULE_NOT_FOUND' });",
             'yargs': `

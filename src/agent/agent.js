@@ -17,6 +17,7 @@ import settings from './settings.js';
 import { Task } from './tasks/tasks.js';
 import { speak } from './speak.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
+import { genesisPlanningOn, startGenesisAgent, genesisMessage, genesisHears, genesisOperatorCommand, genesisDisconnectCode, genesisExitCode } from '../../genesis/agent/hooks.js';
 
 export class Agent {
     async start(load_mem=false, init_message=null, count_id=0) {
@@ -74,7 +75,8 @@ export class Agent {
             // handleDisconnection handles logging to console and server
             const { type } = handleDisconnection(this.name, reason);
      
-            process.exit(1);
+            // Genesis: the exit code says why (server down, login refused), so the right thing is done about it. Always 1 unless the genesis_planning setting is on
+            process.exit(genesisDisconnectCode(settings, type, 1));
         };
         
         // Bind events
@@ -104,7 +106,7 @@ export class Agent {
         const spawnTimeout = setTimeout(() => {
             const msg = `Bot has not spawned after ${spawnTimeoutDuration} seconds. Exiting.`;
             log(this.name, msg);
-            process.exit(1);
+            process.exit(genesisDisconnectCode(settings, 'network_error', 1)); // Genesis: a server that never lets the bot in is waited for. Always 1 unless the genesis_planning setting is on
         }, spawnTimeoutDuration * 1000);
         this.bot.once('spawn', async () => {
             try {
@@ -158,6 +160,8 @@ export class Agent {
             if (message === "") return;
             if (username === this.name) return;
             if (settings.only_chat_with.length > 0 && !settings.only_chat_with.includes(username)) return;
+            // Genesis (genesis_planning setting, off by default): only the operator is listened to. Always true when the setting is off.
+            if (!genesisHears(this, settings, username, convoManager.isOtherAgent(username))) return;
             try {
                 if (ignore_messages.some((m) => message.startsWith(m))) return;
 
@@ -193,6 +197,10 @@ export class Agent {
             startAt: 14,
             bannedFood: ["rotten_flesh", "spider_eye", "poisonous_potato", "pufferfish", "chicken"]
         };
+
+        // Genesis (genesis_planning setting, off by default): the executor takes over here. It loads its
+        // checkpoint and resumes; no restart prompt, no self-prompter and no greeting go to the model.
+        if (await startGenesisAgent(this, settings)) return;
 
         if (save_data?.self_prompt) {
             if (init_message) {
@@ -282,12 +290,16 @@ export class Agent {
                     // add the preceding message to the history to give context for newAction
                     this.history.add(source, message);
                 }
+                genesisOperatorCommand(this, source, user_command_name); // Genesis: !stop holds the executor until !resume. Does nothing unless the genesis_planning setting is on
                 let execute_res = await executeCommand(this, message);
                 if (execute_res) 
                     this.routeResponse(source, execute_res);
                 return true;
             }
         }
+
+        // Genesis: no model call per message. The message becomes a planning trigger instead.
+        if (genesisPlanningOn(settings)) return genesisMessage(this, source, message, from_other_bot);
 
         if (from_other_bot)
             this.last_sender = source;
@@ -458,8 +470,8 @@ export class Agent {
         // Use connection handler for runtime disconnects
         this.bot.on('end', (reason) => {
             if (!this._disconnectHandled) {
-                const { msg } = handleDisconnection(this.name, reason);
-                this.cleanKill(msg);
+                const { type, msg } = handleDisconnection(this.name, reason);
+                this.cleanKill(msg, genesisDisconnectCode(settings, type, 1)); // Genesis: see onDisconnect above. Always 1 unless the genesis_planning setting is on
             }
         });
         this.bot.on('death', () => {
@@ -468,8 +480,8 @@ export class Agent {
         });
         this.bot.on('kicked', (reason) => {
             if (!this._disconnectHandled) {
-                const { msg } = handleDisconnection(this.name, reason);
-                this.cleanKill(msg);
+                const { type, msg } = handleDisconnection(this.name, reason);
+                this.cleanKill(msg, genesisDisconnectCode(settings, type, 1));
             }
         });
         this.bot.on('messagestr', async (message, _, jsonMsg) => {
@@ -532,7 +544,7 @@ export class Agent {
         this.history.add('system', msg);
         this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.');
         this.history.save();
-        process.exit(code);
+        process.exit(genesisExitCode(this, settings, code)); // Genesis: a restart that was asked for gets its own code. Unchanged unless the genesis_planning setting is on
     }
     async checkTaskDone() {
         if (this.task.data) {

@@ -14,6 +14,15 @@ export function getCommand(name) {
     return commandMap[name];
 }
 
+// Adds a command while the agent runs. Used by Genesis for its !resume command, only when the
+// genesis_planning setting is on (genesis/agent/hooks.js); nothing calls it otherwise.
+export function addCommand(command) {
+    if (!command?.name || commandMap[command.name]) return false;
+    commandMap[command.name] = command;
+    commandList.push(command);
+    return true;
+}
+
 export function blacklistCommands(commands) {
     const unblockable = ['!stop', '!stats', '!inventory', '!goal'];
     for (let command_name of commands) {

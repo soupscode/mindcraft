@@ -25,6 +25,14 @@ export function setEventSink(sink) {
     event_sink = sink;
 }
 
+// Genesis: lets the planner host (genesis/planning/host.js) add its own handlers to every
+// connection. Null, the default, means nothing is added. Set by genesis/planning/server.js
+// when the genesis_planning setting is on.
+let socket_extension = null;
+export function setSocketExtension(extension) {
+    socket_extension = extension;
+}
+
 const settings_spec = JSON.parse(readFileSync(path.join(__dirname, 'public/settings_spec.json'), 'utf8'));
 
 class AgentConnection {
@@ -282,6 +290,11 @@ export function createMindServer(host_public = false, port = 8080, listen_host =
         socket.on('listen-to-agents', () => {
             addListener(socket);
         });
+
+        if (socket_extension) {
+            // isAgentSocket(name): is this connection the process of that agent?
+            socket_extension(socket, { isAgentSocket: (name) => agent_connections[name]?.socket === socket });
+        }
 
         socket.on('genesis-event', (event) => {
             // only an agent's own process connection may hand in events, and only under its own name
