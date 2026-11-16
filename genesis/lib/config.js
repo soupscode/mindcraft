@@ -11,6 +11,8 @@ export const REQUIRED_BLOCKED_ACTIONS = ['!newAction', '!startConversation', '!e
 
 // Values that mean "not filled in yet".
 export const PLACEHOLDERS = ['GENESIS_MODEL', 'DESKTOP_IP'];
+// "Not filled in yet" for the Redis address in genesis_events.redis_url.
+export const REDIS_PLACEHOLDER = 'REDIS_HOST';
 
 // Addresses the MindServer may listen on. The agents always connect to it through
 // localhost (src/agent/mindserver_proxy.js), so only loopback and "every interface"
@@ -52,6 +54,44 @@ export function checkSettings(settings) {
     if (host !== undefined && !MINDSERVER_HOSTS.includes(host)) {
         problems.push(`settings: "mindserver_host" must be one of ${MINDSERVER_HOSTS.join(', ')} (got ${JSON.stringify(host)}); `
             + 'the agents connect through localhost and would not find the MindServer on another address');
+    }
+    problems.push(...checkEventSettings(settings.genesis_events));
+    return problems;
+}
+
+// Whole-number settings of genesis_events, with the smallest value each may have.
+export const EVENT_NUMBER_SETTINGS = { stream_maxlen: 100, buffer_size: 2 };
+
+// Checks the genesis_events setting (structured events, published to Redis streams by the
+// MindServer). No setting at all, or "enabled": false, leaves events off: nothing is
+// emitted, nothing connects to Redis, and the rest of the setting is not looked at.
+function checkEventSettings(events) {
+    if (events === undefined) return [];
+    if (events === null || typeof events !== 'object' || Array.isArray(events)) {
+        return ['settings: "genesis_events" must be an object'];
+    }
+    if (events.enabled !== true && events.enabled !== false) {
+        return ['settings: "genesis_events.enabled" must be true or false'];
+    }
+    if (!events.enabled) return [];
+    const problems = [];
+    let url = null;
+    try { url = new URL(events.redis_url); } catch { /* reported below */ }
+    if (typeof events.redis_url !== 'string' || !url || !['redis:', 'rediss:'].includes(url.protocol) || !url.hostname) {
+        problems.push('settings: "genesis_events.redis_url" must be a redis:// or rediss:// address');
+    } else if (events.redis_url.includes(REDIS_PLACEHOLDER)) {
+        problems.push(`settings: "genesis_events.redis_url" still holds a placeholder (${events.redis_url})`);
+    }
+    if (typeof events.stream !== 'string' || events.stream.length === 0) {
+        problems.push('settings: "genesis_events.stream" must be a non-empty string');
+    }
+    if (events.stream_per_agent !== undefined && typeof events.stream_per_agent !== 'boolean') {
+        problems.push('settings: "genesis_events.stream_per_agent" must be true or false');
+    }
+    for (const [key, least] of Object.entries(EVENT_NUMBER_SETTINGS)) {
+        if (!Number.isInteger(events[key]) || events[key] < least) {
+            problems.push(`settings: "genesis_events.${key}" must be a whole number, ${least} or more`);
+        }
     }
     return problems;
 }

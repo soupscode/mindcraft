@@ -10,6 +10,12 @@
 // A SETTINGS_JSON that is already set is merged on top of the file, for one-off overrides.
 // GENESIS_LOAD_MEMORY=false starts every agent with empty memory (a full reset start);
 // unset or true loads saved memory, as genesis/settings.json says.
+//
+// Structured events ("genesis_events" in the settings file) are off until "enabled" is
+// true. Then the agents hand their events to the MindServer, which publishes them to the
+// Redis stream named there. That needs the "redis" package and a filled-in redis_url.
+// A Redis that is down or missing never stops or slows an agent: events wait in a bounded
+// buffer in the MindServer and are counted as dropped once it is full.
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -38,5 +44,9 @@ if (problems.length > 0) {
     for (const problem of problems) console.error(`Genesis config problem: ${problem}`);
     console.error('Not starting. Fix the problems above (see genesis/profiles and genesis/settings.json).');
     process.exit(1);
+}
+if (settings.genesis_events?.enabled === true) {
+    const { startEventPublishing } = await import('./events/server.js');
+    await startEventPublishing(settings.genesis_events);
 }
 await import('../main.js');

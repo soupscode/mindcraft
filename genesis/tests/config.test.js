@@ -38,6 +38,7 @@ function run(script, env = {}, args = []) {
     return {
         status: child.status, stdout: child.stdout, stderr: child.stderr,
         init: recorded('GENESIS_TEST_INIT'), agents: recorded('GENESIS_TEST_AGENT'),
+        event_sinks: recorded('GENESIS_TEST_EVENT_SINK'),
     };
 }
 
@@ -204,6 +205,57 @@ test('checkSettings: accepts only loopback and wildcard MindServer addresses', (
         assert.equal(problems.length, 1, `accepted ${JSON.stringify(host)}`);
         assert.match(problems[0], /mindserver_host/);
     }
+});
+
+const EVENTS_ON = { enabled: true, redis_url: 'redis://192.0.2.20:6379', stream: 'genesis:events', stream_maxlen: 20000, buffer_size: 2000 };
+
+test('checkSettings: structured events are off in the repo, and checked only when switched on', () => {
+    assert.equal(genesis_settings.genesis_events.enabled, false);
+    assert.deepEqual(checkSettings({ genesis_events: { enabled: false } }), []);
+    assert.deepEqual(checkSettings({ genesis_events: EVENTS_ON }), []);
+    assert.deepEqual(checkSettings({ genesis_events: { ...EVENTS_ON, stream_per_agent: true } }), []);
+
+    // switching on what the repo ships must first ask for the Redis address
+    const shipped_on = checkSettings({ genesis_events: { ...genesis_settings.genesis_events, enabled: true } });
+    assert.equal(shipped_on.length, 1);
+    assert.match(shipped_on[0], /redis_url" still holds a placeholder/);
+
+    const bad = [
+        'yes', null, [], {}, { enabled: 'true' },
+        { ...EVENTS_ON, redis_url: 'http://192.0.2.20:6379' }, { ...EVENTS_ON, redis_url: '192.0.2.20:6379' },
+        { ...EVENTS_ON, redis_url: undefined }, { ...EVENTS_ON, stream: '' }, { ...EVENTS_ON, stream_maxlen: 0 },
+        { ...EVENTS_ON, stream_maxlen: '20000' }, { ...EVENTS_ON, buffer_size: 1 }, { ...EVENTS_ON, buffer_size: 2.5 },
+        { ...EVENTS_ON, stream_per_agent: 'yes' },
+    ];
+    for (const genesis_events of bad) {
+        const problems = checkSettings({ genesis_events });
+        assert.equal(problems.length, 1, `accepted ${JSON.stringify(genesis_events)}`);
+        assert.match(problems[0], /genesis_events/);
+    }
+});
+
+test('launcher: events stay off by default, and the agents start whatever happens to Redis when they are on', () => {
+    const { settings_file } = filledInCopy();
+    const off = run('genesis/start.js', { GENESIS_SETTINGS_FILE: settings_file });
+    assert.equal(off.status, 0, off.stderr);
+    assert.deepEqual(off.event_sinks, []);
+    for (const settings of off.agents) assert.equal(settings.genesis_events.enabled, false);
+
+    // switched on, with no "redis" package installed and no Redis anywhere: one log line, four agents
+    const on = run('genesis/start.js', { GENESIS_SETTINGS_FILE: settings_file, SETTINGS_JSON: JSON.stringify({ genesis_events: EVENTS_ON }) });
+    assert.equal(on.status, 0, on.stderr);
+    assert.deepEqual(on.event_sinks, [{ is_function: true }]);
+    assert.equal(on.stderr.split('\n').filter((line) => line.includes('genesis_events_redis_unusable')).length, 1, on.stderr);
+    assert.deepEqual(on.agents.map((a) => a.profile.name), NAMES);
+    for (const settings of on.agents) assert.deepEqual(settings.genesis_events, EVENTS_ON); // the agent processes get it too
+
+    const unfilled = run('genesis/start.js', {
+        GENESIS_SETTINGS_FILE: settings_file, SETTINGS_JSON: JSON.stringify({ genesis_events: { ...EVENTS_ON, redis_url: 'redis://REDIS_HOST:6379' } }),
+    });
+    assert.equal(unfilled.status, 1);
+    assert.match(unfilled.stderr, /redis_url" still holds a placeholder/);
+    assert.deepEqual(unfilled.agents, []);
+    assert.deepEqual(unfilled.event_sinks, []);
 });
 
 test('compose file: the MindServer port is not published, and the comment says how the dashboard reaches it', () => {

@@ -17,6 +17,14 @@ let server;
 const agent_connections = {};
 const agent_listeners = [];
 
+// Genesis: where structured events from the agent processes go (genesis/events/hub.js).
+// Null, the default, means they are ignored. Set by genesis/events/server.js when the
+// genesis_events setting is on.
+let event_sink = null;
+export function setEventSink(sink) {
+    event_sink = sink;
+}
+
 const settings_spec = JSON.parse(readFileSync(path.join(__dirname, 'public/settings_spec.json'), 'utf8'));
 
 class AgentConnection {
@@ -273,6 +281,13 @@ export function createMindServer(host_public = false, port = 8080, listen_host =
 
         socket.on('listen-to-agents', () => {
             addListener(socket);
+        });
+
+        socket.on('genesis-event', (event) => {
+            // only an agent's own process connection may hand in events, and only under its own name
+            if (event_sink && agent_connections[event?.agent]?.socket === socket) {
+                event_sink(event);
+            }
         });
     });
 
