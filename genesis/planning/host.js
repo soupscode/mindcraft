@@ -12,15 +12,24 @@
 //   genesis-goals-load    (agent, ack)             -> ack({ ok, goals })   the goal store's storage, kept here so
 //   genesis-goals-save    (agent, goals, change, ack) -> ack({ ok })       only this process talks to Postgres
 //   genesis-desktop       (name)                   'desktop_available' | 'desktop_leaving', from the desktop launcher
+//   genesis-ledger-sync     (agent, ack)           -> ack({ ok, ledger })  the ONE chest ledger lives here
+//   genesis-ledger-op       ({ agent, op })                                what an agent saw in a chest, put in or took out
+//   genesis-ledger-reserve  ({ agent, chest, item, count }, ack)           -> ack({ ok, count | code, claim, reservations })
+//   genesis-ledger-release  ({ agent, chest, item })
+//   genesis-ledger-update   -> every agent  { chests: { name: view }, reservations }   after every change
 // An agent's requests are only taken from that agent's own process connection.
 //
 // Injected:
 //   model, clock, calls       as the broker takes them
 //   goal_storage              { load(agent), save(agent, goals, change) }   (createHostGoalStorage below)
+//   ledger                    the shared chest ledger (genesis/catalog/shared_ledger.js)
 //   emit(type, data, opts)    where the gate's own events go (optional)
+//   onGate(state, detail)     told when the model gate changed (optional): genesis/recovery/server.js
+//                             turns it into the model.away and model.available incident events
 // Depends only on other Genesis files.
 
 import { createPlannerBroker } from '../broker/broker.js';
+import { createSharedLedger } from '../catalog/shared_ledger.js';
 
 export const HOST_DEFAULTS = Object.freeze({ context_timeout_ms: 5000 });
 
@@ -91,14 +100,15 @@ export function createHostGoalStorage({ durable = null, max_waiting = 2000, retr
 
 export function createPlanningHost({
     model, clock = { now: Date.now, setTimeout, clearTimeout }, calls = { record() {} },
-    goal_storage = createHostGoalStorage(), emit = () => {}, broker: broker_options = {}, ...options
+    goal_storage = createHostGoalStorage(), ledger = null, emit = () => {}, onGate = null, broker: broker_options = {}, ...options
 } = {}) {
+    const chest_ledger = ledger ?? createSharedLedger({ clock });
     const config = { ...HOST_DEFAULTS };
     for (const key of Object.keys(HOST_DEFAULTS)) {
         if (options[key] !== undefined) config[key] = options[key];
     }
     const agents = new Map(); // agent -> the socket of its process
-    const stats = { hellos: 0, requests: 0, refused_sender: 0, context_failures: 0, results: 0, undelivered: 0 };
+    const stats = { hellos: 0, requests: 0, refused_sender: 0, context_failures: 0, results: 0, undelivered: 0, ledger_ops: 0, ledger_updates: 0 };
 
     const toAgent = (agent, event, ...args) => {
         const socket = agents.get(agent);
@@ -145,13 +155,22 @@ export function createPlanningHost({
         if (type !== 'agent.state' || typeof data?.state !== 'string' || !data.state.startsWith('model_')) return;
         const message = { state: broker.gate.state(), reason: data.detail?.reason ?? null };
         for (const agent of agents.keys()) toAgent(agent, 'genesis-gate', message);
+        if (onGate) { try { onGate(message.state, { ...(data.detail ?? {}) }); } catch { /* the listener's problem */ } }
     }
 
     const broker = createPlannerBroker({ model, clock, calls, buildContext, deliver, emit: gateEvent, ...broker_options });
 
+    // Every agent is told what the ledger now says about a chest, and who has reserved what.
+    function ledgerChanged(chest = null) {
+        stats.ledger_updates++;
+        const message = { chests: chest ? { [chest]: chest_ledger.view(chest) } : {}, reservations: chest_ledger.reservations() };
+        for (const agent of agents.keys()) toAgent(agent, 'genesis-ledger-update', message);
+    }
+
     return {
         broker,
         goal_storage,
+        ledger: chest_ledger,
         // Called for every connection to the MindServer. `isAgentSocket(name)` says whether this
         // connection is the process of that agent (the MindServer knows; a test may just say yes).
         attach(socket, { isAgentSocket = () => true } = {}) {
@@ -191,10 +210,42 @@ export function createPlanningHost({
             socket.on('genesis-desktop', (name) => {
                 if (name === 'desktop_available' || name === 'desktop_leaving') broker.signal(name).catch(() => {});
             });
+            // ---- the shared chest ledger ----
+            socket.on('genesis-ledger-sync', (agent, ack) => {
+                if (!own(agent) || typeof ack !== 'function') return;
+                agents.set(agent, socket);
+                ack({ ok: true, ledger: chest_ledger.snapshot() });
+            });
+            socket.on('genesis-ledger-op', (message) => {
+                if (!own(message?.agent)) return;
+                stats.ledger_ops++;
+                agents.set(message.agent, socket);
+                const done = chest_ledger.apply(message.agent, message.op);
+                // told also when nothing changed: the agent's copy took the op and must be put right
+                ledgerChanged(done?.chest ?? (typeof message.op?.chest === 'string' ? message.op.chest : null));
+            });
+            socket.on('genesis-ledger-reserve', (message, ack) => {
+                if (!own(message?.agent)) return;
+                agents.set(message.agent, socket);
+                const outcome = chest_ledger.reserve(message.agent, message);
+                if (typeof ack === 'function') ack({ ...outcome, reservations: chest_ledger.reservations() });
+                if (outcome.ok) ledgerChanged();
+            });
+            socket.on('genesis-ledger-release', (message) => {
+                if (!own(message?.agent)) return;
+                if (chest_ledger.release(message.agent, message)) ledgerChanged();
+            });
             socket.on('disconnect', () => {
-                for (const [agent, known] of agents) if (known === socket) agents.delete(agent);
+                for (const [agent, known] of agents) {
+                    if (known !== socket) continue;
+                    agents.delete(agent);
+                    // a process that is gone holds nothing: what it had reserved is free again
+                    if (chest_ledger.releaseAll(agent)) ledgerChanged();
+                }
             });
         },
+        // The ledger was changed from inside this process (the relay moved a reservation): every agent is told.
+        ledgerUpdated: (chest = null) => ledgerChanged(chest),
         signal: (name) => broker.signal(name),
         start: (start_options) => broker.start(start_options),
         stop() { broker.stop(); goal_storage.stop?.(); },

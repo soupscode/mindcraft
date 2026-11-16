@@ -22,13 +22,30 @@
 
     "genesis_planning": {
         "enabled": false,
+        "operators": ["OPERATOR_NAME"],
         "world_file": "./genesis/genesis.world.json",
+        "manifest_file": "./bots/genesis_world/bootstrap.manifest.json",
         "checkpoint_dir": "./bots/genesis_checkpoints",
+        "ledger_file": "./bots/genesis_ledger/chest_ledger.json",
         "model": {
             "url": "http://DESKTOP_IP:11434",
             "model": "GENESIS_MODEL"
         },
         "postgres_url": ""
+    },
+
+    "genesis_recovery": {
+        "enabled": true
+    },
+
+    "genesis_relay": {
+        "enabled": true,
+        "model_lines": true,
+        "model_decisions": true,
+        "decision": {
+            "max_calls_per_hour": 20,
+            "max_tokens": 80
+        }
     },
 
     "allow_insecure_coding": false,

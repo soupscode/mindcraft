@@ -60,6 +60,7 @@ export const SKILLS_STUBS = {
         Vec3.prototype.plus = function (o) { return new Vec3(this.x + o.x, this.y + o.y, this.z + o.z); };`,
     'src/utils/mcdata.js': `
         export function getBlockId(name) { return 'id:' + name; }
+        export function getItemId(name) { return 'id:' + name; }
         export function mustCollectManually() { return false; }
         export function isHostile() { return false; }`,
     'src/agent/library/world.js': `

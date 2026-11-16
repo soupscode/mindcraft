@@ -1,4 +1,5 @@
-// Genesis: the eight skill templates of the first catalog.
+// Genesis: the nine skill templates of the catalog (the eight of the first catalog, and
+// sow_field, added when the starter field was decided to be left bare).
 //
 // A template is the whole recipe for one kind of goal. Nothing in it is written by the
 // model: the model only picks an option id, and everything else comes from here.
@@ -14,10 +15,25 @@
 //                                       null (go on) | { skip: reason } | { fail: reason } |
 //                                       { permit: { dig: true } }   the step may tunnel (never in a zone)
 //                                       { intend: [pos] }           cells the step places on purpose
-//   after(step, result, args, state, ctx, baseline)   bookkeeping after a step; may return { fail: reason }
+//   after(step, result, args, state, ctx, baseline)   bookkeeping after a step; may return { fail: reason },
+//                                       or { ok: true } when the step did what it was for whatever the skill answered
 //   progress(args, state, ctx, baseline, plan) -> { done, total }
+//   release(args, state)                (optional) the goal ended, however it ended: give back what it held
+//                                       (fetch_items frees its reservation in the chest ledger)
 //
-// state: { agent, view, zones, ledger, blueprints, avoid }
+// Beside the nine: give_items (the hand-over of a commitment) and the two messages the planner
+// may choose to send, ask_agent and offer_agent (decided). They have the same shape.
+//
+// ctx.contested(claim): told when an agent wants items another agent has reserved in the
+// chest ledger: { chest, item, count, holder, held, asker, in_chest }. Never a silent failure.
+//
+// ctx.known(item): is the item something the catalog knows (a drop of what it gathers, something
+// it crafts, a seed or the produce of a crop it farms).
+//
+// state: { agent, view, zones, ledger, blueprints, avoid, duties?, talk? }
+//   duties: [{ to, item, count }]   what the agent agreed to hand over (genesis/relay/desk.js)
+//   talk:   the message desk's view, or null without one: { open, max_open, sent, max_sent,
+//           spare(item), waiting(type, to, item), repeated(type, to, item, count) }
 //   view (the injected world view; genesis/adapters/bot_world.js for a real bot):
 //     position() -> {x,y,z}             health(), food(), freeSlots() -> numbers
 //     inventory() -> { item: count }    dayTicksLeft() -> game ticks of daylight left (0 at night)
@@ -33,7 +49,7 @@
 
 import { STATION_RANGE, COMMON_FAILURES, isEmptyBlock } from './ops.js';
 import { boxContains, flatDistance } from './zones.js';
-import { parseChestView } from './ledger.js';
+import { parseChestView, contestedClaim } from './ledger.js';
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const held = (state, item) => state.view.inventory()[item] ?? 0;
@@ -317,42 +333,71 @@ const store_items = {
 
 // ---- fetch_items -------------------------------------------------------------------------
 
+// What the agent may still take: the count in the ledger less what other agents have reserved.
+const freeFor = (state, chest, item) => state.ledger.available(chest, item, state.agent, state.now);
+
+// Reserves the items for this agent, so that no second agent is sent after them. When
+// another agent holds them the step does not fail silently: the catalog is told a contested
+// claim (who wanted what, and who holds it), and the reason is named.
+function reserveGuard(args, state, ctx) {
+    const got = state.ledger.reserve(args.chest, args.item, args.count, state.agent, state.now);
+    if (got.ok || got.code !== 'contested') return null; // an empty ledger is for the chest itself to confirm
+    ctx.contested(got.claim);
+    return { fail: 'contested_claim' };
+}
+
 const fetch_items = {
     name: 'fetch_items',
     progress_unit: 'items taken',
-    failures: ['ledger_empty', 'inventory_full', 'unknown_chest', 'chest_unreachable', 'out_of_range', 'avoid_area', 'wrong_chest', 'no_chest', 'ledger_stale'],
+    failures: ['ledger_empty', 'contested_claim', 'inventory_full', 'unknown_chest', 'chest_unreachable', 'out_of_range', 'avoid_area', 'wrong_chest', 'no_chest', 'ledger_stale'],
     id: (args) => `fetch_items:${args.chest}:${args.item}:${args.count}`,
     parse(parts) {
         const count = whole(parts[2] ?? '');
         return parts.length === 3 && /^[A-Za-z0-9_-]{1,40}$/.test(parts[0]) && ITEM.test(parts[1]) && count >= 1 && count <= 64
             ? { chest: parts[0], item: parts[1], count } : null;
     },
+    // only what nobody else has reserved is put forward
     candidates(state, ctx) {
         const list = [];
         for (const chest of state.zones.chests()) {
-            for (const [item, count] of Object.entries(state.ledger.stock(chest.name))) {
-                list.push({ chest: chest.name, item, stock: count });
+            for (const item of Object.keys(state.ledger.stock(chest.name))) {
+                const stock = freeFor(state, chest.name, item);
+                if (stock > 0) list.push({ chest: chest.name, item, stock });
             }
         }
         return list.sort((a, b) => b.stock - a.stock || a.item.localeCompare(b.item))
             .map(({ chest, item, stock }) => ({ chest, item, count: Math.min(stock, ctx.config.fetch_count) }));
     },
     check(args, state, ctx) {
-        if (state.ledger.count(args.chest, args.item) <= 0) return 'ledger_empty';
+        const in_chest = state.ledger.count(args.chest, args.item);
+        if (in_chest <= 0) return 'ledger_empty';
+        if (freeFor(state, args.chest, args.item) <= 0) {
+            // the items are there, but another agent has reserved them all: a contested claim
+            const holders = new Map();
+            for (const held of state.ledger.reservations(state.now)) {
+                if (held.chest === args.chest && held.item === args.item && held.holder !== state.agent) holders.set(held.holder, (holders.get(held.holder) ?? 0) + held.count);
+            }
+            ctx.contested(contestedClaim({ chest: args.chest, item: args.item, count: args.count, asker: state.agent, in_chest, held_by: holders }));
+            return 'contested_claim';
+        }
         if (state.view.freeSlots() < 1) return 'inventory_full';
         return chestRefusal(state, args.chest, ctx);
     },
     title: (args) => clip(`Fetch ${args.count} ${args.item} from the ${args.chest} chest`),
-    describe: (args, state) => `Take up to ${args.count} ${args.item} from the ${args.chest} chest (the ledger says ${state.ledger.count(args.chest, args.item)})`,
+    describe: (args, state) => `Take up to ${args.count} ${args.item} from the ${args.chest} chest (the ledger says ${state.ledger.count(args.chest, args.item)}, ${freeFor(state, args.chest, args.item)} not reserved by others)`,
     steps: (args, state, ctx) => [walkTo(state.zones.chest(args.chest), ctx), { command: 'takeFromChest', args: [args.item, args.count] }],
     baseline: (args, state) => ({ had: held(state, args.item) }),
     before(step, args, state, ctx) {
+        // reserved when the agent sets out, and again right before it takes (a reservation lapses)
+        const refused = reserveGuard(args, state, ctx);
+        if (refused) return refused;
         if (step.command !== 'takeFromChest') return null;
         if (state.view.freeSlots() < 1) return { fail: 'inventory_full' };
         return chestGuard(state, args.chest, ctx);
     },
     after(step, result, args, state, ctx, baseline) {
         if (step.command !== 'takeFromChest') return null;
+        state.ledger.release(args.chest, args.item, state.agent); // taken or not, the claim is over
         if (result.ok) {
             state.ledger.remove(args.chest, args.item, Math.max(0, held(state, args.item) - baseline.had));
             return null;
@@ -364,6 +409,8 @@ const fetch_items = {
         }
         return null;
     },
+    // The goal ended, however it ended: what it had reserved is free again.
+    release(args, state) { state.ledger.release(args.chest, args.item, state.agent); },
     progress: (args, state, ctx, baseline) => ({ done: Math.max(0, held(state, args.item) - baseline.had), total: args.count }),
 };
 
@@ -424,6 +471,65 @@ const harvest_replant = {
             if (held(state, seed) <= 0) return { skip: 'no_seed' };
             return null;
         }
+        return null;
+    },
+    after: () => null,
+    progress(args, state, ctx, baseline, plan) {
+        const total = (plan?.steps ?? []).filter((step) => step.command === 'tillAndSow').length;
+        return { done: doneSteps(plan, 'tillAndSow'), total };
+    },
+};
+
+// ---- sow_field ---------------------------------------------------------------------------
+
+// The starter field is left bare (decided): tilled farmland with its water, and nothing on
+// it. The agents plant it. Sowing is the upstream skill harvest_replant sows back with
+// (tillAndSow, skills.js line 1589). Upstream sows only where the cell above the soil is
+// exactly air: with anything else standing on farmland it answers true and plants nothing
+// (skills.js lines 1625-1629), so "unsown" is read the same way here.
+const cropOfSeed = (ctx, seed) => Object.keys(ctx.crops).find((crop) => ctx.crops[crop].seed === seed) ?? null;
+const isBare = (state, soil) => state.view.blockAt({ x: soil.x, y: soil.y + 1, z: soil.z })?.name === 'air';
+
+// The farmland of the field that has nothing on it and that the agent may go to, nearest first.
+function bareFarmland(state) {
+    const field = state.zones.field();
+    const here = state.view.position();
+    return state.view.findBlocks(['farmland'], 64, 512)
+        .filter((soil) => boxContains(field, soil) && state.zones.inRange(state.agent, soil) && !avoided(state, soil) && isBare(state, soil))
+        .sort((a, b) => dist(here, a) - dist(here, b));
+}
+
+const sow_field = {
+    name: 'sow_field',
+    progress_unit: 'cells sown',
+    failures: ['unknown_seed', 'no_bare_farmland', 'no_seed', 'outside_field', 'cannot_till'],
+    id: (args) => `sow_field:${args.seed}`,
+    parse: (parts) => (parts.length === 1 && ITEM.test(parts[0]) ? { seed: parts[0] } : null),
+    // one candidate per kind of seed the agent holds, in the order of the crop table
+    candidates: (state, ctx) => Object.values(ctx.crops).map((crop) => crop.seed).filter((seed) => held(state, seed) > 0).map((seed) => ({ seed })),
+    check(args, state, ctx) {
+        if (!cropOfSeed(ctx, args.seed)) return 'unknown_seed';
+        if (bareFarmland(state).length === 0) return 'no_bare_farmland';
+        if (held(state, args.seed) <= 0) return 'no_seed';
+        return null;
+    },
+    title: (args) => clip(`Sow the field with ${args.seed}`),
+    describe(args, state, ctx) {
+        const bare = bareFarmland(state).length;
+        return `Sow ${Math.min(bare, held(state, args.seed), ctx.config.sow_batch)} of the ${bare} bare cells of the field with ${args.seed}`;
+    },
+    steps: (args, state, ctx) => bareFarmland(state)
+        .slice(0, Math.min(ctx.config.sow_batch, held(state, args.seed)))
+        .map((soil) => ({ command: 'tillAndSow', args: [soil.x, soil.y, soil.z, args.seed] })),
+    baseline: () => ({}),
+    before(step, args, state) {
+        const [x, y, z, seed] = step.args;
+        if (!boxContains(state.zones.field(), { x, y, z })) return { fail: 'outside_field' };
+        // only farmland that is still bare is sown: tilling, and breaking what stands on the soil
+        // (which tillAndSow does on its own, skills.js 1622-1632), are never this goal's
+        if (state.view.blockAt({ x, y, z })?.name !== 'farmland') return { skip: 'not_farmland' };
+        if (!isBare(state, { x, y, z })) return { skip: 'already_sown' };
+        if (held(state, seed) <= 0) return { skip: 'no_seed' };
         return null;
     },
     after: () => null,
@@ -610,6 +716,223 @@ const smelt_item = {
     progress: (args, state, ctx, baseline) => ({ done: Math.max(0, baseline.had - held(state, args.item)), total: args.count }),
 };
 
-export const TEMPLATES = Object.freeze([travel, gather_blocks, craft_item, store_items, fetch_items, harvest_replant, build_blueprint, smelt_item]);
+// ---- give_items (the hand-over of an agent-to-agent commitment; not one of the eight) -------
+
+// Items go from one agent to another in two ways (decided: both): handed over directly when
+// the two are near each other, and through the shared chest otherwise. The option only
+// exists while there is something to give for: a commitment this agent has accepted
+// (state.duties: a request it said yes to, or an offer of its own that was accepted). The list
+// holds { to, item, count }; the agent runtime fills it (genesis/relay/desk.js), and without
+// it nothing is ever offered. (Saying yes or no to a request is not done here: decided, the
+// model decides that with a call of its own, and a code rule when it cannot.)
+const sameGive = (args) => (entry) => entry.to === args.to && entry.item === args.item && entry.count === args.count;
+const nearEnough = (args, state, ctx) => {
+    const there = state.view.agentPosition?.(args.to) ?? null;
+    return there !== null && dist(state.view.position(), there) <= ctx.config.handoff_distance;
+};
+
+const give_items = {
+    name: 'give_items',
+    progress_unit: 'items handed over',
+    failures: ['no_commitment', 'not_held', 'unknown_chest', 'chest_unreachable', 'out_of_range', 'avoid_area', 'wrong_chest', 'no_chest', 'recipient_not_near', 'not_received'],
+    id: (args) => `give_items:${args.to}:${args.item}:${args.count}`,
+    parse(parts) {
+        const count = whole(parts[2] ?? '');
+        return parts.length === 3 && /^[A-Za-z0-9_]{3,16}$/.test(parts[0]) && ITEM.test(parts[1]) && count >= 1 && count <= 64
+            ? { to: parts[0], item: parts[1], count } : null;
+    },
+    candidates: (state) => (state.duties ?? []).map(({ to, item, count }) => ({ to, item, count })),
+    check(args, state, ctx) {
+        if (args.to === state.agent) return 'no_commitment';
+        if (!(state.duties ?? []).some(sameGive(args))) return 'no_commitment';
+        if (held(state, args.item) < args.count) return 'not_held';
+        if (nearEnough(args, state, ctx)) return null;
+        return chestRefusal(state, ctx.config.handoff_chest, ctx);
+    },
+    title: (args) => clip(`Give ${args.count} ${args.item} to ${args.to}`),
+    describe: (args, state, ctx) => `Give ${args.count} ${args.item} to ${args.to}, who asked for them (${nearEnough(args, state, ctx) ? 'handed over directly' : `through the ${ctx.config.handoff_chest} chest`})`,
+    steps(args, state, ctx) {
+        if (nearEnough(args, state, ctx)) return [{ command: 'giveToPlayer', args: [args.item, args.to, args.count] }];
+        return [walkTo(state.zones.chest(ctx.config.handoff_chest), ctx), { command: 'putInChest', args: [args.item, args.count] }];
+    },
+    baseline: (args, state) => ({ had: held(state, args.item) }),
+    before(step, args, state, ctx) {
+        if (held(state, args.item) <= 0) return { fail: 'not_held' };
+        if (step.command === 'putInChest') return chestGuard(state, ctx.config.handoff_chest, ctx);
+        return null;
+    },
+    after(step, result, args, state, ctx, baseline) {
+        const gone = Math.max(0, baseline.had - held(state, args.item));
+        if (step.command === 'putInChest') {
+            if (gone > 0) state.ledger.add(ctx.config.handoff_chest, args.item, gone);
+            if (gone >= args.count) state.handedOver?.(args, { via: 'chest', chest: ctx.config.handoff_chest });
+            return null;
+        }
+        if (step.command === 'giveToPlayer' && gone >= args.count) {
+            // the items left the inventory towards the other agent: upstream only waits 3 seconds to
+            // see them picked up (skills.js lines 1047-1067), which is not what decides here
+            state.handedOver?.(args, { via: 'direct' });
+            return { ok: true };
+        }
+        return null;
+    },
+    progress: (args, state, ctx, baseline) => ({ done: Math.min(args.count, Math.max(0, baseline.had - held(state, args.item))), total: args.count }),
+};
+
+// ---- ask_agent, offer_agent (messages the planner may choose to send; not skill templates) ----
+
+// Decided: the planner can start agent-to-agent messages. Two options it may choose as goals:
+//   ask_agent     request items from a named agent
+//   offer_agent   offer items the agent holds to a named agent
+// Each is ONE step, relayMessage, which hands a structured request or offer to the relay
+// through the agent's message desk (genesis/relay/desk.js). The relay applies every one of its
+// limits, as to any message; nothing here is free text, and the goal is done once the message
+// was relayed (the answer comes later and is the desk's business).
+//
+// Offered only when (state.talk is the desk's view; without a desk nothing is ever offered):
+//   - the other agent exists (the world file lists it) and is not the sender
+//   - the agent has an open conversation slot and message budget left
+//   - the same request or offer does not still wait for its answer, and the relay would not
+//     block it as a repeat
+//   - ask: the item is something the catalog knows (ctx.known)
+//   - offer: the items are held beyond the agent's own reserve (talk.spare)
+// What is asked for is filled in by code: what the agent's own work is short of right now
+// (materials the blueprint of its plot still wants, seeds for the bare field) and that no
+// registered chest has. What is offered: what the agent can spare, most first.
+const AGENT_NAME = /^[A-Za-z0-9_]{3,16}$/;
+const parseTalk = (parts) => {
+    const count = whole(parts[2] ?? '');
+    return parts.length === 3 && AGENT_NAME.test(parts[0]) && ITEM.test(parts[1]) && count >= 1 && count <= 64 ? { to: parts[0], item: parts[1], count } : null;
+};
+const MESSAGE_FAILURES = Object.freeze(['self_message', 'unknown_agent', 'no_messaging', 'no_conversation_slot', 'message_budget_spent', 'already_waiting', 'repeat_blocked',
+    'relay_rate_limit', 'relay_repeat_blocked', 'relay_too_many_conversations', 'relay_recipient_busy', 'relay_unknown_recipient', 'relay_timeout', 'relay_not_connected']);
+
+// The other agents, those in sight first (nearest first), then the rest in the order of the world file.
+function otherAgents(state) {
+    const here = state.view.position();
+    return state.zones.agents().filter((name) => name !== state.agent)
+        .map((name, index) => { const at = state.view.agentPosition?.(name) ?? null; return { name, index, far: at ? dist(here, at) : null }; })
+        .sort((a, b) => (a.far === null ? 1 : 0) - (b.far === null ? 1 : 0) || (a.far ?? 0) - (b.far ?? 0) || a.index - b.index)
+        .map((entry) => entry.name);
+}
+
+// Why this message may not be sent now, or null. `type` is request (ask_agent) or offer (offer_agent).
+function talkRefusal(type, args, state) {
+    if (args.to === state.agent) return 'self_message';
+    if (!state.zones.agents().includes(args.to)) return 'unknown_agent';
+    const talk = state.talk ?? null;
+    if (!talk) return 'no_messaging';
+    if (talk.open >= talk.max_open) return 'no_conversation_slot';
+    if (talk.sent >= talk.max_sent) return 'message_budget_spent';
+    if (talk.waiting(type, args.to, args.item)) return 'already_waiting';
+    if (talk.repeated(type, args.to, args.item, args.count)) return 'repeat_blocked';
+    return null;
+}
+
+// What the agent's own work is short of right now and no registered chest has, most wanted first: [{ item, count, why }].
+function shortOf(state, ctx) {
+    const needs = [];
+    const add = (item, count, why) => {
+        if (count <= 0 || needs.some((need) => need.item === item) || !ctx.known(item)) return;
+        if (state.zones.chests().some((chest) => freeFor(state, chest.name, item) > 0)) return; // it can be fetched: no need to ask
+        needs.push({ item, count: Math.min(count, ctx.config.ask_count), why });
+    };
+    // building: what the blueprint on the agent's plot still wants and the agent does not hold
+    for (const plot of state.zones.plots()) {
+        if (!plot.blueprint || (plot.owner !== null && plot.owner !== state.agent)) continue;
+        const survey = surveyPlot({ plot: plot.id }, state, ctx);
+        if (!survey || !survey.fits) continue;
+        const wanted = new Map();
+        for (const cell of survey.work) if (cell.want !== 'air') wanted.set(cell.want, (wanted.get(cell.want) ?? 0) + 1);
+        for (const [item, count] of [...wanted].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) add(item, count - held(state, item), `plot ${plot.id}`);
+    }
+    // sowing: seeds, when the field (the agent's, or nobody's in particular) has bare cells and the agent holds none
+    const field_owner = state.zones.fieldOwner?.() ?? null;
+    const seeds = Object.values(ctx.crops).map((crop) => crop.seed);
+    if ((field_owner === null || field_owner === state.agent) && heldAny(state, seeds) === 0) {
+        const bare = bareFarmland(state).length;
+        if (bare > 0) add(seeds[0], bare, 'the bare field');
+    }
+    return needs;
+}
+
+const relayStep = (type, args) => [{ command: 'relayMessage', args: [type, args.to, args.item, args.count] }];
+// A message the relay (or the desk) did not take: the goal fails with the relay's own reason, and is not tried again.
+function relayAfter(step, result) {
+    if (step.command !== 'relayMessage' || result.ok) return null;
+    const reason = /message_rejected: ([a-z_]+)/.exec(String(result.output ?? ''))?.[1] ?? 'no_answer';
+    return { fail: reason.startsWith('relay_') ? reason : `relay_${reason}` };
+}
+const relayProgress = (args, state, ctx, baseline, plan) => ({ done: doneSteps(plan, 'relayMessage'), total: 1 });
+
+const ask_agent = {
+    name: 'ask_agent',
+    progress_unit: 'messages sent',
+    failures: [...MESSAGE_FAILURES, 'unknown_item'],
+    id: (args) => `ask_agent:${args.to}:${args.item}:${args.count}`,
+    parse: parseTalk,
+    candidates(state, ctx) {
+        if (!state.talk) return [];
+        const others = otherAgents(state);
+        return shortOf(state, ctx).flatMap((need) => others.map((to) => ({ to, item: need.item, count: need.count })));
+    },
+    check(args, state, ctx) {
+        if (!ctx.known(args.item)) return 'unknown_item';
+        return talkRefusal('request', args, state);
+    },
+    title: (args) => clip(`Ask ${args.to} for ${args.count} ${args.item}`),
+    describe(args, state, ctx) {
+        const why = shortOf(state, ctx).find((need) => need.item === args.item)?.why ?? null;
+        return `Ask ${args.to} for ${args.count} ${args.item}${why ? ` (for ${why})` : ''}: ${args.to} may say no`;
+    },
+    steps: (args) => relayStep('request', args),
+    baseline: () => ({}),
+    before(step, args, state, ctx) {
+        const refusal = ask_agent.check(args, state, ctx);
+        return refusal ? { fail: refusal } : null;
+    },
+    after: relayAfter,
+    progress: relayProgress,
+};
+
+const offer_agent = {
+    name: 'offer_agent',
+    progress_unit: 'messages sent',
+    failures: [...MESSAGE_FAILURES, 'not_spare'],
+    id: (args) => `offer_agent:${args.to}:${args.item}:${args.count}`,
+    parse: parseTalk,
+    candidates(state, ctx) {
+        const talk = state.talk ?? null;
+        if (!talk) return [];
+        const others = otherAgents(state);
+        return Object.keys(state.view.inventory())
+            .map((item) => ({ item, spare: talk.spare(item) }))
+            .filter((entry) => entry.spare > 0)
+            .sort((a, b) => b.spare - a.spare || a.item.localeCompare(b.item))
+            .flatMap((entry) => others.map((to) => ({ to, item: entry.item, count: Math.min(entry.spare, ctx.config.offer_count) })));
+    },
+    check(args, state) {
+        const refusal = talkRefusal('offer', args, state);
+        if (refusal) return refusal;
+        // only what is held beyond the agent's own reserve is ever offered (its tools, and its food up to the reserve, stay)
+        return state.talk.spare(args.item) >= args.count ? null : 'not_spare';
+    },
+    title: (args) => clip(`Offer ${args.count} ${args.item} to ${args.to}`),
+    describe: (args, state) => `Offer ${args.count} of your ${held(state, args.item)} ${args.item} to ${args.to}: handed over if ${args.to} says yes`,
+    steps: (args) => relayStep('offer', args),
+    baseline: () => ({}),
+    before(step, args, state) {
+        const refusal = offer_agent.check(args, state);
+        return refusal ? { fail: refusal } : null;
+    },
+    after: relayAfter,
+    progress: relayProgress,
+};
+
+export const TEMPLATES = Object.freeze([travel, gather_blocks, craft_item, store_items, fetch_items, harvest_replant, sow_field, build_blueprint, smelt_item]);
+// The messages the planner may choose to send as goals (decided). Not skill templates: their one step is Genesis's own.
+export const MESSAGE_TEMPLATES = Object.freeze([ask_agent, offer_agent]);
+// Templates beside the nine skill templates. They are only ever offered for a commitment.
+export const HANDOFF_TEMPLATES = Object.freeze([give_items]);
 export const TEMPLATE_NAMES = Object.freeze(TEMPLATES.map((template) => template.name));
 export { COMMON_FAILURES };

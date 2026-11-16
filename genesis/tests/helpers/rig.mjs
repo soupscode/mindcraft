@@ -30,7 +30,7 @@ export function makeRig({
     rig.avoid = [];
     rig.emitter = createEmitter({ agent, send: (event) => rig.events.push(event), last_seq, now: clock.now, warn: () => {}, progress_interval_ms: 0 });
     rig.scaffold = createScaffoldTracker({ zones: rig.zones });
-    rig.ops = rig.world.ops(agent, { on_place: (pos, how) => { if (how !== 'skill') rig.scaffold.placed(pos); } });
+    rig.ops = rig.world.ops(agent, { on_place: (pos, how) => { if (how !== 'skill') rig.scaffold.placed(pos, { reflex_torch: how === 'reflex_torch' }); } });
     rig.state = () => ({ agent, view: rig.world.view(agent), ledger: rig.ledger, avoid: rig.avoid });
     rig.checkpoints = createCheckpointStore({ files, dir: '/checkpoints', clock });
     rig.goals = createGoalStore({
@@ -41,7 +41,6 @@ export function makeRig({
         agent, catalog: rig.catalog, goals: rig.goals, checkpoints: rig.checkpoints, ops: rig.ops, state: rig.state,
         emit: rig.emitter.emit, getSeq: () => rig.emitter.stats().seq, clock, scaffold: rig.scaffold, zones: rig.zones,
         onTrigger: (trigger) => rig.triggers.push(trigger), onGoalEnd: (end) => rig.ended.push(end),
-        extras: () => ({ places: { ledger: rig.ledger.snapshot() } }),
         ...executor_options,
     });
     // Puts a goal in the queue the way the operator (or a planner reply) would.

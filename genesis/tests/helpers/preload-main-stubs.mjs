@@ -25,6 +25,11 @@ register('./stub-hooks.mjs', {
                 export function setSocketExtension(extension) {
                     console.log('GENESIS_TEST_SOCKET_EXTENSION ' + JSON.stringify({ is_function: typeof extension === 'function' }));
                 }`,
+            // only loaded by the launcher when recovery is on (genesis/recovery/server.js)
+            'src/process/agent_process.js': `
+                export function setRestartSupervisor(supervisor) {
+                    console.log('GENESIS_TEST_RESTART_SUPERVISOR ' + JSON.stringify({ exited: typeof supervisor?.exited === 'function' }));
+                }`,
             // as if the package was not installed, also on a machine where it is
             'pg': "throw Object.assign(new Error(\"Cannot find package 'pg' (test stand-in)\"), { code: 'ERR_MODULE_NOT_FOUND' });",
             // as if the package was not installed, also on a machine where it is

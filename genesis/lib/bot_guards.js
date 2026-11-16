@@ -8,7 +8,9 @@
 //   2. Every block the bot places is reported, so scaffolding left inside a zone is known
 //      and can be taken away again (genesis/executor/scaffold.js). mineflayer-pathfinder
 //      places its scaffolding through bot.placeBlock(referenceBlock, faceVector)
-//      (index.js of 2.4.5), the same call the skills use.
+//      (index.js of 2.4.5), the same call the skills use. The report says what the bot held
+//      when it placed the block: onPlace(pos, { item }). That is how a torch of upstream's
+//      idle torch reflex is told from scaffolding (decided: such a torch may stay).
 //
 // installBotGuards(bot, { zones, onPlace }) wraps bot.dig and bot.placeBlock once.
 // Depends only on the bot it is given.
@@ -43,11 +45,14 @@ export function installBotGuards(bot, { zones, onPlace = () => {} } = {}) {
     };
 
     bot.placeBlock = async function trackedPlaceBlock(reference, face, ...rest) {
+        // read before the block is placed: the last item of a stack is gone from the hand afterwards
+        let item = null;
+        try { item = bot.heldItem?.name ?? null; } catch { /* unknown: reported without a name */ }
         const result = await placeBlock(reference, face, ...rest);
         try {
             const at = reference.position;
             stats.placed++;
-            onPlace({ x: at.x + (face?.x ?? 0), y: at.y + (face?.y ?? 0), z: at.z + (face?.z ?? 0) });
+            onPlace({ x: at.x + (face?.x ?? 0), y: at.y + (face?.y ?? 0), z: at.z + (face?.z ?? 0) }, { item });
         } catch { /* reporting must not turn a placed block into an error */ }
         return result;
     };

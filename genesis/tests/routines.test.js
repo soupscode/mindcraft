@@ -117,6 +117,44 @@ test('with the gate AWAY for 8 hours every agent keeps choosing work, never leav
     await t.stop();
 });
 
+test('Field round: Mira sows the bare starter field with seeds from the kit chest, then harvests what she planted', async () => {
+    const t = await awayTown({ agents: ['Mira'] });
+    // the field as the bootstrap leaves it (decided): tilled farmland with nothing on it, and seeds in the kit
+    for (const block of [...t.world.blocks.values()]) if (block.name === 'wheat') t.world.set(block.x, block.y, block.z, 'air');
+    t.world.get(-2, 64, 2).contents = { wheat_seeds: 80, bread: 16 };
+    const bare = () => [...t.world.blocks.values()].filter((block) => block.name === 'farmland' && t.world.get(block.x, block.y + 1, block.z) === null).length;
+    assert.equal(bare(), 49);
+    const mira = t.agents.Mira;
+    t.run();
+    await t.clock.advance(6 * MINUTE);
+
+    // nobody had looked into the kit chest: she looks, takes one stack of seeds, and sows a batch at a time
+    const made = decisions(mira);
+    const first_sow = made.indexOf('sow_field:wheat_seeds');
+    assert.deepEqual(made.slice(0, first_sow + 1), ['travel:chest-kits', 'fetch_items:kits:wheat_seeds:64', 'sow_field:wheat_seeds']);
+    assert.equal(made.filter((id) => id === 'sow_field:wheat_seeds').length, 4, '49 cells at 16 a goal');
+    assert.equal(bare(), 0, 'cells of the field were left bare');
+    assert.equal(t.world.body('Mira').inventory.wheat_seeds, 64 - 49);
+    assert.equal(t.world.get(-2, 64, 2).contents.wheat_seeds, 16);
+    const sowing = mira.changes().filter((change) => change.after.some((goal) => goal.option_id === 'sow_field:wheat_seeds') && change.after.length > change.before.length);
+    assert.ok(sowing.length === 4 && sowing.every((change) => change.source === 'routine' && change.reason === 'routine Field round, Harvest: the field has bare cells'));
+    // every cell was sown through upstream's tillAndSow, on farmland of the field, and nothing was placed or broken
+    const sown = t.world.calls.filter((call) => call.command === 'tillAndSow');
+    assert.equal(sown.length, 49);
+    assert.ok(sown.every((call) => call.args[3] === 'wheat_seeds' && t.zones.protectedAt({ x: call.args[0], y: call.args[1], z: call.args[2] }) === 'field'));
+    assert.deepEqual(t.world.placed, []);
+    assert.deepEqual(t.world.broken, []);
+    assert.ok(!made.includes('harvest_replant:field'), 'there was nothing to harvest yet');
+
+    // what she planted grows (7 ages), and from then on she harvests and replants as before
+    await t.clock.advance(20 * MINUTE);
+    assert.ok(decisions(mira).includes('harvest_replant:field'));
+    assert.ok(t.world.broken.length > 0 && t.world.broken.every((block) => block.name === 'wheat' && block.by === 'Mira'));
+    assert.equal(t.model.requests.length, 0);
+    for (const event of mira.events) assert.deepEqual(validateEvent(event).errors, []);
+    await t.stop();
+});
+
 test('a breached bound sends the agent straight to Shelter', async () => {
     const t = await awayTown({ agents: ['Arthur'] });
     const arthur = t.agents.Arthur;

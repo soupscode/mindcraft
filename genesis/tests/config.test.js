@@ -16,6 +16,7 @@ import { pathToFileURL } from 'node:url';
 import { REPO_ROOT, captureConsole } from './helpers/stubs.mjs';
 import { buildSettings, checkProfiles, checkSettings, checkWorld, REQUIRED_BLOCKED_ACTIONS, MINDSERVER_HOSTS } from '../lib/config.js';
 import { WORLD_CONFIG } from './helpers/fake-world.mjs';
+import { bootstrappedWorld } from './helpers/bootstrapped.mjs';
 
 const GENESIS = path.join(REPO_ROOT, 'genesis');
 const PRELOAD = pathToFileURL(path.join(GENESIS, 'tests', 'helpers', 'preload-main-stubs.mjs')).href;
@@ -263,7 +264,7 @@ test('launcher: events stay off by default, and the agents start whatever happen
 
 // 127.0.0.1:9 refuses connections at once: the broker's one probe at start-up fails without any network.
 const PLANNING_ON = {
-    enabled: true, world_file: './genesis/genesis.world.json', checkpoint_dir: './bots/genesis_checkpoints',
+    enabled: true, operators: ['TheOperator'], world_file: './genesis/genesis.world.json', checkpoint_dir: './bots/genesis_checkpoints',
     model: { url: 'http://127.0.0.1:9', model: 'some-model:latest' }, postgres_url: '',
 };
 
@@ -274,11 +275,12 @@ test('checkSettings: the decision loop is off in the repo, and checked only when
     assert.deepEqual(checkSettings({ genesis_planning: PLANNING_ON }), []);
     assert.deepEqual(checkSettings({ genesis_planning: { ...PLANNING_ON, postgres_url: 'postgres://genesis:secret@192.0.2.30:5432/genesis' } }), []);
 
-    // switching on what the repo ships must first ask for the model's address and name
+    // switching on what the repo ships must first ask for the model's address and name, and for the operator's name
     const shipped_on = checkSettings({ genesis_planning: { ...genesis_settings.genesis_planning, enabled: true } });
     assert.deepEqual(shipped_on.map((problem) => problem.replace(/ \(.*/, '')), [
         'settings: "genesis_planning.model.url" still holds a placeholder',
         'settings: "genesis_planning.model.model" still holds a placeholder',
+        'settings: "genesis_planning.operators" still holds a placeholder',
     ]);
 
     const bad = [
@@ -287,6 +289,10 @@ test('checkSettings: the decision loop is off in the repo, and checked only when
         { ...PLANNING_ON, model: { url: 'http://127.0.0.1:9' } }, { ...PLANNING_ON, model: { url: '127.0.0.1:11434', model: 'm' } },
         { ...PLANNING_ON, postgres_url: 'mysql://db/genesis' }, { ...PLANNING_ON, postgres_url: 'postgres://POSTGRES_HOST:5432/genesis' },
         { ...PLANNING_ON, postgres_url: 5432 },
+        // the operator's Minecraft username: required, and a real one
+        { ...PLANNING_ON, operators: undefined }, { ...PLANNING_ON, operators: [] }, { ...PLANNING_ON, operators: 'TheOperator' },
+        { ...PLANNING_ON, operators: ['OPERATOR_NAME'] }, { ...PLANNING_ON, operators: ['no spaces allowed'] }, { ...PLANNING_ON, operators: ['ab'] },
+        { ...PLANNING_ON, manifest_file: '' }, { ...PLANNING_ON, ledger_file: 7 },
     ];
     for (const genesis_planning of bad) {
         const problems = checkSettings({ genesis_planning });
@@ -322,7 +328,7 @@ test('checkWorld: with planning on, the world config must exist, be valid, and k
     ]);
 });
 
-test('launcher: planning stays off by default; switched on it needs the world config, then starts the broker and the agents', () => {
+test('launcher: planning stays off by default; switched on it needs the world config and its bootstrap, then starts the broker and the agents', async () => {
     const { settings_file, profiles } = filledInCopy();
     const sockets = (result) => result.stdout.split('\n').filter((line) => line.startsWith('GENESIS_TEST_SOCKET_EXTENSION '));
     const off = run('genesis/start.js', { GENESIS_SETTINGS_FILE: settings_file });
@@ -331,16 +337,20 @@ test('launcher: planning stays off by default; switched on it needs the world co
     for (const settings of off.agents) assert.equal(settings.genesis_planning.enabled, false);
 
     // on, but the world config does not exist yet: nothing starts
-    const world_file = path.join(path.dirname(profiles[0]), 'genesis.world.json');
-    const on = { genesis_planning: { ...PLANNING_ON, world_file } };
+    const dir = path.dirname(profiles[0]);
+    const world_file = path.join(dir, 'genesis.world.json');
+    const manifest_file = path.join(dir, 'genesis_world', 'bootstrap.manifest.json');
+    const on = { genesis_planning: { ...PLANNING_ON, world_file, manifest_file } };
     const no_world = run('genesis/start.js', { GENESIS_SETTINGS_FILE: settings_file, SETTINGS_JSON: JSON.stringify(on) });
     assert.equal(no_world.status, 1);
     assert.match(no_world.stderr, /genesis\.world\.json: the world config cannot be read as JSON \(the file does not exist\)/);
     assert.deepEqual(no_world.agents, []);
     assert.deepEqual(sockets(no_world), []);
 
-    // with it: the planner host is added to the MindServer before any agent is created, and every agent gets the setting
-    writeFileSync(world_file, JSON.stringify(WORLD_CONFIG));
+    // with the world file and its bootstrap manifest: the planner host is added to the MindServer
+    // before any agent is created, and every agent gets the setting
+    // (the refusals without a matching manifest are in world.test.js)
+    await bootstrappedWorld(dir);
     const started = run('genesis/start.js', { GENESIS_SETTINGS_FILE: settings_file, SETTINGS_JSON: JSON.stringify(on) });
     assert.equal(started.status, 0, started.stderr);
     assert.deepEqual(sockets(started), ['GENESIS_TEST_SOCKET_EXTENSION {"is_function":true}']);

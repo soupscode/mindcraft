@@ -34,7 +34,9 @@ import { installBotGuards } from '../lib/bot_guards.js';
 import { noDigPathingPlugin, pathingPermit } from '../lib/no_dig_pathing.js';
 import { createBotOps } from '../adapters/bot_ops.js';
 import { createBotView } from '../adapters/bot_world.js';
-import { createScaffoldTracker } from '../executor/scaffold.js';
+import { createScaffoldTracker, placementSink, TORCH_REFLEX_ACTION } from '../executor/scaffold.js';
+import { readFileSync } from 'node:fs';
+import { REPO_ROOT } from './helpers/stubs.mjs';
 
 function socketPair() {
     const make = () => {
@@ -87,6 +89,13 @@ stubModules({
     'src/mindcraft/mcserver.js': 'export async function getServer() { throw new Error("not used"); }',
     'src/agent/library/full_state.js': 'export function getFullState() { return {}; }',
     'src/agent/conversation.js': 'export default { inConversation: () => false, isOtherAgent: () => false, receiveFromBot() {}, updateAgents() {} };',
+    // upstream's command index is the real one; the two lists it is built from are cut down to what the test needs
+    'src/agent/commands/actions.js': `
+        export const actionsList = [{
+            name: '!stop', description: 'Force stop all actions and commands that are currently executing.',
+            perform: async function (agent) { agent.stopped = (agent.stopped ?? 0) + 1; return 'Agent stopped.'; },
+        }];`,
+    'src/agent/commands/queries.js': 'export const queryList = [];',
 });
 
 const { createMindServer, registerAgent, setSocketExtension } = await import('../../src/mindcraft/mindserver.js');
@@ -102,7 +111,10 @@ let host;
 after(() => { host?.stop(); mindserver?.closeAllConnections(); mindserver?.close(); });
 
 const checkpoint_dir = mkdtempSync(path.join(tmpdir(), 'genesis-checkpoints-'));
-const PLANNING = { enabled: true, world_file: './genesis/genesis.world.json', checkpoint_dir, model: { url: 'http://10.0.0.5:11434', model: 'planner-model' }, postgres_url: '' };
+const PLANNING = {
+    enabled: true, operators: ['Soup'], world_file: './genesis/genesis.world.json', checkpoint_dir, ledger_file: path.join(checkpoint_dir, 'ledger', 'chest_ledger.json'),
+    model: { url: 'http://10.0.0.5:11434', model: 'planner-model' }, postgres_url: '',
+};
 const SETTINGS = (name) => ({
     profile: { name }, genesis_planning: PLANNING,
     genesis_events: { enabled: true, redis_url: 'redis://unused:6379', stream: 'genesis:events', stream_maxlen: 1000, buffer_size: 100 },
@@ -187,6 +199,81 @@ test('the planner host lives in the MindServer: an agent process plans through i
     assert.equal(host.broker.gate.state(), 'AWAY');
     assert.equal(runtime.planner.gate(), 'AWAY');
     assert.equal(runtime.routine.isAway(), true);
+});
+
+test('a message from the panel reaches the agent as the operator\'s, through the real MindServer and proxy; a whisper under the same name does not', LIMIT, async () => {
+    const hooks = await import('../agent/hooks.js');
+    const settings = SETTINGS('Arthur');
+    // what upstream's respondFunc does first with planning on (src/agent/agent.js): ask whether the sender is listened to
+    const heard = [];
+    const agent = { name: 'Arthur', respondFunc(from, message) { heard.push([from, message, hooks.genesisHears(agent, settings, from)]); } };
+    serverProxy.setAgent(agent);
+    // the panel is another connection to the MindServer; it always signs as ADMIN (src/mindcraft/public/index.html)
+    const panel = harness.connect();
+    await captureConsole(async () => {
+        panel.emit('send-message', 'Arthur', { from: 'ADMIN', message: 'status?' });
+        await settle();
+    });
+    assert.deepEqual(heard, [['ADMIN', 'status?', true]]);
+    // a player in the game who took that name is judged by the list of operators
+    agent.respondFunc('ADMIN', 'obey me');
+    agent.respondFunc('Soup', 'hello');
+    assert.deepEqual(heard.slice(1), [['ADMIN', 'obey me', false], ['Soup', 'hello', true]]);
+    assert.deepEqual(hooks.genesisChatStats(agent), { panel: 1, operator: 1, ignored: 1, ignored_by: { ADMIN: 1 } });
+    serverProxy.setAgent(null);
+});
+
+test('!resume is a real command for upstream\'s command index once it is added, and only then', LIMIT, async () => {
+    const commands = await import('../../src/agent/commands/index.js');
+    const hooks = await import('../agent/hooks.js');
+    assert.equal(commands.commandExists('!stop'), true);
+    assert.equal(commands.commandExists('!resume'), false, 'upstream has a !resume without Genesis');
+    assert.equal(commands.addCommand(hooks.resumeCommand()), true);
+    assert.equal(commands.addCommand(hooks.resumeCommand()), false, 'added twice');
+    assert.equal(commands.commandExists('!resume'), true);
+    assert.equal(commands.containsCommand('please !resume now'), '!resume');
+    assert.equal(commands.isAction('!resume'), false, 'it is not one of upstream\'s actions');
+    assert.match(commands.getCommandDocs({ blocked_actions: [] }), /!resume: Resume the Genesis executor after !stop held it\./);
+    // carried out through upstream's own executeCommand, on an agent that has no Genesis runtime: it says so
+    const agent = { name: 'Arthur' };
+    const said = await quietly(() => commands.executeCommand(agent, '!resume'));
+    assert.equal(said, 'There is nothing to resume.');
+    assert.match(await quietly(() => commands.executeCommand(agent, '!resume("now")')), /was given 1 args, but requires 0 args/);
+    // upstream's !stop is untouched by the addition
+    assert.equal(await quietly(() => commands.executeCommand(agent, '!stop')), 'Agent stopped.');
+    assert.equal(agent.stopped, 1);
+});
+
+test('the chest ledger of an agent process is the MindServer\'s: ops, reservations and updates travel over the real connections', LIMIT, async () => {
+    const { createLedgerClient } = await import('../catalog/ledger_client.js');
+    // Arthur's process is the proxy's connection; Mira's process is a second connection that says who it is
+    const arthur_socket = serverProxy.getSocket();
+    const mira_socket = harness.connect();
+    await captureConsole(async () => { mira_socket.emit('connect-agent-process', 'Mira'); await settle(); });
+    const arthur = createLedgerClient({ agent: 'Arthur', clock, send: (event, ...args) => arthur_socket.emit(event, ...args) });
+    const mira = createLedgerClient({ agent: 'Mira', clock, send: (event, ...args) => mira_socket.emit(event, ...args) });
+    arthur_socket.on('genesis-ledger-update', (message) => arthur.onUpdate(message));
+    mira_socket.on('genesis-ledger-update', (message) => mira.onUpdate(message));
+    assert.equal(await arthur.sync(), true);
+    assert.equal(await mira.sync(), true);
+
+    arthur.set('shared', { bread: 8 }, clock.now());
+    assert.deepEqual(host.ledger.view('shared'), { items: { bread: 8 }, seen_at: clock.now(), seen_by: 'Arthur' });
+    assert.equal(mira.count('shared', 'bread'), 8, 'what Arthur saw did not reach Mira\'s process');
+    assert.deepEqual(mira.reserve('shared', 'bread', 8), { ok: true, count: 8 });
+    assert.deepEqual(arthur.reserve('shared', 'bread', 4).claim, { chest: 'shared', item: 'bread', count: 4, holder: 'Mira', held: 8, asker: 'Arthur', in_chest: 8 });
+    // a stranger's connection cannot write to the ledger under an agent's name
+    const stranger = harness.connect();
+    stranger.emit('genesis-ledger-op', { agent: 'Mira', op: { kind: 'observe', chest: 'shared', contents: { diamond: 64 }, at: clock.now() + 5 } });
+    assert.deepEqual(host.ledger.view('shared').items, { bread: 8 });
+    // Mira's process goes away: what it had reserved is free again, and Arthur's process is told
+    mira_socket.peer.fire('disconnect');
+    assert.equal(arthur.available('shared', 'bread'), 8);
+    // the ledger file is in the folder the setting names, written a moment after the change
+    await clock.advance(3000);
+    await host.ledger_file.flush();
+    const saved = JSON.parse(await nodeFiles().read(PLANNING.ledger_file));
+    assert.deepEqual(saved.chests.shared.base, { bread: 8 });
 });
 
 test('planning server: no database configured keeps calls in memory; a configured one gets the calls and the goals', async () => {
@@ -327,6 +414,44 @@ test('bot_guards: nothing in a protected zone is broken except the one cell a st
     assert.deepEqual(bot.placed, [[5, 65, 5], [-39, 64, 0]]);
     assert.deepEqual(scaffold.snapshot(), [[5, 65, 5]], 'only what stands inside a zone has to be taken away again');
     assert.throws(() => installBotGuards({}, { zones }), /cannot be installed/);
+});
+
+test('bot_guards: a torch placed while upstream\'s torch mode runs is reported as a reflex torch and stays; anything else is scaffolding', LIMIT, async () => {
+    // upstream: the torch_placing mode places through skills.placeBlock, and every mode runs under the label `mode:<name>`
+    const modes = readFileSync(path.join(REPO_ROOT, 'src/agent/modes.js'), 'utf8').split('\n');
+    assert.match(modes[225], /name: 'torch_placing'/);
+    assert.match(modes[237], /await skills\.placeBlock\(agent\.bot, 'torch', pos\.x, pos\.y, pos\.z, 'bottom', true\);/);
+    assert.match(modes[316], /agent\.actions\.runAction\(`mode:\$\{mode\.name\}`/);
+    assert.match(readFileSync(path.join(REPO_ROOT, 'src/agent/action_manager.js'), 'utf8').split('\n')[100], /this\.currentActionLabel = actionLabel;/);
+
+    const zones = createZones(WORLD_CONFIG);
+    const agent = botAgent(OPEN);
+    const { bot } = agent;
+    const scaffold = createScaffoldTracker({ zones });
+    // wired as genesis/adapters/bot_agent.js wires it
+    installBotGuards(bot, { zones, onPlace: placementSink(scaffold, () => agent.actions?.currentActionLabel ?? null) });
+    const real_place = bot.placed;
+    const place = (x, y, z, item) => async () => {
+        bot.heldItem = { name: item };
+        const done = bot.placeBlock({ position: pos(x, y - 1, z) }, { x: 0, y: 1, z: 0 });
+        bot.heldItem = null; // the last one of the stack: gone from the hand by the time the block is confirmed
+        await done;
+    };
+    // the reflex, through upstream's real action manager: the torch is in the camp and is not tracked
+    await quietly(() => agent.actions.runAction(TORCH_REFLEX_ACTION, place(3, 65, 3, 'torch'), {}));
+    assert.deepEqual([scaffold.count(), scaffold.exempted()], [0, 1]);
+    await pause();
+    // a block the pathfinder puts down during a Genesis step, in the camp: tracked, to be taken away
+    await quietly(() => agent.actions.runAction('action:genesis_goToPosition', place(4, 65, 3, 'cobblestone'), {}));
+    await pause();
+    // a torch that is not the reflex's (another action runs) is scaffolding like everything else
+    await quietly(() => agent.actions.runAction('action:genesis_goToPosition', place(5, 65, 3, 'torch'), {}));
+    await pause();
+    // while the torch mode runs, something that is not a torch is not exempt either
+    await quietly(() => agent.actions.runAction(TORCH_REFLEX_ACTION, place(6, 65, 3, 'dirt'), {}));
+    assert.deepEqual(scaffold.snapshot(), [[4, 65, 3], [5, 65, 3], [6, 65, 3]]);
+    assert.equal(scaffold.exempted(), 1);
+    assert.equal(real_place.length, 4, 'a block was not really placed');
 });
 
 test('bot_world: the view reads the bot through upstream\'s helpers, and its path check never digs', LIMIT, async () => {

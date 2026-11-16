@@ -3,6 +3,7 @@ import * as world from './library/world.js';
 import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
 import convoManager from './conversation.js';
+import { genesisStuck } from '../../genesis/agent/hooks.js';
 
 async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
@@ -119,7 +120,12 @@ const modes_list = [
                 this.prev_dig_block = null;
             }
             const max_stuck_time = cur_dig_block?.name === 'obsidian' ? this.max_stuck_time * 2 : this.max_stuck_time;
-            if (this.stuck_time > max_stuck_time) {
+            if (this.stuck_time > max_stuck_time && genesisStuck(agent, settings)) {
+                // Genesis (genesis_planning setting, off by default): a stuck agent goes up the watchdog's ladder
+                // (genesis/recovery/watchdog.js). Nothing is run here and the process is never killed from here.
+                this.stuck_time = 0;
+            }
+            else if (this.stuck_time > max_stuck_time) {
                 say(agent, 'I\'m stuck!');
                 this.stuck_time = 0;
                 execute(this, agent, async () => {

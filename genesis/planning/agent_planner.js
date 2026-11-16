@@ -14,13 +14,30 @@
 //   broker -> agent   genesis-gate          { state, reason }                            onGate
 //
 // Triggers: goal_complete, step_failed, reflex_interrupt, agent_request, operator_message,
-// and model_returned (the routine yields and the agent goes back to planning).
+// model_returned (the routine yields and the agent goes back to planning), and
+// request_declined / request_expired (what the agent asked of another agent came to nothing).
 // One request is pending per agent; a newer trigger replaces it (the broker keeps the place
 // in the line). Nothing here waits for the model: when no reply comes, the agent works on.
 //
+// Re-planning (decided): every goal that completes is a trigger, also while goals still wait
+// in the queue. The reply REPLACES the goals that are still waiting: each of them is taken
+// out with its own change record (a reason, source "planner", the call id), then the reply's
+// goals go in. The goal the agent has in hand is finished first: it is not one of the goals
+// "still queued" (a routine goal in hand is not kept: the routine gives way to the planner).
+// A request the budget refuses, a reply that is discarded, or a model that is away changes
+// nothing: the agent keeps the queue it has.
+// One kind of waiting goal is not the plan's to replace: what the agent has agreed with another
+// agent (a hand-over it accepted or offered, the fetch of items left for it: genesis/relay/desk.js).
+// `keeps(goal)` says so; such a goal stays in the queue, ahead of the reply's goals.
+//
+// While the operator holds the agent (!stop) no request is sent at all: `held()` says so.
+//
 // Injected: send(event, payload), clock, catalog, state() (the world now), goals (the goal
 // store), buildContext(input) (genesis/planning/context.js), describe() -> { role, long_term,
-// last_outcome, routine, home_distance, memory }, onGoals(queued goals, origin), onGate(state, before).
+// last_outcome, routine, home_distance, memory }, onGoals(queued goals, origin), onGate(state, before),
+// inHand() -> the id of the goal being carried out that a reply must not replace, or null,
+// keeps(goal) -> true for a waiting goal a reply must not replace (a commitment to another agent),
+// held() -> true while the operator holds the agent.
 // Depends only on other Genesis files.
 
 import { buildPlanContext } from './context.js';
@@ -33,17 +50,18 @@ export const PLANNER_CLIENT_DEFAULTS = Object.freeze({
 
 const GATE_AVAILABLE = 'AVAILABLE';
 // triggers that always replace the pending request (they carry something the planner must see)
-const URGENT = new Set(['operator_message', 'agent_request', 'step_failed', 'reflex_interrupt']);
+const URGENT = new Set(['operator_message', 'agent_request', 'step_failed', 'reflex_interrupt',
+    'request_declined', 'request_expired']); // the agent's own request to another agent came to nothing (genesis/relay/desk.js)
 
 export function createAgentPlanner({
     agent, send, clock, catalog, state, goals, describe = () => ({}), onGoals = () => {}, onGate = () => {},
-    buildContext = buildPlanContext, ...options
+    buildContext = buildPlanContext, inHand = () => null, held = () => false, keeps = () => false, ...options
 } = {}) {
     const config = { ...PLANNER_CLIENT_DEFAULTS };
     for (const key of Object.keys(PLANNER_CLIENT_DEFAULTS)) {
         if (options[key] !== undefined) config[key] = options[key];
     }
-    const stats = { triggers: 0, requests: 0, kept: 0, held_back: 0, replies: 0, goals_queued: 0, refused: 0, discarded: 0, replaced: 0, send_failed: 0 };
+    const stats = { triggers: 0, requests: 0, kept: 0, held_back: 0, replies: 0, goals_queued: 0, goals_dropped: 0, refused: 0, discarded: 0, replaced: 0, send_failed: 0, on_hold: 0 };
 
     let gate = 'AWAY';          // until the broker says otherwise
     let pending = null;         // { local_id, request_id, kind: 'plan', trigger, queued_at (ms), since (ms) }
@@ -52,6 +70,8 @@ export function createAgentPlanner({
     let last_thought = null;    // { text, at } the model's own sentence, from its last valid reply
     let last_failure = null;    // { reason, at } of the last request that brought no goals
     let counter = 0;
+    // a goal a reply leaves where it is: the goal in hand, and what the agent agreed with another agent
+    const stays = (goal) => { try { return goal.id === inHand() || keeps(goal) === true; } catch { return goal.id === inHand(); } };
 
     function submit(trigger) {
         const now = clock.now();
@@ -73,6 +93,11 @@ export function createAgentPlanner({
             const trigger = { kind, detail };
             stats.triggers++;
             last_trigger = { ...trigger, at: now };
+            if (held()) {
+                // the operator holds the agent: no planning request leaves it until it is resumed
+                stats.on_hold++;
+                return false;
+            }
             if (pending && !URGENT.has(kind)) {
                 // a request already waits and will be answered from the world as it is then
                 stats.kept++;
@@ -129,21 +154,45 @@ export function createAgentPlanner({
                 }
                 return { kind: 'no_goals', reason: last_failure.reason };
             }
+            const asked_because = mine ? pending.trigger?.kind ?? null : null;
             if (mine) pending = null;
             stats.replies++;
             last_failure = null;
             last_thought = { text: String(result.reply?.thought ?? ''), at: clock.now() };
             const wanted = (result.reply?.goals ?? []).slice(0, GOAL_LIMITS.short_term_max)
                 .map((goal) => ({ title: String(goal.title).slice(0, GOAL_LIMITS.title), option_id: goal.option_id }));
-            // the planner's 1 to 3 goals become the short-term queue
-            const change = await goals.setShortTerm(agent, wanted, {
-                reason: last_thought.text.trim() || 'the planner chose', source: 'planner', call_id: result.call_id,
-            });
-            if (!change.ok && change.code !== 'no_change') return { kind: 'not_stored', code: change.code, error: change.error };
+            const thought = last_thought.text.trim() || 'the planner chose';
+            const why = asked_because ?? last_trigger?.kind ?? 'a new plan';
+
+            // 1. the goals still waiting are replaced: each one goes with its own record
+            const before = await goals.get(agent);
+            if (!before.ok) return { kind: 'not_stored', code: before.code, error: before.error };
+            const dropped = [];
+            for (const goal of before.goals.short_term) {
+                if (stays(goal)) continue; // the goal in hand is finished first; a commitment to another agent is not the plan's to drop
+                // (asked again inside the change: the executor may have taken this goal in hand a moment ago)
+                const gone = await goals.setShortTerm(agent, (queue) => queue.filter((queued) => queued.id !== goal.id || stays(queued)), {
+                    reason: `replaced by a new plan (asked because: ${why}): ${thought}`, source: 'planner', call_id: result.call_id,
+                });
+                if (gone.ok) dropped.push(goal);
+                else if (gone.code !== 'no_change') return { kind: 'not_stored', code: gone.code, error: gone.error, dropped };
+            }
+            stats.goals_dropped += dropped.length;
+
+            // 2. the planner's 1 to 3 goals follow the goal in hand and the commitments (which the queue's size still counts)
+            const change = await goals.setShortTerm(agent, (queue) => {
+                const kept = queue.filter((goal) => stays(goal));
+                // a goal the reply names again while it is being carried out is not queued a second time
+                const fresh = wanted.filter((goal) => !kept.some((mine) => mine.option_id === goal.option_id)).slice(0, GOAL_LIMITS.short_term_max - kept.length);
+                return [...kept, ...fresh];
+            }, { reason: thought, source: 'planner', call_id: result.call_id });
+            if (!change.ok && change.code !== 'no_change') return { kind: 'not_stored', code: change.code, error: change.error, dropped };
             const queued = change.ok ? change.goals.short_term : (await goals.get(agent)).goals?.short_term ?? [];
-            stats.goals_queued += queued.length;
-            onGoals(queued, { source: 'planner', call_id: result.call_id });
-            return { kind: 'goals', goals: queued, call_id: result.call_id };
+            // only the goals this reply put in are the planner's with this call id; the goal in hand keeps its own origin
+            const added = change.ok ? queued.filter((goal) => !change.change.before.some((old) => old.id === goal.id)) : [];
+            stats.goals_queued += added.length;
+            onGoals(added, { source: 'planner', call_id: result.call_id }, { dropped, kept: queued.length - added.length });
+            return { kind: 'goals', goals: queued, added, dropped, call_id: result.call_id };
         },
         // The model gate changed. Returns { opened, closed }.
         onGate(message) {

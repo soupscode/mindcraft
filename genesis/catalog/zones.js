@@ -20,6 +20,9 @@
 //   - "agents": one entry per agent. "home" is where the agent shelters, "range" is how far
 //     (in blocks, measured flat, ignoring height) the agent may be from home. An optional
 //     "patrol": [[x, y, z], ...] lists waypoints for a patrol; without it a ring is used.
+//   - "v": 2 is the same file with more in it (the seed, the home point, the world border, the
+//     game rules, the camp's blocks, the kit: genesis/world/world_config.js describes and
+//     checks those). The zones read the same keys from both versions and ignore the rest.
 //
 // Zones interface (what the catalog, the executor and the routines use; the tests use a
 // hand-made one through createZones):
@@ -28,6 +31,8 @@
 //   protectedAt(pos) -> 'camp' | 'field' | 'plot:<id>' | null
 //   isProtected(pos) -> boolean
 //   field() -> box                         camp() -> box
+//   fieldOwner() -> the agent the field is for ("field.owner" of the file), or null (nobody in particular)
+//   agents() -> [names]                    every agent the file lists
 //   plots() -> [plot]                      plot(id) -> plot | null
 //   plotOverlaps(id) -> [names of the zones and plots the plot overlaps]
 //   chests() -> [{ name, pos }]            chest(name) -> {x,y,z} | null
@@ -35,7 +40,8 @@
 //
 // Depends only on Node built-ins (the loader reads the file through an injected `read`).
 
-export const ZONES_VERSION = 1;
+export const ZONES_VERSION = 1;            // the minimal shape above
+export const ZONES_VERSIONS = Object.freeze([1, 2]); // 2: the full world file (genesis/world/world_config.js)
 export const ZONES_FILE = 'genesis.world.json';
 const NAME = /^[A-Za-z0-9_-]{1,40}$/;
 
@@ -59,7 +65,7 @@ function checkBox(box, where, problems, { need_height = false } = {}) {
 export function checkZonesConfig(config) {
     if (!isPlainObject(config)) return ['the world config must be a JSON object'];
     const problems = [];
-    if (config.v !== ZONES_VERSION) problems.push(`"v" must be ${ZONES_VERSION}`);
+    if (!ZONES_VERSIONS.includes(config.v)) problems.push(`"v" must be ${ZONES_VERSIONS.join(' or ')}`);
     if (config.dimension !== undefined && (typeof config.dimension !== 'string' || config.dimension.length === 0)) {
         problems.push('"dimension" must be a dimension name');
     }
@@ -199,6 +205,7 @@ export function createZones(config) {
         isProtected: (pos) => protectedAt(pos) !== null,
         camp: () => camp,
         field: () => field,
+        fieldOwner: () => (typeof config.field.owner === 'string' && config.field.owner.length > 0 ? config.field.owner : null),
         plots: () => plots.map((plot) => ({ ...plot })),
         plot: (id) => plots.find((plot) => plot.id === id) ?? null,
         // The zones and other plots a plot shares at least one cell with.

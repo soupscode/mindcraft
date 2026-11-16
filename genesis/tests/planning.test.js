@@ -85,6 +85,8 @@ test('context: the prompt stays within about 1,200 tokens and keeps 240 of them 
     assert.match(small.context, /Long-term goals: 1\) Feed the camp\./);
     assert.match(small.context, /Carrying: /);
     assert.equal(describeTrigger({ kind: 'step_failed', detail: { reason: 'no_safe_path' } }), 'a goal failed (no_safe_path).');
+    assert.equal(describeTrigger({ kind: 'reflex_interrupt', detail: { option_id: 'travel:home' } }), 'a reflex interrupted what you were doing.');
+    assert.equal(describeTrigger({ kind: 'reflex_interrupt', detail: { cause: 'death', gave_up: 'gather_blocks:oak_log:8' } }), 'you died, and the goal you were on was given up (gather_blocks:oak_log:8).');
     assert.deepEqual(planOptions([{ id: 'a:b', description: 'x'.repeat(200), title: 't', skill: 's' }]), [{ id: 'a:b', description: `${'x'.repeat(79)}…` }]);
     await t.stop();
 });
@@ -133,7 +135,9 @@ test('a trigger becomes one planning call, and the reply\'s goals go into the qu
 
     // while the next call waits for its 90 seconds the agent does not stand still: after a short
     // grace it works from its routine (here it stores its logs)
-    // one to three goals: all of them are queued, in the model's order, and carried out with no further call
+    // one to three goals: all of them are queued, in the model's order, and carried out
+    // (they are done before the 90-second gap lets the next call out; what a later reply does
+    // to goals that still wait is in the re-planning tests below)
     t.model.replies.push(reply('travel:plot-plot-1', 'travel:field', 'harvest_replant:field'));
     t.run();
     await t.clock.advance(150 * SECOND);
@@ -178,25 +182,34 @@ test('the context is rebuilt when the request is dispatched, not when it was que
     await t.stop();
 });
 
-test('the 21st call in an hour is refused and recorded, and the agent carries on with its routine', async () => {
+test('the 41st call in an hour is refused and recorded, and the agent carries on with its routine', async () => {
     const t = await town({ agents: ['Arthur'], inventories: { Arthur: { wooden_axe: 1, wooden_pickaxe: 1, bread: 4 } } });
     const arthur = t.agents.Arthur;
     t.world.durations = (command, args, far) => 500 + far * 200;
     t.world.regrow_ms = 4 * MINUTE;
-    // the model always picks a walk: done in seconds, so the agent asks again as soon as it may
+    // the model always picks a walk: done in seconds, so the agent asks again as soon as it may.
+    // 90 seconds between calls allow no more than 40 in an hour, so the limit is only reached with
+    // repair retries: after the first two calls the first reply to every request is invalid, and its
+    // one retry counts (2 calls, then 19 requests of 2 calls each: 40)
     const walk = (request, ids) => reply(ids.find((id) => id.startsWith('travel:')) ?? ids[0]);
-    t.model.chat = ((chat) => (request) => { t.model.replies.push(walk); return chat(request); })(t.model.chat);
+    t.model.chat = ((chat) => (request) => {
+        const n = t.model.requests.length; // calls made before this one
+        t.model.replies.push(n >= 2 && n < 40 && n % 2 === 0 ? 'not a plan' : walk);
+        return chat(request);
+    })(t.model.chat);
     t.run();
     await t.clock.advance(45 * MINUTE);
 
-    assert.equal(t.model.requests.length, 20, 'the model was asked more than 20 times in the hour');
+    assert.equal(BUDGET_DEFAULTS.max_calls, 40);
+    assert.equal(t.model.requests.length, 40, 'the model was asked more than 40 times in the hour');
     const outcomes = t.calls.map((call) => call.outcome);
-    assert.deepEqual(outcomes.slice(0, 20), Array(20).fill('ok'));
-    assert.deepEqual(outcomes.slice(20), ['refused_budget'], 'the 21st call is refused once, and recorded');
-    const refused = t.calls[20];
+    assert.deepEqual(outcomes.slice(0, 40), Array.from({ length: 40 }, (_, i) => (i >= 2 && i % 2 === 0 ? 'invalid' : 'ok')));
+    assert.equal(t.calls.slice(0, 40).filter((call) => call.attempt === 2).length, 19, 'the repair retries were not counted as calls');
+    assert.deepEqual(outcomes.slice(40), ['refused_budget'], 'the 41st call is refused once, and recorded');
+    const refused = t.calls[40];
     assert.equal(refused.agent, 'Arthur');
     assert.equal(refused.raw_output, null);
-    assert.match(refused.errors[0], /hourly budget used up \(20 calls per hour\)/);
+    assert.match(refused.errors[0], /hourly budget used up \(40 calls per hour\)/);
     assert.equal(arthur.results.at(-1).reason, 'budget_exhausted');
     assert.equal(arthur.runtime.planner.stats().refused, 1);
 
@@ -209,11 +222,11 @@ test('the 21st call in an hour is refused and recorded, and the agent carries on
     await t.clock.advance(10 * MINUTE);
     assert.equal(arthur.runtime.planner.stats().requests, asked, 'the agent kept asking while its budget was used up');
     assert.ok(arthur.runtime.planner.stats().held_back > 0);
-    assert.equal(t.model.requests.length, 20);
+    assert.equal(t.model.requests.length, 40);
 
     // when the oldest call is an hour old, it may ask again
     await t.clock.advance(20 * MINUTE);
-    assert.ok(t.model.requests.length > 20, 'the agent never asked again after its budget came back');
+    assert.ok(t.model.requests.length > 40, 'the agent never asked again after its budget came back');
     assert.equal(t.calls.filter((call) => call.outcome === 'refused_budget').length, arthur.runtime.planner.stats().refused, 'a refusal was not recorded');
     assertEventsValid(arthur);
     await t.stop();
@@ -352,8 +365,17 @@ test('triggers: a step that failed after its retries, a reflex, another agent an
 
     arthur.runtime.agentRequest('Mira', 'can you bring me a hoe?');
     assert.deepEqual(requests(), ['step_failed', 'agent_request']);
+    // decided: a death with no goal of the planner or the operator to resume (here the agent is idle) sends no planning request
     await arthur.runtime.died({ x: 20, y: 64, z: 20 });
+    assert.deepEqual(requests(), ['step_failed', 'agent_request']);
+    assert.equal(arthur.runtime.stats().deaths_without_request, 1);
+    // a reflex that interrupts a goal still asks, once per goal
+    t.world.fail = (call) => (call.command === 'goToPosition' ? { interrupted: true } : null);
+    const again = await arthur.runtime.goals.pushShortTerm('Arthur', { title: 'Store the logs', option_id: 'store_items:shared:oak_log' }, { reason: 'the operator asked', source: 'operator' });
+    arthur.runtime.executor.noteGoals(again.goals.short_term, { source: 'operator' });
+    for (let i = 0; i < 3; i++) await arthur.runtime.executor.runOnce();
     assert.deepEqual(requests(), ['step_failed', 'agent_request', 'reflex_interrupt']);
+    t.world.fail = null;
     arthur.runtime.operatorMessage('Soup', 'are you all right?');
     assert.deepEqual(requests(), ['step_failed', 'agent_request', 'reflex_interrupt', 'operator_message']);
     await settle();
@@ -362,27 +384,171 @@ test('triggers: a step that failed after its retries, a reflex, another agent an
     await t.stop();
 });
 
-test('a reply that arrives while a goal is in hand replaces the queue after the step that is running', async () => {
+test('re-planning: the goal in hand is finished first; the goals still waiting are replaced, each with its own record', async () => {
     const t = await town({ agents: ['Arthur'], inventories: { Arthur: { oak_log: 5, wooden_axe: 1 } } });
     const arthur = t.agents.Arthur;
     await Promise.all(arthur.pending_results);
     t.world.durations = () => 20 * SECOND; // the gather takes minutes: the reply comes in the middle of it
     t.model.delay_ms = 4 * SECOND;
     t.model.replies.push(() => reply('store_items:shared:oak_log'));
-    // the first goal (the model's default choice) is being carried out when the operator speaks
-    await arthur.runtime.goals.setShortTerm('Arthur', [{ title: 'Gather wood', option_id: 'gather_blocks:oak_log:8' }], { reason: 'seeded', source: 'operator' });
+    // a gather is being carried out, and two more goals wait behind it, when the operator speaks
+    const seeded = await arthur.runtime.goals.setShortTerm('Arthur', [
+        { title: 'Gather wood', option_id: 'gather_blocks:oak_log:8' },
+        { title: 'Walk to the field', option_id: 'travel:field' },
+        { title: 'Walk to the plot', option_id: 'travel:plot-plot-1' },
+    ], { reason: 'seeded', source: 'operator' });
+    const [in_hand, waiting_1, waiting_2] = seeded.goals.short_term;
     t.run();
     await t.clock.advance(12 * SECOND);
     assert.equal(arthur.runtime.executor.plan().goal.option_id, 'gather_blocks:oak_log:8');
     arthur.runtime.operatorMessage('Soup', 'store the logs now');
-    await t.clock.advance(170 * SECOND);
+    await t.clock.advance(100 * SECOND);
+
+    // the reply came while the gather ran. The gather was neither cut short nor given up...
+    const call_id = t.calls.at(-1).call_id;
     const states = arthur.eventsOf('agent.state').map((event) => event.data.state);
-    assert.ok(states.includes('goal_abandoned'));
-    const steps = arthur.eventsOf('skill.result');
-    assert.ok(steps.every((event) => event.data.interrupted === false), 'the step that was running was cut short');
+    assert.ok(!states.includes('goal_abandoned'), 'the goal in hand was given up for the new plan');
+    assert.ok(arthur.eventsOf('skill.result').every((event) => event.data.interrupted === false), 'the step that was running was cut short');
+    assert.equal(arthur.runtime.executor.plan().goal.id, in_hand.id, 'the goal in hand is no longer being carried out');
+    // ...the two goals that were still waiting are gone, each with its own record: a reason, source planner, the call id
+    const drops = arthur.changes().filter((change) => change.source === 'planner' && change.after.length === change.before.length - 1);
+    assert.deepEqual(drops.map((change) => change.before.find((g) => !change.after.some((kept) => kept.id === g.id)).id), [waiting_1.id, waiting_2.id]);
+    for (const drop of drops) {
+        assert.equal(drop.call_id, call_id);
+        assert.equal(drop.reason, 'replaced by a new plan (asked because: operator_message): Wood first, then the rest.');
+    }
+    assert.deepEqual(t.storage.stats().saved >= 4, true);
+    const dropped_events = arthur.eventsOf('agent.state').filter((event) => event.data.state === 'goal_dropped');
+    assert.deepEqual(dropped_events.map((event) => [event.data.detail.goal_id, event.data.detail.reason, event.data.detail.source, event.data.detail.call_id]), [
+        [waiting_1.id, 'replaced_by_new_plan', 'planner', call_id], [waiting_2.id, 'replaced_by_new_plan', 'planner', call_id],
+    ]);
+    // ...and the planner's goal follows the goal in hand
+    const added = arthur.changes().find((change) => change.source === 'planner' && change.after.some((g) => g.option_id === 'store_items:shared:oak_log'));
+    assert.deepEqual(added.before.map((g) => g.id), [in_hand.id]);
+    assert.deepEqual(added.after.map((g) => g.option_id), ['gather_blocks:oak_log:8', 'store_items:shared:oak_log']);
+    assert.equal(added.reason, 'Wood first, then the rest.');
+    assert.deepEqual((await arthur.queue()).map((g) => g.option_id), ['gather_blocks:oak_log:8', 'store_items:shared:oak_log']);
+
+    // the gather is finished, then the planner's goal is carried out; the dropped walks never happen
+    t.model.replies.push(() => reply('store_items:shared:oak_log'), () => reply('store_items:shared:oak_log'));
+    await t.clock.advance(6 * MINUTE);
+    const decided = arthur.eventsOf('agent.decision').map((event) => event.data.args[0]);
+    assert.ok(decided.indexOf('store_items:shared:oak_log') > decided.indexOf('gather_blocks:oak_log:8'));
+    const started = arthur.eventsOf('agent.decision').map((event) => event.data.goal_id);
+    assert.ok(!started.includes(waiting_1.id) && !started.includes(waiting_2.id), 'a goal that was replaced was carried out');
+    assert.ok(arthur.eventsOf('agent.state').some((event) => event.data.state === 'goal_completed' && event.data.detail.goal_id === in_hand.id));
     assert.equal(t.world.body('Arthur').inventory.oak_log, undefined, 'the planner\'s goal was not carried out');
-    const replaced = arthur.changes().find((change) => change.source === 'planner' && change.after[0]?.option_id === 'store_items:shared:oak_log');
-    assert.deepEqual(replaced.before.map((g) => g.option_id), ['gather_blocks:oak_log:8'], 'the reply did not replace the goal in hand');
+    assertEventsValid(arthur);
+    await t.stop();
+});
+
+test('re-planning: finishing ANY goal asks the planner, and the reply replaces what is still queued', async () => {
+    const t = await town({ agents: ['Arthur'], inventories: { Arthur: { oak_log: 6, wooden_axe: 1, bread: 4 } } });
+    const arthur = t.agents.Arthur;
+    await Promise.all(arthur.pending_results); // the first call, at start-up
+    t.world.durations = () => 50 * SECOND;     // every step takes most of a minute
+    t.model.delay_ms = 5 * SECOND;             // and the model a few seconds: the next goal has begun before a reply comes
+    // three goals; when the first is done the planner is asked although two still wait
+    t.model.replies.push(reply('travel:plot-plot-1', 'travel:chest-shared', 'store_items:shared:oak_log'));
+    arthur.runtime.operatorMessage('Soup', 'take a walk');
+    t.run();
+    await t.clock.advance(100 * SECOND);
+    assert.deepEqual(t.calls.map((call) => [call.trigger.kind, call.outcome]), [['model_returned', 'ok'], ['operator_message', 'ok']]);
+    const [walk_1, walk_2, walk_3] = arthur.changes().find((change) => change.call_id === t.calls[1].call_id && change.after.length === 3).after;
+    const requests = () => arthur.socket.sent.filter(([event]) => event === 'genesis-plan-request').map(([, message]) => message.trigger);
+    const before = requests().length;
+
+    // the first walk ends (the routine's step that was running at the reply had to end first): a trigger,
+    // with two goals still in the queue
+    t.model.replies.push(reply('craft_item:oak_planks:4'));
+    await t.clock.advance(75 * SECOND);
+    const asked = requests().slice(before);
+    assert.deepEqual(asked.map((trigger) => [trigger.kind, trigger.detail.outcome, trigger.detail.option_id]), [['goal_complete', 'completed', walk_1.option_id]]);
+    assert.deepEqual((await arthur.queue()).map((g) => g.id), [walk_2.id, walk_3.id], 'two goals should still be queued when the planner is asked');
+
+    // the reply to that trigger (90 seconds after the last call) replaced the walk that still waited; the walk in hand was finished
+    await t.clock.advance(4 * MINUTE);
+    assert.equal(t.calls[2].trigger.kind, 'goal_complete');
+    const started = arthur.eventsOf('agent.decision').map((event) => event.data.goal_id);
+    assert.ok(started.includes(walk_2.id), 'the goal that was in hand when the reply came was not carried out');
+    assert.ok(arthur.eventsOf('agent.state').some((event) => event.data.state === 'goal_completed' && event.data.detail.goal_id === walk_2.id));
+    assert.ok(!started.includes(walk_3.id), 'the goal the reply replaced was carried out all the same');
+    assert.equal(walk_3.option_id, 'store_items:shared:oak_log');
+    assert.ok(arthur.eventsOf('agent.decision').some((event) => event.data.args[0] === 'craft_item:oak_planks:4' && event.data.call_id === t.calls[2].call_id));
+    assert.ok(t.world.body('Arthur').inventory.oak_planks > 0, 'the goal of the new plan was not carried out');
+    const dropped = arthur.eventsOf('agent.state').filter((event) => event.data.state === 'goal_dropped' && event.data.detail.reason === 'replaced_by_new_plan');
+    assert.deepEqual(dropped.filter((event) => event.data.detail.call_id === t.calls[2].call_id).map((event) => [event.data.detail.goal_id, event.data.detail.source]), [[walk_3.id, 'planner']]);
+    // (the reply before it found the routine at work: the routine's goal gave way the same way, with a record)
+    assert.ok(dropped.every((event) => event.data.detail.source === 'planner' && typeof event.data.detail.call_id === 'string'));
+    const record = arthur.changes().find((change) => change.source === 'planner' && change.call_id === t.calls[2].call_id && change.before.some((g) => g.id === walk_3.id) && !change.after.some((g) => g.id === walk_3.id));
+    assert.match(record.reason, /^replaced by a new plan \(asked because: goal_complete\): /);
+    assert.deepEqual(record.after.map((g) => g.id), [walk_2.id], 'the record of the dropped goal shows more than that goal leaving');
+    assertEventsValid(arthur);
+    await t.stop();
+});
+
+test('re-planning: a request the budget refuses, or a model that is away, leaves the remaining queue alone', async () => {
+    // refused by the budget
+    const t = await town({ agents: ['Arthur'], inventories: { Arthur: { oak_log: 6, bread: 4 } }, host: { broker: { budget: { max_calls: 1 } } } });
+    const arthur = t.agents.Arthur;
+    await Promise.all(arthur.pending_results); // the one call of the hour
+    t.world.durations = () => 30 * SECOND;
+    const seeded = await arthur.runtime.goals.setShortTerm('Arthur', [
+        { title: 'Walk to the plot', option_id: 'travel:plot-plot-1' }, { title: 'Walk to the field', option_id: 'travel:field' }, { title: 'Walk home', option_id: 'travel:home' },
+    ], { reason: 'seeded', source: 'operator' });
+    t.run();
+    await t.clock.advance(4 * MINUTE);
+    assert.equal(t.model.requests.length, 1, 'the budget let a second call through');
+    assert.ok(t.calls.some((call) => call.outcome === 'refused_budget'), 'no request was refused: the test proves nothing');
+    assert.ok(arthur.results.some((result) => result.ok === false && result.reason === 'budget_exhausted'));
+    // every goal of the queue was carried out, in order, and nothing was dropped
+    const decided = arthur.eventsOf('agent.decision').filter((event) => event.data.trigger !== 'routine').map((event) => event.data.goal_id);
+    assert.deepEqual(decided, seeded.goals.short_term.map((g) => g.id));
+    assert.ok(!arthur.eventsOf('agent.state').some((event) => ['goal_dropped', 'goal_abandoned'].includes(event.data.state)));
+    assert.ok(!arthur.changes().some((change) => change.source === 'planner' && /replaced by a new plan/.test(change.reason)));
+    await t.stop();
+
+    // the model is away: the request waits at the broker, and the queue is worked through
+    const away = await town({ agents: ['Mira'], inventories: { Mira: { wooden_hoe: 1, bread: 4 } } }, { available: false });
+    const mira = away.agents.Mira;
+    away.world.durations = () => 20 * SECOND;
+    const queue = await mira.runtime.goals.setShortTerm('Mira', [
+        { title: 'Walk to the field', option_id: 'travel:field' }, { title: 'Walk home', option_id: 'travel:home' },
+    ], { reason: 'seeded', source: 'operator' });
+    away.run();
+    await away.clock.advance(3 * MINUTE);
+    assert.equal(away.model.requests.length, 0);
+    assert.equal(away.broker.pending().length, 1, 'the finished goal did not leave a request waiting for the model');
+    assert.deepEqual(mira.eventsOf('agent.decision').filter((event) => event.data.trigger !== 'routine').map((event) => event.data.goal_id), queue.goals.short_term.map((g) => g.id));
+    assert.ok(!mira.changes().some((change) => change.source === 'planner'));
+    await away.stop();
+});
+
+test('while a planning request waits, an idle agent starts routine work after a grace of 20 seconds, not before', async () => {
+    assert.equal(PLANNER_CLIENT_DEFAULTS.grace_ms, 20 * SECOND);
+    const t = makeTown({ clock: fakeClock(), agents: ['Arthur'], inventories: { Arthur: { oak_log: 6, bread: 4 } } });
+    t.model.delay_ms = 80 * SECOND; // the model takes its time over the first request
+    await t.start({ available: true });
+    await settle();
+    const arthur = t.agents.Arthur;
+    assert.equal(arthur.runtime.planner.hasPending(), true, 'no request is waiting: the test proves nothing');
+    const began = t.clock.now();
+    t.run();
+    await t.clock.advance(19 * SECOND);
+    assert.deepEqual(arthur.eventsOf('agent.decision'), [], 'routine work started before the 20 seconds were over');
+    assert.deepEqual(await arthur.queue(), []);
+    await t.clock.advance(6 * SECOND);
+    const first = arthur.eventsOf('agent.decision')[0];
+    assert.ok(first, 'no routine work after the grace');
+    assert.equal(first.data.trigger, 'routine');
+    const waited = Date.parse(first.ts) - began;
+    assert.ok(waited >= 20 * SECOND && waited <= 25 * SECOND, `routine work began after ${waited} ms`);
+    assert.equal(arthur.runtime.planner.hasPending(), true, 'the request is still waiting while the routine works');
+    assert.equal(arthur.changes().find((change) => change.after.length === 1).source, 'routine');
+    // the reply comes: the routine gives way and the planner's goal is carried out
+    await t.clock.advance(3 * MINUTE);
+    assert.ok(arthur.eventsOf('agent.decision').some((event) => event.data.trigger === 'planner'));
+    assertEventsValid(arthur);
     await t.stop();
 });
 
