@@ -388,7 +388,7 @@ test('packages: genesis/package.json lists the clients the adapters import, and 
     for (const lock of [path.join(REPO_ROOT, 'package-lock.json'), path.join(GENESIS, 'package-lock.json')]) {
         assert.ok(readFileSync(lock, 'utf8').length > 0, `${lock} is not committed`);
     }
-    assert.equal(readJson(path.join(REPO_ROOT, 'package-lock.json')).packages['node_modules/mineflayer'].version, '4.33.0');
+    assert.equal(readJson(path.join(REPO_ROOT, 'package-lock.json')).packages['node_modules/mineflayer'].version, readJson(path.join(REPO_ROOT, 'package.json')).dependencies.mineflayer);
     assert.match(readFileSync(path.join(REPO_ROOT, '.dockerignore'), 'utf8'), /^genesis\/node_modules$/m);
 });
 

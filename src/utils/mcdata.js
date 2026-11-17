@@ -8,6 +8,7 @@ import { plugin as collectblock } from 'mineflayer-collectblock';
 import { plugin as autoEat } from 'mineflayer-auto-eat';
 import plugin from 'mineflayer-armor-manager';
 import { noDigPathingPlugin } from '../../genesis/lib/no_dig_pathing.js';
+import { movementGuardPlugin } from '../../genesis/lib/movement_guard.js';
 const armorManager = plugin;
 let mc_version = settings.minecraft_version;
 let mcdata = null;
@@ -115,6 +116,7 @@ export function initBot(username) {
         return originalEmit(event, ...args);
     };
 
+    if (settings.genesis_planning?.enabled === true || settings.movement_guard === true) bot.loadPlugin(movementGuardPlugin); // off by default: no movement packet with a NaN leaves the bot
     bot.loadPlugin(pathfinder);
     if (settings.pathfinding_no_dig) bot.loadPlugin(noDigPathingPlugin); // off by default: bots never dig to get somewhere
     bot.loadPlugin(pvp);

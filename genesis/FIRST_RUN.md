@@ -331,7 +331,7 @@ No Redis, Postgres, dashboard or alerter: agents, Minecraft server and Ollama on
    cd genesis; npm install; cd ..
    node genesis/tools/preflight.js --quiet
    ```
-   Check: `patch-package` printed a tick for `mineflayer@4.33.0`, and the last line is
+   Check: `patch-package` printed a tick for `mineflayer@4.39.0`, and the last line is
    `Genesis pre-flight: <n> passed, 0 failed.` Send: the output of all four commands.
 3. Download **Paper 1.21.6** yourself (papermc.io) into `C:\genesis\server`. Start it once
    (`java -Xms4G -Xmx4G -jar <the paper jar> --nogui`), read and accept the EULA in `eula.txt`
@@ -405,8 +405,8 @@ The runbook was written before the code. What exists differs here:
 | C2: `OLLAMA_HOST` `0.0.0.0:11434` | Bind the desktop's LAN address (`DESKTOP_IP:11434`). Also pull the embedding model (`embeddinggemma`); without it agents fall back to word overlap. |
 | C5: launcher sends `desktop_available` / `desktop_leaving` | Not built. Without it the broker finds the model by probing every 15 seconds, and treats two failed probes as away. |
 | D4: channel open; off-site heartbeat | ntfy (decided). No heartbeat in Genesis (decided). |
-| E1 log: "bot image to use Node 20 LTS" | The images use Node 22 (decided 16 Nov): mineflayer 4.33.0 and minecraft-protocol declare Node 22 or newer, and the pre-flight ran on 22. Installs use `npm ci` with committed lockfiles. |
-| Not in the runbook | `mineflayer` is pinned to 4.33.0 in `package.json` (its patch does not apply to newer versions). The agents image removes the `libstdc++` bundled with the prebuilt `canvas`. `node genesis/tools/preflight.js` checks an install. |
+| E1 log: "bot image to use Node 20 LTS" | The images use Node 22 (decided 16 Nov): mineflayer and minecraft-protocol declare Node 22 or newer, and the pre-flight ran on 22. Installs use `npm ci` with committed lockfiles. |
+| Not in the runbook | `mineflayer` is pinned to 4.39.0 in `package.json`, the release that belongs with the installed game data (an older one misread packets on 1.21.6 and got agents kicked). The agents image removes the `libstdc++` bundled with the prebuilt `canvas`. `node genesis/tools/preflight.js` checks an install. |
 
 ---
 

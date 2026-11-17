@@ -216,6 +216,26 @@ async function checkBot() {
         const guards = installBotGuards(bot, { zones: { protectedAt: () => null } });
         record('bot', 'installBotGuards wraps bot.dig and bot.placeBlock', bot.dig.name === 'guardedDig' && bot.placeBlock.name === 'trackedPlaceBlock' && typeof guards.allowBreak === 'function');
 
+        // Found on the first real run: a bot library older than the game data read the velocity packet
+        // under names that packet no longer has, the bot's own velocity became NaN at the first knock-back,
+        // and the server ended the connection ("Invalid move player packet received").
+        const velocity_packet = JSON.stringify(bot.registry?.protocol?.play?.toClient?.types?.packet_entity_velocity ?? null);
+        const entities_source = readFileSync(require.resolve('mineflayer/lib/plugins/entities.js'), 'utf8');
+        const sends = /"name":"velocity"/.test(velocity_packet) ? 'velocity' : /"name":"velocityX"/.test(velocity_packet) ? 'velocityX' : null;
+        const reads_it = sends === 'velocity' ? /packet\.velocity\.x/.test(entities_source) : sends === 'velocityX' ? /packet\.velocityX/.test(entities_source) : false;
+        record('bot', `mineflayer reads the velocity packet as Minecraft ${version} sends it`, reads_it,
+            reads_it ? '' : `the game data names the field ${JSON.stringify(sends)}; lib/plugins/entities.js does not read that: mineflayer and minecraft-data do not belong together`);
+
+        const { installMovementGuard } = await fromRoot('genesis/lib/movement_guard.js');
+        const movement = installMovementGuard(bot, { warn: () => {} });
+        const sent = [];
+        const real_write = bot._client.write;
+        // (the guard wrapped write already; what it lets through would land here)
+        await bot.look(NaN, 0).catch(() => {});
+        bot._client.write('look', { yaw: NaN, pitch: 0, flags: { onGround: true } });
+        record('bot', 'the movement guard takes no look and sends no packet that is not a finite number',
+            bot.look.name === 'guardedLook' && bot.lookAt.name === 'guardedLookAt' && movement.stats.looks_refused === 1 && movement.stats.packets_dropped === 1 && typeof real_write === 'function' && sent.length === 0);
+
         const { createBotView } = await fromRoot('genesis/adapters/bot_world.js');
         const world = await fromRoot('src/agent/library/world.js');
         const mc = await fromRoot('src/utils/mcdata.js');
