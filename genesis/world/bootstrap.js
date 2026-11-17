@@ -96,8 +96,28 @@ function splitTop(text) {
     return parts.map((part) => part.trim());
 }
 
+// One element of a container's Items list, as the server prints it:
+//   {Slot: 0b, id: "minecraft:stone_axe", count: 1}
+// Gives { slot, item, count }, or null when it is not understood (also when it was cut off).
+export function parseItemCompound(text) {
+    const compound = String(text ?? '').trim();
+    if (!compound.startsWith('{') || !compound.endsWith('}')) return null;
+    const fields = {};
+    for (const pair of splitTop(compound.slice(1, -1))) {
+        const colon = pair.indexOf(':');
+        if (colon > 0) fields[pair.slice(0, colon).trim().replace(/^"|"$/g, '')] = pair.slice(colon + 1).trim();
+    }
+    const slot = /^(-?\d+)[bB]?$/.exec(fields.Slot ?? '')?.[1];
+    const item = /^"?([a-z0-9_.:-]+)"?$/.exec(fields.id ?? '')?.[1];
+    const count = /^(\d+)[bB]?$/.exec(fields.count ?? fields.Count ?? '1')?.[1];
+    if (slot === undefined || item === undefined || count === undefined) return null;
+    return { slot: Number(slot), item: item.includes(':') ? item : `minecraft:${item}`, count: Number(count) };
+}
+
 // Reads the answer of "data get block <pos> Items": Map(slot -> { item, count }), or null
 // when the answer is not understood. A container with nothing in it gives an empty map.
+// A real server cuts a long list off with "..." (seen on Paper 1.21.6 with eight stacks): that
+// gives null here, and readContainer() below then asks for the stacks one at a time.
 export function parseItems(answer) {
     const text = String(answer ?? '');
     if (/no elements matching/i.test(text)) return new Map();
@@ -106,19 +126,52 @@ export function parseItems(answer) {
     if (open < 0 || close < open) return null;
     const slots = new Map();
     for (const compound of splitTop(text.slice(open + 1, close))) {
-        if (!compound.startsWith('{') || !compound.endsWith('}')) return null;
-        const fields = {};
-        for (const pair of splitTop(compound.slice(1, -1))) {
-            const colon = pair.indexOf(':');
-            if (colon > 0) fields[pair.slice(0, colon).trim().replace(/^"|"$/g, '')] = pair.slice(colon + 1).trim();
-        }
-        const slot = /^(-?\d+)[bB]?$/.exec(fields.Slot ?? '')?.[1];
-        const item = /^"?([a-z0-9_.:-]+)"?$/.exec(fields.id ?? '')?.[1];
-        const count = /^(\d+)[bB]?$/.exec(fields.count ?? fields.Count ?? '1')?.[1];
-        if (slot === undefined || item === undefined || count === undefined) return null;
-        slots.set(Number(slot), { item: item.includes(':') ? item : `minecraft:${item}`, count: Number(count) });
+        const stack = parseItemCompound(compound);
+        if (!stack) return null;
+        slots.set(stack.slot, { item: stack.item, count: stack.count });
     }
     return slots;
+}
+
+// The most stacks a container is asked for one by one (a double chest holds 54).
+export const CONTAINER_SLOTS = 54;
+const BLOCK_DATA = /has the following block data:\s*([\s\S]*)$/;
+const NO_ELEMENT = /no elements matching/i;
+const NOT_LOADED = /not loaded/i;
+
+// What a container holds: { slots: Map(slot -> { item, count }) or null, answer, not_loaded }.
+// First the whole list in one command. When that answer is not understood (the server cuts a
+// long list off), the stacks are read one at a time: "data get block <pos> Items[0]", [1], ...
+// until the server says there is no such element. A single stack that is itself cut off is read
+// field by field (Items[n].Slot, .id, .count). slots is null only when an answer is not understood;
+// `answer` is then that answer.
+export async function readContainer(send, pos, { max = CONTAINER_SLOTS } = {}) {
+    const where = pos.join(' ');
+    const whole = await send(`data get block ${where} Items`, false);
+    if (NOT_LOADED.test(String(whole))) return { slots: null, answer: whole, not_loaded: true };
+    const parsed = parseItems(whole);
+    if (parsed) return { slots: parsed, answer: whole, not_loaded: false };
+    if (!BLOCK_DATA.test(String(whole))) return { slots: null, answer: whole, not_loaded: false };
+
+    const value = (answer) => BLOCK_DATA.exec(String(answer))?.[1]?.trim() ?? null;
+    const slots = new Map();
+    for (let index = 0; index < max; index++) {
+        const answer = await send(`data get block ${where} Items[${index}]`, false);
+        if (NO_ELEMENT.test(String(answer))) break;
+        if (NOT_LOADED.test(String(answer))) return { slots: null, answer, not_loaded: true };
+        let stack = parseItemCompound(value(answer));
+        if (!stack && value(answer) !== null) {
+            // the stack itself was cut off: its three fields, one command each
+            const slot_answer = await send(`data get block ${where} Items[${index}].Slot`, false);
+            const id_answer = await send(`data get block ${where} Items[${index}].id`, false);
+            const count_answer = await send(`data get block ${where} Items[${index}].count`, false);
+            const count = NO_ELEMENT.test(String(count_answer)) ? '1' : value(count_answer);
+            stack = parseItemCompound(`{Slot: ${value(slot_answer)}, id: ${value(id_answer)}, count: ${count}}`);
+        }
+        if (!stack) return { slots: null, answer, not_loaded: false };
+        slots.set(stack.slot, { item: stack.item, count: stack.count });
+    }
+    return { slots, answer: whole, not_loaded: false };
 }
 
 // Runs the bootstrap. Never throws: resolves to
@@ -287,7 +340,7 @@ export async function runBootstrap({
             const same = (old) => old.item === item.item && old.count === item.count && old.slot === item.slot && old.pos.join(',') === item.pos.join(',');
             const before = carried('items', item.id, same);
             if (before) { records.items.push(before); continue; }
-            in_chest ??= parseItems(await send(`data get block ${xyz(item.pos)} Items`, false)) ?? new Map();
+            in_chest ??= (await readContainer(send, item.pos)).slots ?? new Map();
             const held = in_chest.get(item.slot);
             const record = { id: item.id, chest: item.chest, pos: item.pos, slot: item.slot, item: item.item, count: item.count, by: OPERATOR, placed: true, at: now(), run };
             if (held && held.item === item.item && held.count === item.count) {
@@ -329,12 +382,14 @@ export async function runBootstrap({
         }
         if (new_items.length > 0) {
             const pos = new_items[0].pos;
-            const answer = await send(`data get block ${xyz(pos)} Items`, false);
-            const slots = parseItems(answer);
+            const { slots, answer, not_loaded } = await readContainer(send, pos);
             for (const item of new_items) {
                 const held = slots?.get(item.slot);
                 if (!held || held.item !== item.item || held.count !== item.count) {
-                    stop('check', `item check failed at ${pos.join(', ')}: slot ${item.slot} of the kits chest should hold ${item.count} ${item.item}, ${slots ? `it holds ${held ? `${held.count} ${held.item}` : 'nothing'}` : `the server says ${JSON.stringify(answer)}`}`,
+                    const found = slots ? `it holds ${held ? `${held.count} ${held.item}` : 'nothing'}`
+                        : not_loaded ? `the area is not loaded on the server (${JSON.stringify(answer)}): a player must be nearby, or the chunks force-loaded, while the bootstrap runs`
+                            : `the server's answer was not understood: ${JSON.stringify(answer)}`;
+                    stop('check', `item check failed at ${pos.join(', ')}: slot ${item.slot} of the kits chest should hold ${item.count} ${item.item}, ${found}`,
                         { id: item.id, pos, expected: `${item.count} ${item.item} in slot ${item.slot}`, answer });
                     return true;
                 }

@@ -10,6 +10,8 @@
 //   server.refuse        (command) -> true: the command is answered but changes nothing
 //   server.break_after   Map("x,y,z" -> { name, states }): what a block turns into right after it is set
 //   server.fill_limit    how many blocks one fill command may cover (the game's default)
+//   server.data_reply_limit  how many characters of block data a "data get" answer shows before "..."
+//   server.unloaded      (command) -> true: a "data get" is answered "That position is not loaded"
 //
 // fill <x1> <y1> <z1> <x2> <y2> <z2> <block> is answered as the game is documented to: with the
 // number of blocks that CHANGED ("Successfully filled 37 block(s)"), with "No blocks were filled"
@@ -42,6 +44,8 @@ export function fakeMinecraft({ seed = '0', difficulty = 'normal', gamerules = {
         refuse: () => false,
         break_after: new Map(),
         fill_limit: 32768,
+        data_reply_limit: 70,
+        unloaded: () => false,
         down: false,
         blockAt(x, y, z) { return server.blocks.get(key(x, y, z)) ?? { name: 'air', states: {} }; },
         changing: () => server.log.filter((command) => /^(setblock|fill|item replace|gamerule \S+ \S+|difficulty \S+|worldborder (set|center)|setworldspawn)/.test(command)),
@@ -122,13 +126,27 @@ export function fakeMinecraft({ seed = '0', difficulty = 'normal', gamerules = {
                 return `Replaced a slot at ${x}, ${y}, ${z} with [${words[8]}]`;
             }
             case 'data': {
-                // data get block <x> <y> <z> Items
+                // data get block <x> <y> <z> Items | Items[<n>] | Items[<n>].Slot | .id | .count
+                // As a real server (Paper 1.21.6) answers: a stack prints as {Slot: 0b, id: "...", count: 1},
+                // and a long answer is cut off with "..." (server.data_reply_limit characters of data;
+                // the real rule is not known, only that eight stacks did not fit).
                 const [x, y, z] = numbers(3, 3);
+                const path = words[6] ?? '';
+                if (server.unloaded(command)) return 'That position is not loaded';
                 const slots = server.containers.get(key(x, y, z));
                 if (!slots) return 'The target block is not a block entity';
-                if (slots.size === 0) return `Found no elements matching Items`;
-                const list = [...slots].sort((a, b) => a[0] - b[0]).map(([slot, stack]) => `{Slot: ${slot}b, count: ${stack.count}, id: "${stack.item}"}`);
-                return `${x}, ${y}, ${z} has the following block data: [${list.join(', ')}]`;
+                const stacks = [...slots].sort((a, b) => a[0] - b[0]);
+                const print = ([slot, stack]) => `{Slot: ${slot}b, id: "${stack.item}", count: ${stack.count}}`;
+                const reply = (data) => `${x}, ${y}, ${z} has the following block data: ${data.length > server.data_reply_limit ? `${data.slice(0, server.data_reply_limit - 3)}...` : data}`;
+                const element = /^Items\[(\d+)\](?:\.(Slot|id|count))?$/.exec(path);
+                if (path === 'Items') return stacks.length === 0 ? 'Found no elements matching Items' : reply(`[${stacks.map(print).join(', ')}]`);
+                if (!element) return 'Unknown or incomplete command';
+                const entry = stacks[Number(element[1])];
+                if (!entry) return `Found no elements matching ${path}`;
+                if (element[2] === 'Slot') return reply(`${entry[0]}b`);
+                if (element[2] === 'id') return reply(`"${entry[1].item}"`);
+                if (element[2] === 'count') return reply(`${entry[1].count}`);
+                return reply(print(entry));
             }
             default: return `Unknown or incomplete command, see below for error\n${command}<--[HERE]`;
             }
