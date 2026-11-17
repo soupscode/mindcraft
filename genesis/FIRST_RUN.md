@@ -1,320 +1,170 @@
 # Genesis: first run
 
-Two paths. **Part 1** is the one to use: the Genesis VM with everything in Docker and the model
-on the Windows desktop. **Part 2** is the fallback on one Windows machine, if Part 1 blocks.
+**Part 1** is the one to use: the Genesis VM, everything in Docker, ONE command. **Part 2** is the
+fallback on one Windows machine. The **Appendix** is the same start by hand, step by step, for
+troubleshooting.
 
 Words in CAPS are yours to replace: `GENESIS_IP` (the VM), `DESKTOP_IP` (the desktop),
-`YOUR_MINECRAFT_NAME`, `SEED` (any whole number). The first two are in the Build runbook's
-Values table: confirm them there first. No secret goes into the repository.
-
-Every step has a **Check**. If a check fails, stop and send what the step's **Send** line names.
-
-What was and was not tested before this guide was written is at the end ("Known unverified").
-Use a THROWAWAY world: the bootstrap's commands have never met a real server.
+`YOUR_MINECRAFT_NAME`, `SEED` (any whole number). No secret goes into the repository.
+What was and was not tested is at the end ("Known unverified"). Use a THROWAWAY world.
 
 ---
 
-## Part 1. Genesis VM, everything in Docker
+## Part 1. Fill in the env file, run `genesis/up.sh`
 
-### 1. VM and Docker (Build runbook)
-
-Do the Build runbook's **Phase A** (A1 to A6) and, from **Phase B**, only **B1** (install
-Docker) and **B2** (cap container logs). Do NOT do B3 and B4 as written: steps 2 to 4 below
-replace them (see "Where the runbook is out of date").
-
-**Check:** on the VM, `docker run --rm hello-world` prints its success message and
-`docker compose version` prints a version.
-
-### 2. Clone
+Needs: the VM of the Build runbook's Phase A, Docker with the compose plugin (B1, B2), git.
 
 ```
-sudo mkdir -p /opt/genesis/data/minecraft
-sudo chown -R "$USER": /opt/genesis
+sudo mkdir -p /opt/genesis && sudo chown -R "$USER": /opt/genesis
 git clone --branch main https://github.com/soupscode/mindcraft.git /opt/genesis/repo
 cd /opt/genesis/repo
-ls genesis/compose.minecraft.yaml genesis/tools/preflight.js
+genesis/up.sh --init          # writes /opt/genesis/.env (mode 600): generated secrets, empty values for you
+nano /opt/genesis/.env
+genesis/up.sh
 ```
 
-**Check:** the last command lists both files. If it does not, `main` does not hold the
-`genesis/first-run` work yet: stop.
-
-### 3. Secrets file
-
-```
-cd /opt/genesis
-umask 077
-cat > .env <<EOF
-GENESIS_MINECRAFT_EULA=
-GENESIS_MINECRAFT_SEED=SEED
-GENESIS_MINECRAFT_BIND=GENESIS_IP
-GENESIS_MINECRAFT_DATA=/opt/genesis/data/minecraft
-GENESIS_RCON_PASSWORD=$(openssl rand -hex 24)
-GENESIS_POSTGRES_PASSWORD=$(openssl rand -hex 24)
-GENESIS_NTFY_TOPIC=genesis-$(openssl rand -hex 12)
-EOF
-chmod 600 .env
-nano .env
-```
-
-In the editor: replace `SEED` and `GENESIS_IP`. Read the Minecraft EULA
-(https://aka.ms/MinecraftEULA); if you accept it, write `GENESIS_MINECRAFT_EULA=TRUE`.
-Nothing accepts it for you, and the server does not start without it.
-
-Then, in every new shell on the VM:
-
-```
-cd /opt/genesis/repo
-dc() { docker compose --env-file /opt/genesis/.env "$@"; }
-```
-
-**Check:** `stat -c %a /opt/genesis/.env` prints `600`.
-
-### 4. Network and Minecraft server
-
-```
-docker network create genesis
-dc -f genesis/compose.minecraft.yaml up -d
-dc -f genesis/compose.minecraft.yaml logs -f minecraft
-```
-
-Wait for a line with `Done (` and press Ctrl+C. Then the one setting the image cannot set,
-the whitelist, and yourself as operator:
-
-```
-sudo sed -i 's/allow-end: true/allow-end: false/' /opt/genesis/data/minecraft/bukkit.yml
-dc -f genesis/compose.minecraft.yaml restart minecraft
-mc() { dc -f genesis/compose.minecraft.yaml exec minecraft rcon-cli "$@"; }
-for n in Arthur Mira Felix Nova YOUR_MINECRAFT_NAME; do mc whitelist add $n; done
-mc op YOUR_MINECRAFT_NAME
-```
-
-(Wait for `Done (` again after the restart before the `mc` lines.)
-
-**Check:**
-- `mc seed` prints `Seed: [SEED]`
-- `mc whitelist list` names all five
-- `grep allow-end /opt/genesis/data/minecraft/bukkit.yml` prints `allow-end: false`
-- `grep -E "^(online-mode|white-list|spawn-protection|allow-nether|server-port|difficulty)=" /opt/genesis/data/minecraft/server.properties`
-  prints `false`, `true`, `0`, `false`, `25600`, `easy`
-
-**Send:** `dc -f genesis/compose.minecraft.yaml logs --no-color --tail 200 minecraft`
-
-Now do the runbook's **B5** (firewall: port 25600 from `DESKTOP_IP` only).
-
-### 5. Pick the spot
-
-On the desktop, start Minecraft **1.21.6**, multiplayer, server `GENESIS_IP:25600`, as
-`YOUR_MINECRAFT_NAME`. Type `/gamemode creative`, fly, and find **flat open land of about
-80 by 60 blocks** (plains; no water, no cliff). Land in the middle, stand on the ground,
-press **F3** and read the line `Block: X Y Z`. Write the three numbers down.
-
-The bootstrap levels only the camp (25 by 25 around you). The field and the four plots are
-used as the land lies.
-
-**Check:** you have X, Y, Z, and `mc list` shows your name.
-
-### 6. Agents image, pre-flight, world file
-
-```
-dc -f genesis/compose.agents.yaml build
-dc -f genesis/compose.agents.yaml run --rm agents node genesis/tools/preflight.js --quiet
-```
-
-**Check:** the last line is `Genesis pre-flight: <n> passed, 0 failed.`
-**Send:** the whole output of both commands.
-
-```
-dc -f genesis/compose.agents.yaml run --rm agents node genesis/tools/place_world.js --at X Y Z --seed SEED --out ./bots/genesis.world.json
-sudo mv bots/genesis.world.json genesis/genesis.world.json
-sed -i 's|^      # - ./genesis.world.json:|      - ./genesis.world.json:|' genesis/compose.agents.yaml
-dc -f genesis/compose.agents.yaml run --rm agents node genesis/world/bootstrap.js --validate
-```
-
-**Check:** the last command prints `./genesis/genesis.world.json is valid (seed SEED, sha256 ...)`.
-**Send:** the output, and `genesis/genesis.world.json`.
-
-### 7. Bootstrap the world
-
-```
-( set -a; . /opt/genesis/.env; set +a
-  docker compose -f genesis/compose.agents.yaml run --rm -e GENESIS_RCON_PASSWORD -e GENESIS_RCON_HOST=minecraft agents node genesis/world/bootstrap.js )
-```
-
-**Check:** the output starts with `Bootstrap PASSED` and ends with `The agents may start`.
-In the game the camp stands where you stood: chests, four beds, crafting table, furnace, and a
-9 by 9 tilled field with water to the east.
-
-**Send:** the whole output and `bots/genesis_world/bootstrap.manifest.json`. A failed run names
-its stage and a position. Do not repair the world by hand: delete the world (step "Start over")
-and run again.
-
-### 8. Settings and profiles
-
-```
-sed -i 's/DESKTOP_IP/<the desktop address>/g; s/GENESIS_MODEL/qwen3.8:27b/g' genesis/settings.json genesis/profiles/*.json
-nano genesis/settings.json
-```
-
-In `genesis/settings.json` change exactly these:
+In the env file, fill in:
 
 | Key | Value |
 |---|---|
-| `host` | `"minecraft"` (the port stays `25600`) |
-| `genesis_events.enabled` | `true` |
-| `genesis_events.redis_url` | `"redis://redis:6379"` |
-| `genesis_planning.enabled` | `true` |
-| `genesis_planning.operators` | `["YOUR_MINECRAFT_NAME"]` |
+| `GENESIS_MINECRAFT_EULA` | Read the Minecraft EULA (https://aka.ms/MinecraftEULA); if you accept it, write exactly `TRUE` (capital letters). No script writes or defaults this. |
+| `GENESIS_MINECRAFT_SEED` | `SEED` |
+| `GENESIS_MINECRAFT_BIND` | `GENESIS_IP` |
+| `GENESIS_OPERATORS` | `YOUR_MINECRAFT_NAME` (several: comma-separated) |
+| `GENESIS_MODEL` | `off` for the first start (routines only); later `genesis/up.sh --model on` |
+| `GENESIS_MODEL_URL`, `GENESIS_MODEL_NAME` | `http://DESKTOP_IP:11434` and the model's name in Ollama; needed only when the model is on |
 
-Leave `genesis_planning.postgres_url` empty for the first run. Never commit these two files
-as you filled them in.
+Optional keys (each has a default in the file): `GENESIS_MINECRAFT_MEMORY` (heap, 6G),
+`GENESIS_MINECRAFT_VIEW_DISTANCE` and `GENESIS_MINECRAFT_SIMULATION_DISTANCE` (chunks, 10 each),
+`GENESIS_MINECRAFT_DATA`, `GENESIS_EMBEDDING_MODEL`, `GENESIS_DASHBOARD_BIND`,
+`GENESIS_DASHBOARD_ALLOW` (addresses that may open the dashboard, comma-separated),
+`GENESIS_WORLDEDIT_WORLD` (the world's name for WorldEdit, `world`).
+Every agent's bot keeps the chunks the server sends it in memory: a larger view distance raises
+the memory of the server AND of all four agent processes. (The bots ask for mineflayer's own
+default view distance, "far"; the fork sets none.)
+
+**If WorldEdit was put into the server's `plugins/` folder by hand** (the first test run did):
+delete that jar before the first `up.sh`, `sudo rm /opt/genesis/data/minecraft/plugins/worldedit*.jar`.
+The compose file now installs WorldEdit and SkinsRestorer itself, and a second copy of a plugin
+stops both from loading. (What the image does with a plugin file it did not install is UNVERIFIED:
+its documentation only says that an entry removed from its own list is removed.)
+
+`up.sh` prints one line per step (name, ok or FAIL, seconds):
+
+| Step | What it does, and its check |
+|---|---|
+| Docker | the daemon and the compose plugin answer |
+| Env file | every required value is there (a plain list of what is missing otherwise) |
+| Run-time settings | builds `settings.json` and the profiles for this run in `/opt/genesis/run` from the tracked templates and the env file. No tracked file is edited: `git status` stays clean |
+| Docker network | creates `genesis` when it is missing |
+| Minecraft server | starts it and waits for a line with `Done (` logged AFTER this start |
+| bukkit.yml (End off, no login throttle) | sets `allow-end: false` and `connection-throttle: -1` in `bukkit.yml` (Paper refuses several logins from one address within 4 seconds, and the four agents share one), and restarts only when one of them was not set yet |
+| Whitelist and operators | whitelists Arthur, Mira, Felix, Nova and you; makes you operator |
+| Images | builds them when they are missing or the clone's commit changed |
+| Site, levelling and bootstrap | skipped when the manifest matches the world file. Otherwise: picks the site itself around the world spawn (no player online, no coordinates), force-loads its chunks, levels camp, field and plots (WorldEdit; the game's `fill` when the plugin is absent), builds and checks the camp: chests, beds, table, furnace, field, and (decided after the first night) 9 torches so that nothing hostile spawns inside, and a fence with a gate in each side. On the first bootstrap of a new world, and never again, the time is set to morning |
+| Redis, Postgres, dashboard, alerter | starts Redis and Postgres, then (once both are healthy) the dashboard and the alerter, and waits until the dashboard says both stores answer |
+| Agents | starts them (restarts them when the run-time settings changed). They log in 5 seconds apart |
+| Four agents in the game | waits until `list` names all four |
+
+It ends with the dashboard's address, one line on how to subscribe the phone, and `Genesis is up.` Run again on a healthy stack it changes
+nothing and says so. **On a failure** it stops at that step, prints the check that failed, and
+writes ONE file, `/opt/genesis/run/support-bundle-<time>.txt` (the steps' output, the containers'
+last 200 log lines, the manifest's result, versions, the commit), with every value of the env
+file replaced by its key name. Send that file.
 
 ```
-dc -f genesis/compose.agents.yaml run --rm agents node genesis/start.js --check | tail -5
+genesis/status.sh             # one screen: containers, who is in the game, the stores, the world, the ports
+genesis/up.sh --model on      # stage 2: the model on (no rebuild); --model off goes back to routines
+genesis/up.sh --test-alert    # ONE harmless test push to the phone, through the alerter's own path
+genesis/down.sh               # stops the agents first, then the rest. Deletes nothing.
 ```
 
-**Check:** the output ends with `"problems": []`.
-**Send:** the full output of the command without `| tail -5`.
+**Subscribe the phone before anything else**: the ntfy app, "Subscribe to topic", the value of
+`GENESIS_NTFY_TOPIC` in the env file (the scripts never print it). Then `genesis/up.sh --test-alert`:
+the phone must ring. Without it a critical alert (an agent parked after two deaths, a store down)
+reaches nobody. `genesis/status.sh` shows how many critical alerts are open and whether a test
+push was ever accepted by ntfy.
 
-### 9. Dashboard, alerter, phone
+Then: the runbook's **B5** (firewall: port 25600 from `DESKTOP_IP` only; on Debian `ufw` cannot be
+installed together with `iptables-persistent`: the rule for the Docker-published port lives in
+`/etc/ufw/after.rules`). The dashboard has no login: `status.sh` warns while it is published on every
+interface without `GENESIS_DASHBOARD_ALLOW`.
 
-```
-dc -f genesis/compose.dashboard.yaml up -d --build
-curl -s http://localhost:8080/api/health
-grep NTFY_TOPIC /opt/genesis/.env
-```
+**Coming from the first test run (a VM set up by hand):** `genesis/down.sh` is not needed, but stop
+the three stacks, then `git checkout -- genesis/settings.json genesis/profiles genesis/compose.agents.yaml`
+(your hand edits are replaced by the env file), add the new keys to `/opt/genesis/.env`
+(`GENESIS_OPERATORS`, `GENESIS_MODEL`, `GENESIS_MODEL_URL`, `GENESIS_MODEL_NAME`), move the world file
+next to its manifest (`sudo mv genesis/genesis.world.json bots/genesis_world/genesis.world.json`), delete
+the hand-placed WorldEdit jar, `git pull`, `genesis/up.sh`.
 
-On the phone: install the **ntfy** app, "Subscribe to topic", enter the topic the last command
-printed (server: the default, ntfy.sh). The topic name is the only protection: keep it private.
+### What you should see
 
-**Check:** the health line has `"redis_ok":true,"postgres_ok":true`. The dashboard opens at
-`http://GENESIS_IP:8080` from the desktop. (`"mindserver_ok":false` is right until step 10.)
+Stage 1 (`GENESIS_MODEL=off`), within 5 minutes of `Genesis is up.`:
 
-**Send:** `dc -f genesis/compose.dashboard.yaml logs --no-color --tail 100 dashboard alerter`
-
-### 10. Stage 1: routines only (model away)
-
-Keep Ollama **stopped** on the desktop. Then:
-
-```
-dc -f genesis/compose.agents.yaml up -d
-dc -f genesis/compose.agents.yaml logs -f agents
-```
-
-**What you should see within 5 minutes**
-
-1. In the log: `MindServer running on port 8081`, then for each of the four agents
-   `<Name> logged in!`, `<Name> spawned.` and one line
-   `{"ts":"...","level":"info","event":"genesis_agent_started","agent":"<Name>","resumed":false,"checkpoint":"missing","held":false}`
-2. `mc list` shows Arthur, Mira, Felix and Nova.
-3. In the game: each agent walks to the kits chest and takes its tool and bread. Then Arthur
+1. In the game: it is morning; the camp is lit and fenced (the agents open the gates and close them
+   behind them; at night their Shelter phase takes them home, inside the fence). Each agent walks to the
+   kits chest and takes its tool and bread. Then Arthur
    gathers wood, Mira sows the field, Felix walks his patrol ring, Nova counts the chests.
-4. Dashboard, Agents: four cards, none `Offline`. Routines: a phase per agent.
-5. `ls bots/genesis_checkpoints/` shows four `<Name>.checkpoint.json` files (written every 30 seconds).
-6. No push on the phone. The model being away is not an alert.
+2. Dashboard: four cards, none `Offline`; the model pill says `Model away` (never `unknown`);
+   **Routines** shows each agent's phase and bounds; **World** shows the site, the zones, how
+   the site was chosen and how it was levelled.
+3. `ls bots/genesis_checkpoints/` shows four `<Name>.checkpoint.json` files.
+4. No push on the phone. The model being away is not an alert. A warning is only ever something
+   an agent gave up on; a critical alert is something that needs you.
 
-Harmless lines: `Error with embedding model, using word-overlap instead.`, `keys.json not found`,
-an "unknown command" answer to `/skin clear`.
+Stage 2 (`genesis/up.sh --model on`, with Ollama serving on the desktop as in the runbook's C1
+and C2, bound to `DESKTOP_IP:11434`, both models pulled): the model pill says available; an
+agent's card gets a Thought; **Trace** shows, for every decision, the context, the options
+offered, the latency and the tokens (the planner's call records are in the dashboard's database).
+Agents may ask each other for anything the catalog knows, and a request waits for the model's yes
+or no for up to 120 seconds.
 
-**If it does not happen**
+### Troubleshooting
 
-| You see | It means | Look at |
+| You see | It means | Do |
 |---|---|---|
-| `Not starting. Fix the problems above` | settings or world file | the `Genesis config problem:` lines |
-| `Agent process exited with code 65`, again and again, slower each time | the agents cannot reach the Minecraft server; they wait without limit | `host` is `minecraft`, `mc list` answers |
-| `exited with code 66`, twice, then nothing, and a push | the server refused the login | `mc whitelist list` |
-| `Genesis agent <Name> could not start:` then `exited with code 1` | the Genesis runtime failed on the real bot | the lines after it |
-| agents in the game, standing still | no goal could start | dashboard Incidents and Trace |
-
-**Send**, always all of these:
-
-```
-dc -f genesis/compose.agents.yaml logs --no-color agents > /tmp/agents.log
-dc -f genesis/compose.minecraft.yaml logs --no-color --tail 300 minecraft > /tmp/minecraft.log
-curl -s http://localhost:8080/api/health > /tmp/health.json
-curl -s "http://localhost:8080/api/events?limit=500" > /tmp/events.json
-sudo tar czf /tmp/genesis-state.tgz bots/genesis_checkpoints bots/genesis_world bots/genesis_ledger
-```
-
-Let stage 1 run 15 minutes before stage 2.
-
-### 11. Stage 2: model on
-
-On the desktop, the runbook's **C1** and **C2**, with these values (PowerShell):
-
-```
-ollama pull qwen3.8:27b
-ollama pull embeddinggemma
-[Environment]::SetEnvironmentVariable("OLLAMA_HOST", "DESKTOP_IP:11434", "User")
-```
-
-Quit and start Ollama again. In an administrator PowerShell:
-
-```
-New-NetFirewallRule -DisplayName "Genesis Ollama" -Direction Inbound -Protocol TCP -LocalPort 11434 -RemoteAddress GENESIS_IP -Action Allow
-```
-
-`qwen3.8:27b` is about 18 GB and needs a recent Ollama. Lighter fallback: `gpt-oss:20b`.
-**Neither has been benchmarked for this project.** To change the model: replace the name in
-`genesis/settings.json` and the four profiles, then `dc -f genesis/compose.agents.yaml restart agents`.
-
-**Check:** on the VM, `curl -s http://DESKTOP_IP:11434/api/version` prints a version. From any
-other machine on the LAN it fails.
-
-The agents are NOT restarted: the broker asks the model's address every 15 seconds and opens
-by itself.
-
-**What you should see within 5 minutes**
-
-1. Dashboard: the model shows available; an agent's card gets a Thought; Trace lists decisions.
-2. On the desktop, `ollama ps` shows the model loaded.
-3. Agents finish the routine goal they are on, then take goals the model chose.
-4. Stop Ollama: after two failed probes (about 30 seconds) the agents are back on routines,
-   with no push. Start it: planning returns by itself.
-
-**Send:** the files of step 10, plus `curl -s "http://localhost:8080/api/events?type=agent.decision&limit=100"`
-and `grep -i "model\|genesis_" /tmp/agents.log`.
-
-### 12. Test alert (safe)
-
-```
-dc -f genesis/compose.dashboard.yaml stop redis
-sleep 75
-dc -f genesis/compose.dashboard.yaml start redis
-```
-
-**Check:** exactly one push, "Genesis critical: Redis has been unreachable for 60 seconds."
-Nothing repeats. The agents keep working (their events wait, up to 2,000, and are sent after).
-
-### Stop everything
-
-```
-dc -f genesis/compose.agents.yaml down
-dc -f genesis/compose.dashboard.yaml down
-dc -f genesis/compose.minecraft.yaml down
-```
-
-`down` keeps the world, the database, the checkpoints and the agents' memory. To hold one
-agent without stopping anything: in the game, `/msg Arthur !stop`; `/msg Arthur !resume` lets
-it go on. Only names under `genesis_planning.operators` are listened to.
+| `Env file FAIL` | a value is missing | the lines under it name each key |
+| `Minecraft server FAIL`, "the container stopped" | the EULA value is not exactly `TRUE`, or the seed is missing | fix the env file |
+| `Site, levelling and bootstrap FAIL`, "No place within 48 blocks ... passes" | the land around the spawn is water, forest or hills | Appendix, "The site by hand" |
+| ... "the probe stopped at ..." or "WorldEdit is installed but its console commands were not understood" | the server words an answer differently than the script expects. Nothing was changed | send the bundle: the raw answer is in it. `--no-worldedit` levels with the game's `fill` (Appendix) |
+| ... "the area is NOT LOADED" | the chunks did not stay loaded | run `genesis/up.sh` again; send the bundle if it repeats |
+| On the console of the agents: `<Name> cannot reach the Minecraft server (exit code 65): this is a wait, not a crash. Trying again in ...` | the Minecraft server is down or restarting; the agents wait without limit | `genesis/status.sh` |
+| `exited with code 66`, twice, then a push | the server refused the login | `genesis/status.sh`, the whitelist. The log line `[LoginGuard] Disconnected: ...` now carries the server's own words |
+| `connection throttled! please wait before reconnecting.` | `connection-throttle` in `bukkit.yml` is not `-1` | `genesis/up.sh` sets it; by hand: Appendix, step 3 |
+| Felix skips patrol waypoints | a waypoint that cannot be reached is tried once and skipped until the model has been back: no incident, by design | nothing |
+| Your own Minecraft client cannot join although the firewall allows `DESKTOP_IP` | Tailscale on the desktop accepted a subnet route for the home LAN: the traffic leaves through Tailscale and arrives from the subnet router's address, which the rule drops | On the desktop, PowerShell: `Find-NetRoute -RemoteIPAddress GENESIS_IP \| Select-Object InterfaceAlias` shows `Tailscale`. Fix while at home: `tailscale set --accept-routes=false`. The same check then shows `Ethernet` |
+| Dashboard: "this address is not on the dashboard's allow-list (seen: ADDRESS)" | `GENESIS_DASHBOARD_ALLOW` does not hold the address the dashboard sees for you | put the address it names into the env file, `genesis/up.sh` |
 
 ### Start over (throwaway world)
 
+`down.sh` never deletes anything. Starting over is explicit:
+
 ```
-dc -f genesis/compose.agents.yaml down
-dc -f genesis/compose.agents.yaml run --rm agents node genesis/world/reset.js
+genesis/down.sh
+docker compose --env-file /opt/genesis/.env -f genesis/compose.agents.yaml run --rm agents node genesis/world/reset.js
 ```
 
 That is a dry run: it lists what would go. Run it again with `--yes-wipe-everything` added: it
-removes the agents' memory, checkpoints and ledger (never the world) and marks the world as
-reset. Without it the next bootstrap believes the camp is already levelled and fails. Then:
+removes the agents' memory, checkpoints and ledger (never the world) and marks the world as reset.
+Then delete the world yourself and start again:
 
 ```
-dc -f genesis/compose.minecraft.yaml down
 sudo rm -rf /opt/genesis/data/minecraft/world /opt/genesis/data/minecraft/world_nether /opt/genesis/data/minecraft/world_the_end
-dc -f genesis/compose.minecraft.yaml up -d
+genesis/up.sh
 ```
 
-and go back to step 5 (the same seed gives the same land; `place_world.js` needs `--force`).
+(The first start of a new server creates an End world before `allow-end: false` can be set:
+`world_the_end` exists and is harmless.) The same seed gives the same land, so the world file in
+`bots/genesis_world/` still fits and the same site is used; delete that file to have the site
+picked anew.
+
+### Skins
+
+The agents' skins come through the SkinsRestorer plugin (the server is in offline mode). The
+dashboard stores a skin per agent (`PUT /api/skins/<Agent>` with a 64x64 or 64x32 PNG as the body,
+`GET /api/skins`, `DELETE /api/skins/<Agent>`); the upload screen is a mock-up awaiting review and
+is not built. APPLYING a skin needs an outside signing service (see the open decisions of the
+build report): until that is settled a skin is stored and reported as `failed: no_signer`.
 
 ---
 
@@ -353,14 +203,13 @@ No Redis, Postgres, dashboard or alerter: agents, Minecraft server and Ollama on
    `whitelist add Arthur`, `whitelist add Mira`, `whitelist add Felix`, `whitelist add Nova`,
    `whitelist add YOUR_MINECRAFT_NAME`, `op YOUR_MINECRAFT_NAME`.
    Check: `seed` in the console prints your seed.
-4. Find the spot as in Part 1 step 5 (server address `127.0.0.1:25600`). Then:
+4. The bootstrap picks the site itself (no player needs to be online) and writes the world file:
    ```
-   node genesis/tools/place_world.js --at X Y Z --seed SEED
-   node genesis/world/bootstrap.js --validate
    $env:GENESIS_RCON_PASSWORD = "<the password>"; $env:GENESIS_RCON_HOST = "127.0.0.1"
    node genesis/world/bootstrap.js
    ```
-   Check: `Bootstrap PASSED`. Send: the output and `bots\genesis_world\bootstrap.manifest.json`.
+   (To choose the place by hand instead: `node genesis/tools/place_world.js --at X Y Z --seed SEED` first.)
+   Check: `Site selection PASSED`, then `Bootstrap PASSED`. Send: the output and `bots\genesis_world\bootstrap.manifest.json`.
 5. Fill in the placeholders, then edit `genesis\settings.json`: `host` `"127.0.0.1"`,
    `genesis_planning.enabled` `true`, `genesis_planning.operators` `["YOUR_MINECRAFT_NAME"]`.
    Leave `genesis_events.enabled` `false`.
@@ -384,6 +233,49 @@ No Redis, Postgres, dashboard or alerter: agents, Minecraft server and Ollama on
 
 ---
 
+---
+
+## Appendix. The same start by hand
+
+Use it to find out which step fails, or to do one step alone. In every new shell on the VM:
+
+```
+cd /opt/genesis/repo
+export GENESIS_SETTINGS_PATH=/opt/genesis/run/settings.json GENESIS_PROFILES_PATH=/opt/genesis/run/profiles
+dc() { docker compose --env-file /opt/genesis/.env "$@"; }
+mc() { dc -f genesis/compose.minecraft.yaml exec minecraft rcon-cli "$@"; }
+```
+
+1. **Run-time settings.** `genesis/up.sh` builds them; by hand:
+   `docker run --rm --env-file /opt/genesis/.env -v "$PWD:/repo:ro" -v /opt/genesis/run:/run node:22-bookworm-slim node /repo/genesis/tools/stack.js render --out /run`
+2. **Network and server.** `docker network create genesis`, `dc -f genesis/compose.minecraft.yaml up -d`,
+   `dc -f genesis/compose.minecraft.yaml logs -f minecraft` until a line with `Done (`. After every
+   restart wait for a NEW `Done (`: the one from before the restart is still in the log.
+3. **bukkit.yml.** `dc -f genesis/compose.minecraft.yaml exec minecraft sed -i -e 's/allow-end: .*/allow-end: false/' -e 's/connection-throttle: .*/connection-throttle: -1/' /data/bukkit.yml`,
+   then `dc -f genesis/compose.minecraft.yaml restart minecraft` and wait for `Done (` again.
+4. **Whitelist.** `for n in Arthur Mira Felix Nova YOUR_MINECRAFT_NAME; do mc whitelist add $n; done; mc op YOUR_MINECRAFT_NAME`.
+   Check: `mc seed` prints `Seed: [SEED]`; `mc whitelist list` names all five.
+5. **Images.** `dc -f genesis/compose.agents.yaml build`, `dc -f genesis/compose.dashboard.yaml build`.
+6. **The site, a dry run.** `dc -f genesis/compose.agents.yaml run --rm agents node genesis/world/bootstrap.js --pick-site`
+   reads the land around the world spawn (no player needs to be online), reports the place it would
+   choose with its scores, and writes and changes nothing. Options: `--site-radius 96` (search wider),
+   `--site-from X Z` (search around another column), `--site-relief 4` (allow more uneven land).
+7. **Bootstrap.** `dc -f genesis/compose.agents.yaml run --rm agents node genesis/world/bootstrap.js`
+   picks the site when there is no world file yet and writes `bots/genesis_world/genesis.world.json`;
+   then seed, rules, levelling, camp, kit, checks. Check: `Site selection PASSED`, `Bootstrap PASSED`,
+   `The agents may start`. Add `--no-worldedit` to level with the game's own `fill` command.
+   **The site by hand** (the override): stand where the camp should be, read `Block: X Y Z` off F3, and
+   before the bootstrap run
+   `dc -f genesis/compose.agents.yaml run --rm agents node genesis/tools/place_world.js --at X Y Z --seed SEED`.
+   A world file that is there is always used as it is.
+8. **The rest.** `dc -f genesis/compose.dashboard.yaml up -d`, `dc -f genesis/compose.agents.yaml up -d`,
+   `dc -f genesis/compose.agents.yaml logs -f agents`.
+
+To send, always: `genesis/status.sh > /tmp/status.txt`, and the newest
+`/opt/genesis/run/support-bundle-*.txt` if there is one.
+
+---
+
 ## Where the runbook is out of date
 
 The runbook was written before the code. What exists differs here:
@@ -394,13 +286,13 @@ The runbook was written before the code. What exists differs here:
 | B3: `data/postgres`, `data/redis` folders | Postgres and Redis keep their data in Docker volumes (`genesis-dashboard_genesis-postgres`, `genesis-dashboard_genesis-redis`). Only `data/minecraft` is a folder. |
 | B4: one `/opt/genesis/compose.yaml` | Three files in the repository: `genesis/compose.minecraft.yaml`, `genesis/compose.agents.yaml`, `genesis/compose.dashboard.yaml`, passed with `-f` and `--env-file /opt/genesis/.env`. They meet on a Docker network named `genesis`, made once with `docker network create genesis`. |
 | B4: `EULA: "TRUE"` written in the file | The operator sets `GENESIS_MINECRAFT_EULA=TRUE` himself; no default. |
-| B4: no whitelist, seed, Nether or spawn settings | Whitelist on (names added over RCON), seed required, `allow-nether=false`, `spawn-protection=0` (the camp is at the world spawn; with protection on, agents could not open a chest there), `bukkit.yml` `allow-end: false` by hand. |
+| B4: no whitelist, seed, Nether or spawn settings | Whitelist on (names added over RCON), seed required, `allow-nether=false`, `spawn-protection=0` (the camp is at the world spawn; with protection on, agents could not open a chest there), `bukkit.yml` `allow-end: false` (set by `genesis/up.sh`). |
 | B4: `postgres:17`, `redis:7`, MediaMTX, Grafana | `postgres:16-alpine`, `redis:7-alpine`. No media server, Grafana or Prometheus exists yet. |
 | B4 check: `docker compose exec minecraft rcon-cli list` | Needs `--env-file /opt/genesis/.env -f genesis/compose.minecraft.yaml` (the `mc` shortcut of step 4). |
 | B6: backup script | Not built. |
 | E1: clone, default branch | Clone branch `main`. The fork's default branch `develop` is the clean copy of upstream. |
 | E3: host `GENESIS_IP`, port 25600 for the bots | The agents run inside the Docker network: `host` is `minecraft`, port 25600. `GENESIS_IP:25600` is for your own client and the camera. Settings are in `genesis/settings.json` and `genesis/profiles/*.json`, not `settings.js`. The model address goes in three places per the placeholders: `genesis_planning.model`, and each profile's `model` and `embedding`. |
-| E3/E4: start the bots, two profiles | Four profiles. Before the agents start: a world file (`genesis/tools/place_world.js`), the world bootstrap over RCON, `genesis_planning.operators`. Start only through `genesis/start.js` (the image's command). |
+| E3/E4: start the bots, two profiles | Four profiles. Before the agents start: the world bootstrap over RCON (it picks the site and writes the world file), and the operator's name. `genesis/up.sh` does all of it. Start only through `genesis/start.js` (the image's command). |
 | E4 check: each bot completes an instruction given in chat | Agents do not take free-text orders. With planning on, what the operator says is a planning trigger; typed commands (`!stop`, `!resume`) still run. |
 | C2: `OLLAMA_HOST` `0.0.0.0:11434` | Bind the desktop's LAN address (`DESKTOP_IP:11434`). Also pull the embedding model (`embeddinggemma`); without it agents fall back to word overlap. |
 | C5: launcher sends `desktop_available` / `desktop_leaving` | Not built. Without it the broker finds the model by probing every 15 seconds, and treats two failed probes as away. |
@@ -412,34 +304,37 @@ The runbook was written before the code. What exists differs here:
 
 ## Known unverified
 
-Tested before this guide, with the real packages on Linux and Node 22, no Minecraft server:
-every Genesis module loads; the launcher starts the MindServer and four agent processes; a
-closed Minecraft port puts them into the server-down wait (exit code 65) without a crash;
-events reach a real Redis and survive Redis stopping; every SQL migration runs twice on
-PostgreSQL 16; the dashboard and alerter run against both and the real MindServer; one
-critical push per Redis outage; a planning request goes through the real broker to a stand-in
-for Ollama and back.
+Run for real before this guide (Linux, Node 22, the real packages; no Minecraft server and no
+Docker daemon): the test suites; every Genesis module loads; the launcher starts the MindServer and
+four agent processes; the store migrations twice on PostgreSQL 16 and the planner's call record,
+goals and checkpoint mirror in it, read back by the dashboard from the same database; the new
+events through a real Redis; `docker compose config` for all three files.
+
+Seen on the operator's real Paper 1.21.6 server (stage 1 ran 15 minutes on mineflayer 4.39.0 and Node 22
+with all four agents online, no kick, no restart, 1,420 events, none rejected): the Paper image works (`itzg/minecraft-server:java21`);
+block checks answer "That position is not loaded" with no player near; in the game, WorldEdit
+takes `//pos1 234,67,-48`, `//pos2 313,67,11`, `//set grass_block`, `//set air` (coordinates
+comma-separated, no spaces).
 
 Never run, most likely to fail first:
 
-1. **Everything after an agent spawns.** `genesis/adapters/bot_agent.js` has been loaded and
-   its parts checked on a real mineflayer bot object, but no agent has ever spawned in a world:
-   the executor, the routines, the watchdog and upstream's skills have only met stand-ins.
-2. **The bootstrap's commands on a real 1.21.6 server:** `fill` (levelling: 24 layers of
-   25 by 25 air, then the floor), `setblock` with block states (chest halves, beds, farmland),
-   `item replace` (the kit), `execute if block` (the checks), `gamerule`, `worldborder`,
-   `setworldspawn`, `seed`, `difficulty`, and how each answer is worded. A wording that differs
-   fails the run at that stage: send the output.
-3. **The Docker images.** None was built (no Docker daemon). `docker compose config` passes for
-   all three files. In `compose.minecraft.yaml` the image tag `java21` is marked UNVERIFIED; the
-   variable names were read in the image's documentation.
-4. **`npm ci` inside the images.** The lockfiles were written on Linux with Node 22 and match
-   their `package.json` files, but no image was built with them.
-5. **The whitelist in offline mode:** that `whitelist add <name>` over RCON stores the id an
-   offline-mode login gets. If agents are refused (exit code 66), send `whitelist.json`.
-6. **Paper's own limits** on bots: movement checks, spam limits, the firewall rule of B5.
-7. **The real model:** whether `qwen3.8:27b` returns the structured reply within 90 seconds and
-   1,200 prompt tokens. A reply that breaks the schema is rejected, retried once, and the agent
-   stays on its routine.
-8. **Real ntfy delivery** to a phone (the request was checked against a local stand-in).
-9. **Windows** (Part 2): `npm install` of the native packages (`canvas`, `gl`) and the launcher.
+1. **`genesis/up.sh`, `down.sh`, `status.sh`.** They parse (`bash -n`); their decisions are tested
+   (`genesis/tools/stack.js`); no line that calls Docker has ever run.
+2. **The reading commands and the chunk loading** (`genesis/world/survey.js`): `execute if blocks ... masked`
+   as a count of what is not air, `forceload add / remove / query`. The probe step stops with the
+   raw answer when one is worded differently; nothing is changed before the probe has passed.
+3. **WorldEdit from the console** (`genesis/world/worldedit.js`): whether `//world world` lets the
+   console hold a selection, whether commands go as `//pos1` or `/pos1` over RCON, and the wording of
+   `//distr`. Probed first; every box is read back after `//set`.
+4. **The plugins installed by the image** (`MODRINTH_PROJECTS`: WorldEdit 7.4.6, SkinsRestorer 15.12.6).
+5. **Everything after an agent spawns**, the whitelist in offline mode, Paper's own limits on bots,
+   the real model, real ntfy delivery: as before the first run.
+6. **The lit and fenced camp**: `minecraft:torch`, `minecraft:oak_fence`, `minecraft:oak_fence_gate[facing=...,open=false]`
+   and `time set day` over RCON; that the pathfinder opens a gate on Paper, and that an agent closing
+   it behind itself (`genesis/lib/gate_keeper.js`) does not get in another agent's way. Mobs can still
+   step over the fence where the land outside is a block higher than the camp's floor.
+7. **Skins**: SkinsRestorer's console commands and their answers; applying a skin makes the server
+   send that player's data again, which may disturb a mineflayer bot.
+8. **The dashboard's allow-list**: which address the container sees for a client behind Docker's
+   published port.
+9. **Windows** (Part 2).

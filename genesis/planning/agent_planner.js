@@ -162,6 +162,7 @@ export function createAgentPlanner({
             const wanted = (result.reply?.goals ?? []).slice(0, GOAL_LIMITS.short_term_max)
                 .map((goal) => ({ title: String(goal.title).slice(0, GOAL_LIMITS.title), option_id: goal.option_id }));
             const thought = last_thought.text.trim() || 'the planner chose';
+            const said = last_thought.text.trim() || null; // the model's own sentence: a field of its own on the change (decided)
             const why = asked_because ?? last_trigger?.kind ?? 'a new plan';
 
             // 1. the goals still waiting are replaced: each one goes with its own record
@@ -172,7 +173,7 @@ export function createAgentPlanner({
                 if (stays(goal)) continue; // the goal in hand is finished first; a commitment to another agent is not the plan's to drop
                 // (asked again inside the change: the executor may have taken this goal in hand a moment ago)
                 const gone = await goals.setShortTerm(agent, (queue) => queue.filter((queued) => queued.id !== goal.id || stays(queued)), {
-                    reason: `replaced by a new plan (asked because: ${why}): ${thought}`, source: 'planner', call_id: result.call_id,
+                    reason: `replaced by a new plan (asked because: ${why}): ${thought}`, source: 'planner', call_id: result.call_id, thought: said,
                 });
                 if (gone.ok) dropped.push(goal);
                 else if (gone.code !== 'no_change') return { kind: 'not_stored', code: gone.code, error: gone.error, dropped };
@@ -185,7 +186,7 @@ export function createAgentPlanner({
                 // a goal the reply names again while it is being carried out is not queued a second time
                 const fresh = wanted.filter((goal) => !kept.some((mine) => mine.option_id === goal.option_id)).slice(0, GOAL_LIMITS.short_term_max - kept.length);
                 return [...kept, ...fresh];
-            }, { reason: thought, source: 'planner', call_id: result.call_id });
+            }, { reason: thought, source: 'planner', call_id: result.call_id, thought: said });
             if (!change.ok && change.code !== 'no_change') return { kind: 'not_stored', code: change.code, error: change.error, dropped };
             const queued = change.ok ? change.goals.short_term : (await goals.get(agent)).goals?.short_term ?? [];
             // only the goals this reply put in are the planner's with this call id; the goal in hand keeps its own origin

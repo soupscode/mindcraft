@@ -21,11 +21,12 @@ export const RECOVERY_EVENT_AGENT = 'supervisor';
 // recovery: the genesis_recovery setting (may be undefined: every value then has its default)
 // event_sink: where events go when the genesis_events setting is on (the hub's accept), or null
 // Injectable for the tests: setRestartSupervisor, clock.
-export async function startRecovery(recovery = {}, { event_sink = null, setRestartSupervisor, clock = null } = {}) {
+export async function startRecovery(recovery = {}, { event_sink = null, setRestartSupervisor, clock = null, say = (line) => console.log(line) } = {}) {
     if (!setRestartSupervisor) ({ setRestartSupervisor } = await import('../../src/process/agent_process.js'));
     const emitter = event_sink ? createEmitter({ agent: RECOVERY_EVENT_AGENT, send: event_sink, ...(clock ? { now: clock.now } : {}) }) : null;
     const emit = emitter ? emitter.emit : () => null;
-    const supervisor = createRestartSupervisor({ emit, ...(clock ? { clock } : {}), ...(recovery?.supervisor ?? {}) });
+    // (the wait for a Minecraft server that is down is said on the console in plain words, and as an event)
+    const supervisor = createRestartSupervisor({ emit, say, ...(clock ? { clock } : {}), ...(recovery?.supervisor ?? {}) });
     setRestartSupervisor(supervisor);
 
     const nextId = createUlidFactory(clock ? { now: clock.now } : {});

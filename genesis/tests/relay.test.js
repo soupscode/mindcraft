@@ -505,10 +505,12 @@ test('the decision call: accept or decline with a reason of at most 140 characte
     assert.deepEqual([...DECISIONS], ['accept', 'decline']);
     assert.equal(DECISION_REASON_MAX, 140);
     // its own named, configurable hourly limit and token limit (proposed starting values)
-    assert.deepEqual({ ...DECISION_LIMITS }, { max_calls_per_hour: 20, max_tokens: 80, timeout_ms: 15 * SECOND, wait_ms: 20 * SECOND });
-    assert.deepEqual(brokerDecisionLimits(), { max_calls: 20, max_tokens: 80, timeout_ms: 15 * SECOND, wait_ms: 20 * SECOND });
+    assert.deepEqual({ ...DECISION_LIMITS }, { max_calls_per_hour: 20, max_tokens: 80, timeout_ms: 15 * SECOND, wait_ms: 120 * SECOND });
+    assert.deepEqual(brokerDecisionLimits(), { max_calls: 20, max_tokens: 80, timeout_ms: 15 * SECOND, wait_ms: 120 * SECOND });
+    // decided: a decision waits for a busy model up to the message's expiry
+    assert.equal(DECISION_LIMITS.wait_ms, RELAY_LIMITS.expiry_ms);
     assert.deepEqual([DECISION_CALL_DEFAULTS.max_calls, DECISION_CALL_DEFAULTS.max_tokens, DECISION_CALL_DEFAULTS.window_ms], [20, 80, 60 * MINUTE]);
-    assert.ok(DESK_RULES.decide_timeout_ms < RELAY_LIMITS.expiry_ms, 'the desk would wait for a decision longer than the request lives');
+    assert.ok(DESK_RULES.decide_timeout_ms <= RELAY_LIMITS.expiry_ms, 'the desk would wait for a decision longer than the request lives');
     assert.deepEqual(decisionSchema(), {
         type: 'object',
         properties: { decision: { type: 'string', enum: ['accept', 'decline'] }, reason: { type: 'string', minLength: 1, maxLength: 140 } },
@@ -863,14 +865,16 @@ test('ask_agent: the planner asks a named agent for what its build is short of, 
     // Arthur's plot wants oak planks, he holds none and no chest has any: asking for them is on offer
     // (two agents at a time; when his process started Felix was not in the world yet, so the world file's order decided)
     const offered = t.model.requests[0].format.properties.goals.items.properties.option_id.enum;
-    assert.deepEqual(offered.filter((id) => id.startsWith('ask_agent:')), ['ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_planks:8']);
+    // (decided: an agent may ask for ANYTHING the catalog knows. After what its own work is short of comes one more ask, for something else it has none of)
+    assert.deepEqual(offered.filter((id) => id.startsWith('ask_agent:')), ['ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:oak_log:4']);
     // with Felix in sight, he comes first
     assert.deepEqual(createCatalog({ zones: t.zones, blueprints: BLUEPRINTS }).offer(arthur.runtime.state()).map((option) => option.id).filter((id) => id.startsWith('ask_agent:')),
-        ['ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:oak_planks:8']);
+        ['ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_log:4']);
     assert.ok(!offered.some((id) => id.startsWith('build_blueprint:')), 'the build was on offer although the planks are missing');
     assert.match(t.model.requests[0].messages.at(-1).content, /ask_agent:Felix:oak_planks:8: Ask Felix for 8 oak_planks \(for plot plot-1\): Felix may say no/);
-    // Felix is short of nothing: nothing to ask for is offered to him
-    assert.ok(!t.model.requests[1].format.properties.goals.items.properties.option_id.enum.some((id) => id.startsWith('ask_agent:')));
+    // Felix's own work is short of nothing: what he is offered to ask for is only the "anything else" kind (4 at a time), never the planks
+    const felix_asks = t.model.requests[1].format.properties.goals.items.properties.option_id.enum.filter((id) => id.startsWith('ask_agent:'));
+    assert.ok(felix_asks.length <= 3 && felix_asks.every((id) => id.endsWith(':4') && !id.includes('oak_planks')), felix_asks.join(' '));
     assert.deepEqual((await arthur.queue()).map((goal) => goal.option_id), ['ask_agent:Felix:oak_planks:8']);
 
     t.run();
@@ -1096,12 +1100,12 @@ test('the relay in the MindServer decides only what waits for that agent\'s answ
     assert.deepEqual(await felix.decide(about), { ok: false, reason: 'model_decisions_off' });
     service.bind({ broker });
     // the decision call's own hourly limit and token limit come from the genesis_relay.decision setting
-    assert.deepEqual(limits, [['message_decision', { max_calls: 7, max_tokens: 50, timeout_ms: 15 * SECOND, wait_ms: 20 * SECOND }]]);
+    assert.deepEqual(limits, [['message_decision', { max_calls: 7, max_tokens: 50, timeout_ms: 15 * SECOND, wait_ms: 120 * SECOND }]]);
 
     // Felix asks about the request that waits for his answer: decided
     assert.deepEqual(await felix.decide(about), { ok: true, decision: 'decline', reason: 'Not today.', call_id: 'call-9' });
     assert.equal(asked.length, 1);
-    assert.deepEqual([asked[0].agent, asked[0].kind, asked[0].trigger.kind, asked[0].max_tokens, asked[0].timeout_ms, asked[0].wait_ms], ['Felix', 'message_decision', 'message_decision', 50, 15 * SECOND, 20 * SECOND]);
+    assert.deepEqual([asked[0].agent, asked[0].kind, asked[0].trigger.kind, asked[0].max_tokens, asked[0].timeout_ms, asked[0].wait_ms], ['Felix', 'message_decision', 'message_decision', 50, 15 * SECOND, 120 * SECOND]); // the whole life of the message
     assert.deepEqual(asked[0].format, decisionSchema());
     // the prompt is built from the message as the relay holds it; of what the agent says about itself only the known facts get in
     const prompt = asked[0].messages.map((message) => message.content).join('\n');

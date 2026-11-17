@@ -1,10 +1,11 @@
-// The Routines view, as far as events carry it: who is on the role routine, since when, the
-// routine goal in hand and its steps. The routine's phases and bounds are not in any event.
+// The Routines view: who is on the role routine, since when, the routine goal in hand and its
+// steps, and the routine's phase and bounds as its own "routine" event reports them (when the
+// phase or a breached bound changes, and once a minute otherwise).
 
 import { isRoutineWork } from '../../shared/fold';
 import { useClient, useNow } from '../store';
 import { clockTime, duration } from '../format';
-import { Monogram, NotConnected, roleOf } from '../ui';
+import { Monogram, roleOf } from '../ui';
 
 export function Routines() {
     const { live, roster, processes } = useClient();
@@ -45,6 +46,28 @@ export function Routines() {
                                 <div><dt>Since</dt><dd>{agent.mode_since ? `${clockTime(agent.mode_since)} · ${duration(now - Date.parse(agent.mode_since))}` : 'unknown'}</dd></div>
                                 {agent.parked && <div><dt>State</dt><dd style="color:var(--crimson)">parked at home</dd></div>}
                             </dl>
+                            {agent.routine ? (() => {
+                                const r = agent.routine!;
+                                const b = r.bounds;
+                                const out = (name: string) => b?.breached.includes(name) ?? false;
+                                const bound = (label: string, value: string, name: string) => <div><dt>{label}</dt><dd style={out(name) ? 'color:var(--crimson)' : ''}>{value}</dd></div>;
+                                return (
+                                    <section class="stack" style="gap:6px">
+                                        <div class="between label"><span>{r.name}</span><span class="plain">{clockTime(r.at)}</span></div>
+                                        <ol class="steps">{r.phases.map((phase) => <li class={phase === r.phase ? 'now' : ''}>{phase}</li>)}</ol>
+                                        {b && (
+                                            <dl class="facts">
+                                                {bound('Daylight', `${Math.max(0, Math.round(b.daylight_ticks_left / 20))} s`, 'daylight')}
+                                                {bound('Health', `${b.health} / min ${b.limits.min_health}`, 'health')}
+                                                {bound('Food', `${b.food} / min ${b.limits.min_food}`, 'food')}
+                                                {bound('Free slots', `${b.free_slots} / min ${b.limits.min_free_slots}`, 'free_slots')}
+                                                <div><dt>From home</dt><dd>{b.home_distance ?? '?'}{b.limits.range !== null ? ` / ${b.limits.range}` : ''}</dd></div>
+                                                <div><dt>Deaths</dt><dd style={r.parked ? 'color:var(--crimson)' : ''}>{r.deaths} / {b.limits.max_deaths}</dd></div>
+                                            </dl>
+                                        )}
+                                    </section>
+                                );
+                            })() : <div class="empty">No routine report yet.</div>}
                             <section class="stack" style="gap:6px">
                                 <div class="label">Routine goal</div>
                                 <div class="goal">{plan ? plan.title : <span class="muted" style="font-weight:400">None in hand</span>}</div>
@@ -67,7 +90,6 @@ export function Routines() {
                     );
                 })}
             </main>
-            <NotConnected what="Phases and bounds" missing="The routine's name, cycle, phase and its limits (distance, daylight, health, food, slots, deaths) are in the agent's checkpoint only; no event carries them." />
         </>
     );
 }

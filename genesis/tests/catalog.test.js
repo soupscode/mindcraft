@@ -466,7 +466,7 @@ test('ask_agent and offer_agent: offered to the planner only while every precond
     assert.deepEqual(MESSAGE_TEMPLATES.map((template) => template.name), ['ask_agent', 'offer_agent']);
     assert.ok(!TEMPLATE_NAMES.includes('ask_agent') && !TEMPLATE_NAMES.includes('offer_agent'), 'the messages are not skill templates');
     assert.deepEqual(HANDOFF_TEMPLATES.map((template) => template.name), ['give_items']);
-    assert.deepEqual([CATALOG_DEFAULTS.per_skill.ask_agent, CATALOG_DEFAULTS.per_skill.offer_agent, CATALOG_DEFAULTS.ask_count, CATALOG_DEFAULTS.offer_count], [2, 1, 8, 8]);
+    assert.deepEqual([CATALOG_DEFAULTS.per_skill.ask_agent, CATALOG_DEFAULTS.per_skill.offer_agent, CATALOG_DEFAULTS.ask_count, CATALOG_DEFAULTS.offer_count, CATALOG_DEFAULTS.ask_any_count], [3, 1, 8, 8, 4]);
     for (const template of MESSAGE_TEMPLATES) {
         for (const fn of ['id', 'parse', 'candidates', 'check', 'title', 'describe', 'steps', 'baseline', 'before', 'after', 'progress']) assert.equal(typeof template[fn], 'function', `${template.name}.${fn}`);
         assert.ok(template.failures.every((reason) => /^[a-z_]+$/.test(reason)));
@@ -483,7 +483,10 @@ test('ask_agent and offer_agent: offered to the planner only while every precond
     assert.deepEqual(h.catalog.offer(h.state()).map((option) => option.id).filter((id) => /^(ask|offer)_agent:/.test(id)), []);
     assert.equal(h.catalog.check('ask_agent:Mira:oak_planks:8', h.state()).reason, 'no_messaging');
     // with one: two agents to ask for what the build is short of, one offer of what is held most beyond the reserve
-    assert.deepEqual(ids(), ['ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_planks:8', 'offer_agent:Mira:oak_log:8']);
+    // (decided: anything the catalog knows may be asked for: the third ask is for something else the agent has none of)
+    assert.deepEqual(ids(), ['ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:birch_log:4', 'offer_agent:Mira:oak_log:8']);
+    assert.equal(h.catalog.check('ask_agent:Felix:bread:2', state()).ok, true, 'something the catalog knows could not be asked for');
+    assert.equal(h.catalog.check('ask_agent:Felix:diamond_block:2', state()).reason, 'unknown_item');
     const options = h.catalog.offer(state());
     assert.equal(options.at(-1).id, 'offer_agent:Mira:oak_log:8', 'the messages come after the work');
     assert.equal(options.find((option) => option.id === 'ask_agent:Mira:oak_planks:8').description, 'Ask Mira for 8 oak_planks (for plot plot-1): Mira may say no');
@@ -510,7 +513,7 @@ test('ask_agent and offer_agent: offered to the planner only while every precond
     }
     assert.deepEqual(ids(talk({ open: 2 })), []);
     assert.deepEqual(ids(talk({ sent: 6 })), []);
-    assert.deepEqual(ids(talk({ waiting: (type, to) => to === 'Mira' })), ['ask_agent:Felix:oak_planks:8', 'ask_agent:Nova:oak_planks:8', 'offer_agent:Felix:oak_log:8']);
+    assert.deepEqual(ids(talk({ waiting: (type, to) => to === 'Mira' })), ['ask_agent:Felix:oak_planks:8', 'ask_agent:Nova:oak_planks:8', 'ask_agent:Felix:spruce_log:4', 'offer_agent:Felix:oak_log:8']);
     // for an ask: the item is something the catalog knows (what it gathers, crafts, sows or harvests)
     for (const item of ['oak_planks', 'cobblestone', 'coal', 'wheat_seeds', 'wheat', 'bread', 'torch']) assert.equal(reason(`ask_agent:Mira:${item}:4`), null, item);
     for (const item of ['diamond_block', 'netherite_sword', 'command_block']) assert.equal(reason(`ask_agent:Mira:${item}:4`), 'unknown_item', item);
@@ -526,20 +529,22 @@ test('ask_agent and offer_agent: offered to the planner only while every precond
 
     // what is asked for is what the agent's own work is short of and no chest has: with planks in the shared chest it is a fetch, not an ask
     h.ledger.set('shared', { oak_planks: 20 });
-    assert.deepEqual(ids().filter((id) => id.startsWith('ask_agent:')), []);
+    // (what a chest has is never asked for: the asks left are for other things the catalog knows)
+    assert.deepEqual(ids().filter((id) => id.startsWith('ask_agent:')), ['ask_agent:Mira:birch_log:4', 'ask_agent:Felix:spruce_log:4', 'ask_agent:Nova:cobblestone:4']);
+    assert.ok(!ids().some((id) => id.includes(':oak_planks:')));
     assert.ok(h.catalog.offer(state()).some((option) => option.id.startsWith('fetch_items:shared:oak_planks:')));
     h.ledger.set('shared', {});
-    // an agent that holds what its plot wants asks for nothing
+    // an agent that holds what its plot wants does not ask for it (only for other things it has none of)
     h.body.inventory.oak_planks = 64;
-    assert.deepEqual(ids().filter((id) => id.startsWith('ask_agent:')), []);
+    assert.deepEqual(ids().filter((id) => id.startsWith('ask_agent:')), ['ask_agent:Mira:birch_log:4', 'ask_agent:Felix:spruce_log:4', 'ask_agent:Nova:cobblestone:4']);
     delete h.body.inventory.oak_planks;
     // seeds for a bare field are asked for by whoever the field is for (here: nobody in particular), while it holds none
     for (const block of [...h.world.blocks.values()]) if (block.name === 'wheat') h.world.set(block.x, block.y, block.z, 'air');
     h.body.inventory.oak_planks = 64;
     h.body.position = { x: 10, y: 64, z: 0 };
-    assert.deepEqual(ids().filter((id) => id.startsWith('ask_agent:')), ['ask_agent:Mira:wheat_seeds:8', 'ask_agent:Felix:wheat_seeds:8']);
+    assert.deepEqual(ids().filter((id) => id.startsWith('ask_agent:')), ['ask_agent:Mira:wheat_seeds:8', 'ask_agent:Felix:wheat_seeds:8', 'ask_agent:Mira:birch_log:4']);
     h.body.inventory.wheat_seeds = 2;
-    assert.deepEqual(ids().filter((id) => id.startsWith('ask_agent:')), []);
+    assert.ok(!ids().some((id) => id.includes(':wheat_seeds:')), 'seeds were asked for although the agent holds some');
     assert.equal(createZones({ ...WORLD_CONFIG, field: { ...WORLD_CONFIG.field, owner: 'Mira' } }).fieldOwner(), 'Mira');
     assert.equal(h.zones.fieldOwner(), null);
 
@@ -550,7 +555,7 @@ test('ask_agent and offer_agent: offered to the planner only while every precond
     const crowded = busy.catalog.offer({ ...busy.state(), talk: talk({ spare: (item) => (item === 'oak_log' ? 30 : 0) }) }).map((option) => option.id);
     assert.equal(busy.catalog.offer(busy.state()).length, CATALOG_DEFAULTS.max_options, 'the test world does not fill the offer');
     assert.equal(crowded.length, CATALOG_DEFAULTS.max_options);
-    assert.deepEqual(crowded.slice(-3), ['ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_planks:8', 'offer_agent:Mira:oak_log:8']);
+    assert.deepEqual(crowded.slice(-4), ['ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:birch_log:4', 'offer_agent:Mira:oak_log:8']);
 });
 
 test('build_blueprint: only on a registered plot that overlaps no zone and holds only natural blocks where it differs', () => {

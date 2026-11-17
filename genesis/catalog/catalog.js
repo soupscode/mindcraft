@@ -52,6 +52,8 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, 
         keep: (item) => keep_items.has(item) || KEEP_SUFFIXES.some((suffix) => item.endsWith(suffix)),
         // an item the catalog knows: something it gathers, crafts, sows or harvests
         known: (item) => known_items.has(item),
+        // every item the catalog knows, in the order of its tables
+        knownItems: () => [...known_items],
         // An agent wanted items another agent has reserved. Never throws.
         contested(claim) {
             if (quiet > 0 || !contested_hook) return;

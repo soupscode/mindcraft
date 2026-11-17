@@ -7,7 +7,7 @@
 import { agentStatus, isRoutineWork } from '../../shared/fold';
 import type { AgentView, GoalChange, LiveState, ProcessStatus } from '../../shared/types';
 import { useClient, useNow } from '../store';
-import { age, dayTime, sourceLabel } from '../format';
+import { age, clockTime, dayTime, sourceLabel } from '../format';
 import { Monogram, roleOf } from '../ui';
 
 const FRESH_MS = 90 * 1000;        // how long a goal change is marked "Changed"
@@ -32,7 +32,11 @@ function AgentCard({ live, agent, role, process, now }: { live: LiveState; agent
             <div class="who">
                 <Monogram name={agent.name} />
                 <div class="id">
-                    <h2 class="title">{agent.name}</h2>
+                    <h2 class="title">{agent.name}{agent.skin && agent.skin.state !== 'cleared' && (
+                        <span class={agent.skin.state === 'failed' ? 'tag fail' : 'tag line'} style="margin-left:8px;vertical-align:middle" title={agent.skin.reason ?? ''}>
+                            Skin {agent.skin.state} <span class="plain">{clockTime(agent.skin.at)}</span>
+                        </span>
+                    )}</h2>
                     <div class="small muted">
                         {role}
                         {process?.pos && <> · <span class="mono" style="font-size:12px;white-space:nowrap">x {process.pos[0]}, z {process.pos[2]}</span></>}

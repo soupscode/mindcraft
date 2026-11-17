@@ -47,7 +47,9 @@ export const SUPERVISOR_DEFAULTS = Object.freeze({
     watchdog_delay_ms: 5 * 1000,            // proposed: the pause before a restart the watchdog ordered (as after a first crash)
 });
 
-export function createRestartSupervisor({ clock = { now: Date.now, setTimeout, clearTimeout }, emit = () => null, ids = null, ...options } = {}) {
+// say(line): a line for the operator's console (decided: the wait for a Minecraft server that is down is said in
+// plain words there and in the events, not left as an exit code). The launcher gives console.log; left out: silent.
+export function createRestartSupervisor({ clock = { now: Date.now, setTimeout, clearTimeout }, emit = () => null, ids = null, say = null, ...options } = {}) {
     const config = { ...SUPERVISOR_DEFAULTS };
     for (const key of Object.keys(SUPERVISOR_DEFAULTS)) {
         if (options[key] !== undefined) config[key] = options[key];
@@ -73,6 +75,12 @@ export function createRestartSupervisor({ clock = { now: Date.now, setTimeout, c
         return agents.get(name);
     };
     const about = (name) => ({ type: 'agent', name });
+    const seconds = (ms) => (ms >= 120 * 1000 ? `${Math.round(ms / 60000)} min` : `${Math.round(ms / 1000)} s`);
+    // One plain line on the console and one agent.state event. Never throws.
+    const tell = (state_name, detail) => {
+        try { say?.(`Genesis: ${detail.message}`); } catch { /* the console's problem */ }
+        try { emit('agent.state', { state: state_name, detail }, { severity: 'info', corr: null }); } catch { /* an event must never disturb the supervisor */ }
+    };
     const pick = (list, index) => list[Math.min(index, list.length - 1)];
 
     function schedule(name, state, delay_ms) {
@@ -134,7 +142,10 @@ export function createRestartSupervisor({ clock = { now: Date.now, setTimeout, c
                 const delay_ms = pick(config.reconnect_delays_ms, state.down.attempts);
                 state.down.attempts++;
                 // max 0: there is no limit on how long an agent waits for the server
-                reporter.step(state.down.incident, { step: 'reconnect', attempt: state.down.attempts, max: 0, result: 'pending' }, { delay_ms, waited_ms: now - state.down.since });
+                const message = `${name} cannot reach the Minecraft server (exit code ${code}): this is a wait, not a crash. Trying again in ${seconds(delay_ms)} `
+                    + `(attempt ${state.down.attempts}, waiting ${seconds(now - state.down.since)} so far, with no limit).`;
+                reporter.step(state.down.incident, { step: 'reconnect', attempt: state.down.attempts, max: 0, result: 'pending' }, { delay_ms, waited_ms: now - state.down.since, message });
+                tell('server_down_wait', { agent: name, attempt: state.down.attempts, delay_ms, waited_ms: now - state.down.since, code, message });
                 schedule(name, state, delay_ms);
                 decision = { action: 'restart', kind, delay_ms, attempt: state.down.attempts, counted: false };
             } else if (kind === 'login_refused') {
@@ -183,9 +194,12 @@ export function createRestartSupervisor({ clock = { now: Date.now, setTimeout, c
             stats.logins++;
             state.stopped = null;
             if (state.down) {
+                const waited_ms = clock.now() - state.down.since;
+                const message = `${name} is back in the game: the Minecraft server answered after ${seconds(waited_ms)} and ${state.down.attempts} attempt(s).`;
                 reporter.resolved(state.down.incident, {
-                    recovery: { step: 'reconnect', attempt: state.down.attempts, max: 0, result: 'ok' }, waited_ms: clock.now() - state.down.since,
+                    recovery: { step: 'reconnect', attempt: state.down.attempts, max: 0, result: 'ok' }, waited_ms, message,
                 });
+                tell('server_back', { agent: name, attempts: state.down.attempts, waited_ms, message });
                 state.down = null;
             }
             if (state.refused) {

@@ -19,8 +19,6 @@ export const HOUR_MS = 60 * 60 * 1000;
 
 export const ALERTER_DEFAULTS = Object.freeze({
     outage_ms: 60 * 1000,              // decided: a store down this long is critical
-    pending_warning_ms: 10 * 60 * 1000, // an incident still open after this long is a warning
-    recurring_count: 5,                // the same thing recovering this often within an hour is a warning
     quiet_close_ms: HOUR_MS,           // a failure alert with no new event for this long closes
     push_attempts: 5,
     push_retry_ms: 60 * 1000,
@@ -43,8 +41,6 @@ export function createAlerter({ notifier, store, marks = null, clock = { now: Da
     const state: AlerterState = { gate: 'unknown', held: [] };
     const open = new Map<string, Alert>();                 // problem_key -> the one open alert
     const queued: Alert[] = [];                            // warnings that wait for the hourly push
-    const watching = new Map<string, { since: number; subject: string; kind: string }>(); // incidents that began
-    const recovered = new Map<string, number[]>();         // subject:kind -> when it recovered by itself
     const retries: { alert: Alert; push: Push; attempts: number; next_at: number }[] = [];
     const unsaved = new Map<string, Alert>();              // alerts Postgres has not got yet
     const down_since: Record<'redis' | 'postgres', number | null> = { redis: null, postgres: null };
@@ -128,7 +124,6 @@ export function createAlerter({ notifier, store, marks = null, clock = { now: Da
             opened_at: now, updated_at: now, closed_at: null, occurrences: 1, push_state: 'queued', pushed_at: null,
         };
         open.set(v.key, alert);
-        watching.delete(v.key);
         if (v.severity === 'critical') {
             stats.criticals++;
             await ping(alert, { title: 'Genesis critical', body: more.body ?? v.title, priority: 'urgent', tags: ['rotating_light'] });
@@ -141,7 +136,6 @@ export function createAlerter({ notifier, store, marks = null, clock = { now: Da
     }
 
     async function closeAlert(key: string) {
-        watching.delete(key);
         const alert = open.get(key);
         if (!alert) return;
         open.delete(key);
@@ -170,23 +164,8 @@ export function createAlerter({ notifier, store, marks = null, clock = { now: Da
                 break;
             }
             case 'open': await openAlert(verdict); break;
-            case 'watch':
-                if (!open.has(verdict.key) && !watching.has(verdict.key)) watching.set(verdict.key, { since: clock.now(), subject: verdict.subject, kind: verdict.kind });
-                else if (open.has(verdict.key)) { const alert = open.get(verdict.key)!; alert.occurrences++; alert.updated_at = iso(); }
-                stats.log_only++;
-                break;
             case 'close': {
                 await closeAlert(verdict.key);
-                if (verdict.recovered) {
-                    const key = `${verdict.subject}:${verdict.kind}`;
-                    const times = (recovered.get(key) ?? []).filter((at) => at > clock.now() - HOUR_MS);
-                    times.push(clock.now());
-                    recovered.set(key, times);
-                    if (times.length >= config.recurring_count && !state.held.includes(verdict.subject)) {
-                        await openAlert({ action: 'open', severity: 'warning', key: `recurring:${key}`, subject: verdict.subject, kind: verdict.kind,
-                            title: `${verdict.subject} · ${kindLabel(verdict.kind)} · ${times.length} times in an hour` });
-                    }
-                }
                 stats.log_only++;
                 break;
             }
@@ -245,14 +224,6 @@ export function createAlerter({ notifier, store, marks = null, clock = { now: Da
             if (retry.alert.push_state !== 'failed' || retry.attempts >= config.push_attempts) { retries.splice(retries.indexOf(retry), 1); continue; }
             await ping(retry.alert, retry.push);
             if (retry.alert.push_state !== 'failed') retries.splice(retries.indexOf(retry), 1);
-        }
-        // an incident that is still open after 10 minutes
-        for (const [key, watched] of [...watching]) {
-            if (now - watched.since < config.pending_warning_ms) continue;
-            watching.delete(key);
-            if (state.held.includes(watched.subject)) continue;
-            await openAlert({ action: 'open', severity: 'warning', key, subject: watched.subject, kind: watched.kind,
-                title: `${watched.subject} · ${kindLabel(watched.kind)} · still recovering` });
         }
         // a failure that has not come again for an hour is over: the next one is a new alert
         for (const [key, alert] of [...open]) {

@@ -147,6 +147,9 @@ export function flatDistance(a, b) {
     return Math.hypot(a.x - b.x, a.z - b.z);
 }
 
+// The option id of a walk to a patrol waypoint ("travel:ring-3"). Decided: such a walk is tried ONCE; a
+// waypoint that cannot be reached is skipped, never an incident, never "stuck".
+export const PATROL_OPTION = /^travel:ring-(\d+)$/;
 // How many waypoints the default patrol ring has, and how far out it lies (part of the range).
 export const PATROL_RING = Object.freeze({ points: 16, radius_share: 0.75 });
 

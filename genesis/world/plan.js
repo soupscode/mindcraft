@@ -7,13 +7,15 @@
 //                    sets it, the command that reads it back, and whether it favours the agents
 //   server_settings  rules that are server.properties / bukkit.yml settings: the bootstrap never
 //                    edits server files, the operator must set these ({ file, key, value, lines, why })
-//   areas            the levelling of the camp (decided): whole layers the bootstrap fills ONCE, before
-//                    it places the camp: { id, kind, min, max, block, purpose }, both corners included.
-//                      kind "clear"  a layer above the floor, filled with air (the highest layer first)
-//                      kind "floor"  the layer the camp stands on, filled with the floor block
+//   zones            what is levelled (decided): the camp, the field and every plot, as flat boxes
+//   areas            the levelling: boxes the bootstrap fills ONCE, before it places the camp:
+//                    { id, zone, kind, min, max, block, purpose }, both corners included.
+//                      kind "clear"  everything above a zone's floor, filled with air (one box per zone)
+//                      kind "floor"  the layer the zone stands on, filled with the floor block
 //                    No area holds more blocks than one fill command may change (FILL_LIMIT).
-//   floor            what the check step verifies in EVERY run: { y, min: [x, z], max: [x, z], accepts }
-//                    every cell of the floor layer must be one of `accepts`
+//   floor            the camp's floor: { y, min: [x, z], max: [x, z], accepts }
+//   floors           what the check step verifies: every cell of each floor must be one of `accepts`
+//                    (the camp's in EVERY run, a plot's in the run that levelled it)
 //   blocks           every block of the starter camp: { id, pos, place, expect, purpose, once }
 //                      place   the block as it is put down       "minecraft:chest[facing=south,type=left]"
 //                      expect  what must be there afterwards (looser where the game changes the
@@ -31,9 +33,11 @@
 // not from a source file in this repository, and NOT RUN AGAINST A REAL SERVER. The list,
 // with what each is expected to answer, is in COMMANDS_USED below.
 //
-// Depends only on genesis/world/world_config.js.
+// Depends only on genesis/world/world_config.js and genesis/world/survey.js (the list of reading commands).
 
 import { FACINGS, CLOCKWISE, bedHead, seedText } from './world_config.js';
+import { READ_COMMANDS } from './survey.js';
+import { WORLDEDIT_COMMANDS } from './worldedit.js';
 
 // Every command the bootstrap sends, and the answer it looks for.
 export const COMMANDS_USED = Object.freeze([
@@ -46,17 +50,68 @@ export const COMMANDS_USED = Object.freeze([
     { command: 'worldborder set <size>', answer: 'not read: checked by asking again' },
     { command: 'worldborder center <x> <z>', answer: 'not read: the centre cannot be asked for' },
     { command: 'setworldspawn <x> <y> <z>', answer: 'not read: the spawn point cannot be asked for' },
+    { command: 'time set day', answer: 'not read: sent once, on the first bootstrap of a new world' },
     { command: 'execute if block <x> <y> <z> <block[states]>', answer: 'Test passed | Test failed' },
     { command: 'setblock <x> <y> <z> <block[states]>', answer: 'not read: checked with execute if block' },
     { command: 'fill <x1> <y1> <z1> <x2> <y2> <z2> <block>', answer: 'Successfully filled <n> block(s) | No blocks were filled' },
     { command: 'item replace block <x> <y> <z> container.<slot> with <item> <count>', answer: 'not read: checked with data get block' },
     { command: 'data get block <x> <y> <z> Items', answer: '<x>, <y>, <z> has the following block data: [{Slot: 0b, id: "minecraft:bread", count: 16}, ...]' },
+    // reading the land before it is changed, and loading its chunks with no player online (genesis/world/survey.js)
+    ...READ_COMMANDS,
+    // levelling with WorldEdit from the console, when the plugin is there (genesis/world/worldedit.js)
+    ...WORLDEDIT_COMMANDS,
 ]);
+
+// The camp's defence (decided after the first night of the first run: mobs spawned inside the unlit,
+// unwalled camp). The bootstrap LIGHTS and FENCES the starter camp.
+//   torches  on a grid every 8 blocks, 4 in from the camp's edge. Since Minecraft 1.18 a hostile mob only
+//            spawns at block light 0; a torch gives 14 and light falls by 1 per block walked (not diagonally),
+//            so a cell is safe within 13 blocks of a torch. On this grid no cell of the camp is more than
+//            8 blocks from one (light 6 or more): the margin is for what stands in the light's way.
+//   fence    the outermost ring of the camp, on its floor, with a gate in the middle of each side.
+// From general knowledge of the game; NOT RUN AGAINST A REAL SERVER. The light is not checked: only
+// that every torch, fence and gate stands.
+export const CAMP_DEFENCE = Object.freeze({ torch_spacing: 8, torch_inset: 4, torch: 'torch', fence: 'oak_fence', gate: 'oak_fence_gate' });
+
+// Where the camp's torches, fence and gates go: { torches: [pos], fence: [pos], gates: [{ pos, facing }] }.
+// A cell that holds a block of the camp or an agent's home is passed over (a torch moves one cell diagonally).
+export function campDefence(config) {
+    const [x1, z1] = config.camp.min;
+    const [x2, z2] = config.camp.max;
+    const y = config.home[1];
+    const taken = new Set([
+        config.chests.shared, config.camp.shared_chest_second_half, config.chests.kits, config.camp.crafting_table, config.camp.furnace,
+        ...config.camp.beds.flatMap((bed) => [bed.foot, bedHead(bed)]), config.home, ...Object.values(config.agents ?? {}).map((agent) => agent.home),
+    ].map((pos) => `${pos[0]},${pos[2]}`));
+    const edge = (x, z) => x === x1 || x === x2 || z === z1 || z === z2;
+    const mid = [Math.floor((x1 + x2) / 2), Math.floor((z1 + z2) / 2)];
+    // a gate in the middle of each side; one on the north or south side is walked through along z ("facing south")
+    const gates = [
+        { pos: [mid[0], y, z1], facing: 'south' }, { pos: [mid[0], y, z2], facing: 'south' },
+        { pos: [x1, y, mid[1]], facing: 'east' }, { pos: [x2, y, mid[1]], facing: 'east' },
+    ].filter((gate) => !taken.has(`${gate.pos[0]},${gate.pos[2]}`));
+    const gate_cells = new Set(gates.map((gate) => `${gate.pos[0]},${gate.pos[2]}`));
+    const fence = [];
+    for (let x = x1; x <= x2; x++) {
+        for (let z = z1; z <= z2; z++) {
+            if (edge(x, z) && !gate_cells.has(`${x},${z}`) && !taken.has(`${x},${z}`)) fence.push([x, y, z]);
+        }
+    }
+    const torches = [];
+    for (let x = x1 + CAMP_DEFENCE.torch_inset; x < x2; x += CAMP_DEFENCE.torch_spacing) {
+        for (let z = z1 + CAMP_DEFENCE.torch_inset; z < z2; z += CAMP_DEFENCE.torch_spacing) {
+            const free = [[0, 0], [1, 1], [-1, -1], [1, -1], [-1, 1]].map(([dx, dz]) => [x + dx, z + dz])
+                .find(([tx, tz]) => !taken.has(`${tx},${tz}`) && !edge(tx, tz) && tx > x1 && tx < x2 && tz > z1 && tz < z2);
+            if (free) { torches.push([free[0], y, free[1]]); taken.add(`${free[0]},${free[1]}`); }
+        }
+    }
+    return { torches, fence, gates };
+}
 
 export const GAME_RULES_USED = Object.freeze(['keepInventory', 'mobGriefing', 'doFireTick', 'disableRaids']);
 
-// Levelling the camp (decided: the bootstrap clears and floors the camp area before it places
-// the camp). The floor is the layer under the home point; the camp's blocks stand on it.
+// Levelling (decided: the bootstrap clears and floors the camp, the field and every plot before it
+// places the camp). The floor is the layer under the home point; the camp's blocks stand on it.
 // The numbers are proposed starting values.
 export const CAMP_LEVELLING = Object.freeze({
     floor_block: 'grass_block',                             // proposed: what the floor is made of
@@ -74,24 +129,47 @@ const block = (name, states = {}) => {
     return `minecraft:${name}${list.length > 0 ? `[${list.join(',')}]` : ''}`;
 };
 
-// The areas that level the camp: the layers above the floor, highest first (so nothing that
-// falls, sand or gravel, drops into a layer that was already cleared), then the floor itself.
-// A layer larger than one fill command may change is cut into slabs along x.
+// The zones the bootstrap levels (decided: the camp, the field AND every plot): flat boxes
+// { id, label, y, min: [x, z], max: [x, z] } where y is the zone's floor layer: under the home
+// point for the camp, the farmland's layer for the field, under its lowest layer for a plot.
+// With automatic siting the plots must be buildable as the land lies.
+export function levelZones(config) {
+    return [
+        { id: 'camp', label: 'camp', y: config.home[1] - 1, min: [...config.camp.min], max: [...config.camp.max] },
+        { id: 'field', label: 'field', y: config.field.y, min: [...config.field.min], max: [...config.field.max] },
+        ...(config.plots ?? []).map((plot) => ({ id: `plot.${plot.id}`, label: `plot ${plot.id}`, y: plot.min[1] - 1, min: [plot.min[0], plot.min[2]], max: [plot.max[0], plot.max[2]] })),
+    ];
+}
+
+// The areas that level the site, zone by zone: everything above the floor (one fill command for
+// the whole box where the game allows it: nothing is left inside that could fall), then the
+// floor itself. A box larger than one fill command may change is cut into slabs along x, and
+// into runs of layers, the highest first.
 function levellingAreas(config) {
-    const [x1, z1] = config.camp.min;
-    const [x2, z2] = config.camp.max;
-    const floor_y = config.home[1] - 1;
-    const depth = z2 - z1 + 1;
-    const slab = Math.max(1, Math.floor(FILL_LIMIT / depth)); // columns along x in one fill
-    const slabs = [];
-    for (let x = x1; x <= x2; x += slab) slabs.push([x, Math.min(x2, x + slab - 1)]);
     const areas = [];
-    const add = (id, kind, y, block_name, purpose) => slabs.forEach(([from, to], n) => areas.push({
-        id: slabs.length > 1 ? `${id}.${n + 1}` : id, kind, min: [from, y, z1], max: [to, y, z2], block: block(block_name), purpose,
-    }));
-    const top = Math.min(BUILD_TOP, floor_y + CAMP_LEVELLING.clear_height);
-    for (let y = top; y > floor_y; y--) add(`camp.clear.${y}`, 'clear', y, 'air', `camp cleared (layer ${y})`);
-    add('camp.floor', 'floor', floor_y, CAMP_LEVELLING.floor_block, `camp floor (layer ${floor_y})`);
+    for (const zone of levelZones(config)) {
+        const floor_y = zone.y;
+        const top = Math.min(BUILD_TOP, floor_y + CAMP_LEVELLING.clear_height);
+        const [x1, z1] = zone.min;
+        const [x2, z2] = zone.max;
+        const depth = z2 - z1 + 1;
+        const slab = Math.max(1, Math.floor(FILL_LIMIT / depth)); // columns along x in one fill
+        const slabs = [];
+        for (let x = x1; x <= x2; x += slab) slabs.push([x, Math.min(x2, x + slab - 1)]);
+        const clears = [];
+        for (const [from, to] of slabs) {
+            const layers = Math.max(1, Math.floor(FILL_LIMIT / ((to - from + 1) * depth)));
+            for (let y = top; y > floor_y; y -= layers) clears.push({ min: [from, Math.max(floor_y + 1, y - layers + 1), z1], max: [to, y, z2] });
+        }
+        clears.forEach((box, n) => areas.push({
+            id: clears.length > 1 ? `${zone.id}.clear.${n + 1}` : `${zone.id}.clear`, zone: zone.id, kind: 'clear', ...box, block: block('air'),
+            purpose: `${zone.label} cleared (layers ${box.min[1]} to ${box.max[1]})`,
+        }));
+        slabs.forEach(([from, to], n) => areas.push({
+            id: slabs.length > 1 ? `${zone.id}.floor.${n + 1}` : `${zone.id}.floor`, zone: zone.id, kind: 'floor', min: [from, floor_y, z1], max: [to, floor_y, z2],
+            block: block(CAMP_LEVELLING.floor_block), purpose: `${zone.label} floor (layer ${floor_y})`,
+        }));
+    }
     return areas;
 }
 
@@ -104,6 +182,12 @@ export function buildBootstrapPlan(config) {
         y: config.home[1] - 1, min: [...config.camp.min], max: [...config.camp.max],
         accepts: CAMP_LEVELLING.floor_accepts.map((name) => block(name)),
     };
+    // the floors that are checked: the camp's in EVERY run; a plot's only in the run that levelled it
+    // (from then on the plot is its owner's). The field has no floor check: every cell of it is a
+    // block of the camp plan (farmland or water) and is checked as one.
+    const floors = levelZones(config).filter((zone) => zone.id !== 'field').map((zone) => ({
+        id: `${zone.id}.floor`, zone: zone.id, label: zone.label, y: zone.y, min: zone.min, max: zone.max, accepts: floor.accepts, every_run: zone.id === 'camp',
+    }));
 
     // ---- the shared double chest: two chests that face the same way, typed as its halves.
     // A chest of type "left" is joined to the block clockwise of the way it faces.
@@ -124,6 +208,13 @@ export function buildBootstrapPlan(config) {
         put(`bed.${n}.head`, bedHead(bed), block(name, { facing: bed.facing, part: 'head', occupied: 'false' }), `bed ${n} (head)`,
             { expect: block(name, { facing: bed.facing, part: 'head' }) });
     });
+
+    // ---- the camp's defence (decided): torches so that nothing hostile spawns inside, a fence with gates around it
+    const defence = campDefence(config);
+    defence.torches.forEach((pos, n) => put(`torch.${n + 1}`, pos, block(CAMP_DEFENCE.torch), `camp torch ${n + 1} of ${defence.torches.length}`));
+    // (a fence joins its neighbours by itself, and an agent opens and closes a gate: only the kind of block is checked)
+    for (const pos of defence.fence) put(`fence.${pos[0]}.${pos[2]}`, pos, block(CAMP_DEFENCE.fence), 'camp fence');
+    defence.gates.forEach((gate, n) => put(`gate.${n + 1}`, gate.pos, block(CAMP_DEFENCE.gate, { facing: gate.facing, open: 'false' }), `camp gate ${n + 1} of ${defence.gates.length}`, { expect: block(CAMP_DEFENCE.gate) }));
 
     // ---- the field: farmland with water in it, something solid under the water, and the
     // layer above cleared so that the farmland stays farmland. Nothing is sown (decided): the
@@ -172,6 +263,10 @@ export function buildBootstrapPlan(config) {
             'The centre of the world border. It cannot be read back over RCON: set once and recorded.'),
         rule('worldspawn', 'spawn', `setworldspawn ${hx} ${hy} ${hz}`, null, `${hx} ${hy} ${hz}`, true,
             'The world spawn is the home point: an agent that dies comes back next to the camp. It cannot be read back over RCON: set once and recorded.'),
+        // decided: on the FIRST bootstrap of a new world, never again, so that a first run starts in daylight
+        // (the first live run began at midnight). Like every rule that cannot be read back, it is set once and carried.
+        rule('time.first_morning', 'time', 'time set day', null, 'day', true,
+            'The time was set to morning once, on the first bootstrap of the new world, so that the first run starts in daylight. It is never set again.'),
     ];
 
     const server_settings = [
@@ -188,17 +283,22 @@ export function buildBootstrapPlan(config) {
             why: 'no spawn protection: the camp is at the world spawn, and the agents (never operators) must be able to place, break and open things there' },
         { file: 'bukkit.yml', key: 'settings.allow-end', value: String(config.rules.end), lines: ['settings:', `  allow-end: ${config.rules.end}`], favours_agents: false,
             why: 'the End is disabled (the key "allow-end" under "settings")' },
+        // seen on the real server: Paper answers several logins from one address within 4 seconds with
+        // "connection throttled! please wait before reconnecting." The agents all log in from one address.
+        { file: 'bukkit.yml', key: 'settings.connection-throttle', value: '-1', lines: ['  connection-throttle: -1'], favours_agents: false,
+            why: 'no login throttle (the key "connection-throttle" under "settings"): the agents all log in from one address' },
     ];
 
-    const clear_layers = new Set(areas.filter((area) => area.kind === 'clear').map((area) => area.min[1])).size;
+    const clear_layers = Math.min(BUILD_TOP, config.home[1] - 1 + CAMP_LEVELLING.clear_height) - (config.home[1] - 1);
     const favours = [
-        { id: 'levelled_camp', what: `The camp area was levelled by the operator before anything was placed: ${clear_layers} layers above the floor were cleared and the floor was laid with ${CAMP_LEVELLING.floor_block.replaceAll('_', ' ')}. Every block that changed is counted in this manifest, layer by layer. The agents levelled none of it.` },
+        { id: 'levelled_site', what: `The camp, the field and every plot were levelled by the operator before anything was placed: ${clear_layers} layers above the floor were cleared and the floor was laid with ${CAMP_LEVELLING.floor_block.replaceAll('_', ' ')}. What stood there before and what was laid is counted in this manifest, area by area. The agents levelled none of it.` },
+        { id: 'camp_defence', what: `The starter camp was lit and fenced by the operator: ${defence.torches.length} torches, so that no hostile mob can spawn inside it, and a fence with ${defence.gates.length} gates around it. The agents built none of it.` },
         { id: 'starter_camp', what: 'The starter camp was built by the operator: one shared double chest, a kits chest, four beds, a crafting table, a furnace and a 9 by 9 field of tilled farmland with water. The agents built none of it.' },
         ...(items.length > 0 ? [{ id: 'kits', what: `The kits chest was filled once by the operator with ${config.kits.map((stack) => `${stack.count} ${stack.item}`).join(', ')}. The agents restock it themselves from then on.` }] : []),
         { id: 'field', what: 'The field is Operator-built and was left bare: the operator tilled and watered it and sowed nothing. Every crop on it is agent-planted, from the seeds in the kit.' },
     ];
 
-    return { seed: seedText(config.seed), rules, server_settings, areas, floor, blocks, items, favours };
+    return { seed: seedText(config.seed), rules, server_settings, zones: levelZones(config), areas, floor, floors, blocks, items, favours };
 }
 
 // The text of server-settings.required.txt.

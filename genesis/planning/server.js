@@ -5,7 +5,12 @@
 // It builds the planner host (the broker with its model gate, queue and budget) around the
 // thin Ollama client, gives it the stores, and adds its socket handlers to the MindServer.
 //
-// NOT RUN AGAINST A REAL OLLAMA OR POSTGRES. The tests start it with stand-ins for both.
+// The database is optional (decided: its address comes from the launcher's environment, never
+// from the settings file). With one, the tables are made at start (idempotent), and the planner
+// call records, the goals and the checkpoint mirror are kept there; without one, or while it
+// cannot be reached, everything works from memory and files.
+//
+// NOT RUN AGAINST A REAL OLLAMA. The tests start it with stand-ins.
 
 import { createPlanningHost, createHostGoalStorage } from './host.js';
 import { createOllamaPlanner } from '../broker/ollama_planner.js';
@@ -37,7 +42,7 @@ export function memoryCallStore(max = 500) {
 // Injectable for the tests: setSocketExtension, createModel, createPool, clock, files.
 export async function startPlanning(planning, {
     event_sink = null, setSocketExtension, createModel = createOllamaPlanner, createPool, clock, files = null, warn = console.warn,
-    extensions = [], onGate = null, host: host_options = {},
+    extensions = [], onGate = null, host: host_options = {}, postgres_url = null, migrate = null, migrate_retry_ms = 30 * 1000,
 } = {}) {
     if (!setSocketExtension) ({ setSocketExtension } = await import('../../src/mindcraft/mindserver.js'));
     const log = (event, message) => warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event, message }));
@@ -51,12 +56,33 @@ export async function startPlanning(planning, {
 
     let calls = memoryCallStore();
     let durable = null;
-    if (typeof planning.postgres_url === 'string' && planning.postgres_url.length > 0) {
+    let checkpoint_mirror = null;
+    let migrate_timer = null;
+    const database = { configured: typeof postgres_url === 'string' && postgres_url.length > 0, connected: false, migrated: false, migrations: [] };
+    if (database.configured) {
         try {
             const pg = await import('../adapters/pg_stores.js');
-            const pool = await (createPool ?? pg.createPgPool)({ url: planning.postgres_url });
+            const pool = await (createPool ?? pg.createPgPool)({ url: postgres_url });
             calls = pg.pgCallStore(pool);
             durable = pg.pgGoalStorage(pool);
+            checkpoint_mirror = pg.pgCheckpointMirror(pool);
+            database.connected = true;
+            // the tables, made at start. A database that is not up yet is tried again: the stores above
+            // keep what they can meanwhile (the goal storage waits, a call record that fails is counted)
+            const timers = clock ?? { setTimeout, clearTimeout };
+            const tables = async () => {
+                migrate_timer = null;
+                try {
+                    database.migrations = await (migrate ?? pg.runStoreMigrations)(pool);
+                    database.migrated = true;
+                    warn(JSON.stringify({ ts: new Date().toISOString(), level: 'info', event: 'genesis_planning_database_ready', migrations: database.migrations }));
+                } catch (err) {
+                    log('genesis_planning_migrations_failed', `${String(err?.message ?? err)}; trying again in ${Math.round(migrate_retry_ms / 1000)} s`);
+                    migrate_timer = timers.setTimeout(tables, migrate_retry_ms);
+                    migrate_timer?.unref?.();
+                }
+            };
+            await tables();
         } catch (err) {
             // no database: calls and goals are kept in memory, and lost when this process ends
             warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event: 'genesis_planning_no_database', message: String(err?.message ?? err) }));
@@ -68,6 +94,7 @@ export async function startPlanning(planning, {
         calls,
         goal_storage: createHostGoalStorage({ durable, warn: (message) => log('genesis_goal_storage', message) }),
         ledger,
+        checkpoint_mirror,
         emit: emitter ? emitter.emit : () => {},
         onGate,
         ...(clock ? { clock } : {}),
@@ -82,5 +109,8 @@ export async function startPlanning(planning, {
     // the broker does not know whether the desktop is there: it asks once now, and keeps asking
     host.start().catch(() => {});
     host.ledger_file = ledger_file;
+    host.database = database;
+    const stop_host = host.stop;
+    host.stop = () => { if (migrate_timer !== null) (clock ?? { clearTimeout }).clearTimeout(migrate_timer); stop_host(); };
     return host;
 }

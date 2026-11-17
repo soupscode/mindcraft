@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { REPO_ROOT, captureConsole } from './helpers/stubs.mjs';
-import { buildSettings, checkProfiles, checkSettings, checkWorld, REQUIRED_BLOCKED_ACTIONS, MINDSERVER_HOSTS } from '../lib/config.js';
+import { buildSettings, applyEnvironment, checkDatabaseUrl, checkProfiles, checkSettings, checkWorld, REQUIRED_BLOCKED_ACTIONS, MINDSERVER_HOSTS, DATABASE_ENV, WORLD_FILE_ENV } from '../lib/config.js';
 import { WORLD_CONFIG } from './helpers/fake-world.mjs';
 import { bootstrappedWorld } from './helpers/bootstrapped.mjs';
 
@@ -26,9 +26,13 @@ const genesis_settings = readJson(path.join(GENESIS, 'settings.json'));
 
 // Runs `node <script>` with the recorder in place. `env` replaces the variables main.js reads.
 function run(script, env = {}, args = []) {
+    // (the launcher starts the agents 5 seconds apart on a real server; here they start at once, unless a test says otherwise)
+    if (script.endsWith('start.js') && env.SETTINGS_JSON && JSON.parse(env.SETTINGS_JSON).genesis_start_gap_ms === undefined) {
+        env = { ...env, SETTINGS_JSON: JSON.stringify({ ...JSON.parse(env.SETTINGS_JSON), genesis_start_gap_ms: 0 }) };
+    }
     const clean_env = { ...process.env };
     for (const key of ['SETTINGS_JSON', 'INSECURE_CODING', 'PROFILES', 'BLOCKED_ACTIONS', 'MINECRAFT_PORT',
-        'MINDSERVER_PORT', 'MAX_MESSAGES', 'NUM_EXAMPLES', 'LOG_ALL', 'GENESIS_SETTINGS_FILE']) {
+        'MINDSERVER_PORT', 'MAX_MESSAGES', 'NUM_EXAMPLES', 'LOG_ALL', 'GENESIS_SETTINGS_FILE', 'GENESIS_DATABASE_URL', 'GENESIS_WORLD_FILE']) {
         delete clean_env[key];
     }
     const child = spawnSync(process.execPath, ['--import', PRELOAD, script, ...args], {
@@ -273,7 +277,27 @@ test('checkSettings: the decision loop is off in the repo, and checked only when
     assert.deepEqual(checkSettings({}), []);
     assert.deepEqual(checkSettings({ genesis_planning: { enabled: false, model: 'nonsense' } }), []);
     assert.deepEqual(checkSettings({ genesis_planning: PLANNING_ON }), []);
-    assert.deepEqual(checkSettings({ genesis_planning: { ...PLANNING_ON, postgres_url: 'postgres://genesis:secret@192.0.2.30:5432/genesis' } }), []);
+    // decided: the database address (it holds a password) is never read from the settings file. A value there is
+    // refused, and the problem does not repeat it; the address comes from the launcher's environment
+    const in_file = checkSettings({ genesis_planning: { ...PLANNING_ON, postgres_url: 'postgres://genesis:PLACEHOLDER_PASSWORD@192.0.2.30:5432/genesis' } });
+    assert.equal(in_file.length, 1);
+    assert.match(in_file[0], /"genesis_planning\.postgres_url" is not read any more and must be empty: the database address comes from the environment variable GENESIS_DATABASE_URL/);
+    assert.ok(!in_file[0].includes('PLACEHOLDER_PASSWORD'), 'a problem repeated the address');
+    assert.equal(DATABASE_ENV, 'GENESIS_DATABASE_URL');
+    assert.deepEqual(checkDatabaseUrl(''), []);
+    assert.deepEqual(checkDatabaseUrl(undefined), []);
+    assert.deepEqual(checkDatabaseUrl('postgres://genesis:PLACEHOLDER_PASSWORD@postgres:5432/genesis'), []);
+    for (const wrong of ['mysql://db/genesis', 'postgres://POSTGRES_HOST:5432/genesis', 5432]) {
+        const problems = checkDatabaseUrl(wrong);
+        assert.equal(problems.length, 1, String(wrong));
+        assert.match(problems[0], /^environment: GENESIS_DATABASE_URL /);
+    }
+    assert.ok(!checkDatabaseUrl('mysql://user:PLACEHOLDER_PASSWORD@db/genesis')[0].includes('PLACEHOLDER_PASSWORD'));
+    // the world file may be named by the environment (no secret): it replaces the setting, and only that
+    assert.equal(WORLD_FILE_ENV, 'GENESIS_WORLD_FILE');
+    assert.equal(applyEnvironment({ genesis_planning: { ...PLANNING_ON } }, { GENESIS_WORLD_FILE: './bots/genesis_world/genesis.world.json' }).genesis_planning.world_file, './bots/genesis_world/genesis.world.json');
+    assert.deepEqual(applyEnvironment({ genesis_planning: { ...PLANNING_ON } }, {}).genesis_planning, PLANNING_ON);
+    assert.deepEqual(applyEnvironment({ host: 'h' }, { GENESIS_WORLD_FILE: 'x', GENESIS_DATABASE_URL: 'postgres://u:p@h/d' }), { host: 'h' });
 
     // switching on what the repo ships must first ask for the model's address and name, and for the operator's name
     const shipped_on = checkSettings({ genesis_planning: { ...genesis_settings.genesis_planning, enabled: true } });
@@ -364,11 +388,21 @@ test('launcher: planning stays off by default; switched on it needs the world co
     }
 
     // a database that is configured but whose client package is not installed: one log line, and everything still starts
-    const with_db = { genesis_planning: { ...on.genesis_planning, postgres_url: 'postgres://genesis@192.0.2.30:5432/genesis' } };
-    const no_pg = run('genesis/start.js', { GENESIS_SETTINGS_FILE: settings_file, SETTINGS_JSON: JSON.stringify(with_db) });
+    // (the address comes from the launcher's environment, never from the settings: it is not handed on to upstream)
+    const database = 'postgres://genesis:PLACEHOLDER_PASSWORD@192.0.2.30:5432/genesis';
+    const no_pg = run('genesis/start.js', { GENESIS_SETTINGS_FILE: settings_file, SETTINGS_JSON: JSON.stringify(on), GENESIS_DATABASE_URL: database });
     assert.equal(no_pg.status, 0, no_pg.stderr);
     assert.equal(no_pg.stderr.split('\n').filter((line) => line.includes('genesis_planning_no_database')).length, 1, no_pg.stderr);
     assert.deepEqual(no_pg.agents.map((a) => a.profile.name), NAMES);
+    assert.ok(!JSON.stringify(no_pg.init).includes('PLACEHOLDER_PASSWORD') && !JSON.stringify(no_pg.agents).includes('PLACEHOLDER_PASSWORD') && !no_pg.stdout.includes('PLACEHOLDER_PASSWORD'), 'the database address reached the settings or the output');
+    // --check says whether it is set, never what it is; an address that is none is a problem
+    const checked = run('genesis/start.js', { GENESIS_SETTINGS_FILE: settings_file, SETTINGS_JSON: JSON.stringify(on), GENESIS_DATABASE_URL: database }, ['--check']);
+    assert.equal(checked.status, 0, checked.stdout);
+    assert.equal(JSON.parse(checked.stdout).environment.GENESIS_DATABASE_URL, 'set (not shown)');
+    assert.ok(!checked.stdout.includes('PLACEHOLDER_PASSWORD'));
+    const wrong = run('genesis/start.js', { GENESIS_SETTINGS_FILE: settings_file, SETTINGS_JSON: JSON.stringify(on), GENESIS_DATABASE_URL: 'mysql://db/genesis' });
+    assert.equal(wrong.status, 1);
+    assert.match(wrong.stderr, /Genesis config problem: environment: GENESIS_DATABASE_URL must be a postgres:\/\/ address/);
 });
 
 test('packages: genesis/package.json lists the clients the adapters import, and the image installs them', () => {

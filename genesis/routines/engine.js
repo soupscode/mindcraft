@@ -20,6 +20,7 @@
 // Depends only on other Genesis files.
 
 import { incidentData } from '../recovery/incidents.js';
+import { PATROL_OPTION } from '../catalog/zones.js';
 
 export const ROUTINE_RULES = Object.freeze({
     min_health: 10,
@@ -34,6 +35,8 @@ export const ROUTINE_RULES = Object.freeze({
 });
 
 export const SHELTER = 'Shelter';
+// The phase and bounds are told again (an agent.state "routine" event) after this long when nothing changed.
+export const ROUTINE_REPORT_MS = 60 * 1000;
 
 export function createRoutine({ agent, definition, catalog, zones, clock, emit = () => null, rules: rule_overrides = {} } = {}) {
     const rules = { ...ROUTINE_RULES, ...rule_overrides };
@@ -52,6 +55,9 @@ export function createRoutine({ agent, definition, catalog, zones, clock, emit =
     let walk_home = false;      // after a death: home first
     let waiting = null;         // the option id of the goal the routine asked for and has not seen end
     let patrol_index = 0;
+    // patrol waypoints that could not be reached in this away period (decided: tried once, then skipped until the
+    // model has been back; kept in the checkpoint)
+    let unreachable = new Set();
 
     const tag = () => ({ name: definition.name, phase });
     const home = () => zones.home(agent);
@@ -60,6 +66,28 @@ export function createRoutine({ agent, definition, catalog, zones, clock, emit =
         const h = home();
         return Boolean(h) && Math.hypot(here.x - h.x, here.z - h.z) <= 4 && Math.abs(here.y - h.y) <= 4;
     };
+
+    // The routine's phase and bounds as an event (decided: the dashboard's Routines view shows them).
+    // Told when the phase, a breached bound, or the parked/away state changes, and at most once a minute otherwise.
+    let told = { key: null, at: -Infinity };
+    function tell(state, reasons) {
+        const now = clock.now();
+        const key = `${phase}|${reasons.join(',')}|${parked}|${away}|${deaths}`;
+        if (key === told.key && now - told.at < ROUTINE_REPORT_MS) return;
+        told = { key, at: now };
+        let bounds = null;
+        try {
+            const view = state.view;
+            bounds = {
+                daylight_ticks_left: view.dayTicksLeft(), health: view.health(), food: view.food(), free_slots: view.freeSlots(), breached: reasons,
+                home_distance: Math.round(zones.distanceFromHome(agent, view.position())),
+                limits: { min_health: rules.min_health, min_food: rules.min_food, min_free_slots: rules.min_free_slots, max_deaths: rules.max_deaths, range: definition.range ?? null },
+            };
+        } catch { /* a view that cannot be read: the phase is told without the numbers */ }
+        try {
+            emit('agent.state', { state: 'routine', detail: { name: definition.name, phase, phases, away, parked, deaths, bounds } }, { corr: null });
+        } catch { /* an event must never disturb the routine */ }
+    }
 
     // The bounds that do not hold right now.
     function breached(state) {
@@ -119,6 +147,7 @@ export function createRoutine({ agent, definition, catalog, zones, clock, emit =
                 points: () => zones.patrol(agent),
                 index: () => patrol_index,
                 advance: () => { patrol_index = (patrol_index + 1) % Math.max(1, zones.patrol(agent).length); },
+                blocked: (index) => unreachable.has(index),
             },
         };
         return ctx;
@@ -152,51 +181,64 @@ export function createRoutine({ agent, definition, catalog, zones, clock, emit =
         return null;
     }
 
+    // What the routine does next (see the top of this file).
+    function pickNext(state) {
+        const ctx = context(state);
+        if (parked) {
+            if (!atHome(state)) {
+                const option = ctx.option('travel', { place: 'home' });
+                if (option) return goal(option, 'parked after a second death');
+            }
+            return idle(rules.parked_idle_ms, 'parked at home after a second death');
+        }
+        if (walk_home) {
+            // after a death: home first, then the round starts again at its first phase (the kit)
+            if (!atHome(state)) {
+                const option = ctx.option('travel', { place: 'home' });
+                if (option) return goal(option, 'walking home after a death');
+            }
+            walk_home = false;
+            enter(first);
+        }
+        const reasons = breached(state);
+        if (reasons.length > 0) {
+            if (phase !== SHELTER) stats.shelters++;
+            enter(SHELTER);
+            return shelter(ctx, state, reasons) ?? idle(rules.idle_ms, `sheltering (${reasons.join(', ')})`);
+        }
+        // one look at every phase of the round, starting (and ending) with the one the routine is in
+        for (let looked = 0; looked <= phases.length; looked++) {
+            const spec = definition.phases[phases.indexOf(phase)];
+            if (phase === SHELTER) {
+                const home_goal = shelter(ctx, state, []);
+                if (home_goal) return home_goal;
+            } else if (picked_in_phase < (spec.max_goals ?? 1)) {
+                const picked = spec.pick(ctx);
+                if (picked) return goal(picked.option, picked.why);
+            }
+            nextPhase();
+        }
+        return idle(rules.idle_ms, 'nothing to do this round');
+    }
+
     return {
         name: definition.name,
         phases: () => [...phases],
         next(state) {
-            const ctx = context(state);
-            if (parked) {
-                if (!atHome(state)) {
-                    const option = ctx.option('travel', { place: 'home' });
-                    if (option) return goal(option, 'parked after a second death');
-                }
-                return idle(rules.parked_idle_ms, 'parked at home after a second death');
-            }
-            if (walk_home) {
-                // after a death: home first, then the round starts again at its first phase (the kit)
-                if (!atHome(state)) {
-                    const option = ctx.option('travel', { place: 'home' });
-                    if (option) return goal(option, 'walking home after a death');
-                }
-                walk_home = false;
-                enter(first);
-            }
-            const reasons = breached(state);
-            if (reasons.length > 0) {
-                if (phase !== SHELTER) stats.shelters++;
-                enter(SHELTER);
-                return shelter(ctx, state, reasons) ?? idle(rules.idle_ms, `sheltering (${reasons.join(', ')})`);
-            }
-            // one look at every phase of the round, starting (and ending) with the one the routine is in
-            for (let looked = 0; looked <= phases.length; looked++) {
-                const spec = definition.phases[phases.indexOf(phase)];
-                if (phase === SHELTER) {
-                    const home_goal = shelter(ctx, state, []);
-                    if (home_goal) return home_goal;
-                } else if (picked_in_phase < (spec.max_goals ?? 1)) {
-                    const picked = spec.pick(ctx);
-                    if (picked) return goal(picked.option, picked.why);
-                }
-                nextPhase();
-            }
-            return idle(rules.idle_ms, 'nothing to do this round');
+            const choice = pickNext(state);
+            let reasons = [];
+            try { reasons = breached(state); } catch { /* told without them */ }
+            tell(state, reasons);
+            return choice;
         },
         // A goal the routine asked for has ended (completed, failed, dropped, abandoned, yielded).
         goalEnded({ option_id, outcome }) {
             if (waiting === option_id) waiting = null;
-            if (outcome === 'failed' || outcome === 'dropped') skip.add(option_id);
+            if (outcome === 'failed' || outcome === 'dropped') {
+                skip.add(option_id);
+                const waypoint = PATROL_OPTION.exec(String(option_id ?? ''));
+                if (waypoint) unreachable.add(Number(waypoint[1]));
+            }
         },
         // The agent died at `point`. Returns 'restart' or 'parked'.
         died(point) {
@@ -230,19 +272,21 @@ export function createRoutine({ agent, definition, catalog, zones, clock, emit =
             return 'restart';
         },
         // A model-away period begins or ends. Ending it forgives the deaths and keeps the phase.
-        awayStarted() { if (!away) { away = true; deaths = 0; avoid = []; parked = false; } },
+        awayStarted() { if (!away) { away = true; deaths = 0; avoid = []; parked = false; unreachable = new Set(); } },
         modelReturned() {
             if (away) stats.yields++;
-            away = false; deaths = 0; avoid = []; parked = false;
+            away = false; deaths = 0; avoid = []; parked = false; unreachable = new Set();
         },
         isAway: () => away,
         isParked: () => parked,
         deaths: () => deaths,
         avoid: () => avoid.map((area) => ({ ...area })),
         // The checkpoint's "routine": { name, phase }.
-        snapshot: () => tag(),
+        snapshot: () => ({ ...tag(), ...(unreachable.size > 0 ? { unreachable: [...unreachable].sort((a, b) => a - b) } : {}) }),
+        unreachable: () => [...unreachable].sort((a, b) => a - b),
         restore(saved) {
             if (saved?.name === definition.name && phases.includes(saved.phase)) { phase = saved.phase; picked_in_phase = 0; }
+            if (saved?.name === definition.name && Array.isArray(saved.unreachable)) unreachable = new Set(saved.unreachable.filter(Number.isInteger));
         },
         phase: () => phase,
         stats: () => ({ ...stats, phase, deaths_this_period: deaths, parked, away }),

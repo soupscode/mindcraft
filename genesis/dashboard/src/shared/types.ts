@@ -80,6 +80,37 @@ export interface AgentView {
     detour: boolean;
     last_state: string | null;
     last_seen: string | null;
+    routine: RoutineView | null;        // the role routine's phase and bounds, from its own event
+    skin: { state: 'applied' | 'failed' | 'cleared'; at: string; reason: string | null } | null;   // from the skin service's events
+}
+
+// The role routine as its "routine" event says it (genesis/routines/engine.js).
+export interface RoutineView {
+    name: string;
+    phase: string;
+    phases: string[];
+    away: boolean;
+    parked: boolean;
+    deaths: number;
+    bounds: {
+        daylight_ticks_left: number; health: number; food: number; free_slots: number; home_distance: number | null; breached: string[];
+        limits: { min_health: number; min_food: number; min_free_slots: number; max_deaths: number; range: number | null };
+    } | null;
+    at: string;
+}
+
+// The site and the bootstrap, from the two events of the name "world" (genesis/world/announce.js).
+export interface WorldView {
+    zones: Record<string, any> | null;
+    zones_at: string | null;
+    bootstrap: Record<string, any> | null;
+    bootstrap_at: string | null;
+}
+
+// Agent processes that wait for a Minecraft server that is down (the supervisor's own lines).
+export interface ServerView {
+    waiting: Record<string, { since: string; attempt: number; message: string }>;
+    last_back: string | null;
 }
 
 export interface IncidentStep {
@@ -150,6 +181,8 @@ export interface LiveState {
     incidents: Incident[];
     messages: MessageView[];
     decisions: DecisionView[];
+    world: WorldView;
+    server: ServerView;
 }
 
 export interface Health {

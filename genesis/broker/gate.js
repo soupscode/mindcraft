@@ -137,6 +137,9 @@ export function createModelGate({ probe, clock = { setTimeout, clearTimeout }, e
 
     return {
         state: () => state,
+        // Says the state as it is, without changing it: once at start, so that a reader that only
+        // knows the events never has to show "unknown" (decided).
+        report(detail = {}) { announce(state, { reason: state === GATE_STATES.AWAY ? away_reason : null, ...detail }); return state; },
         isAvailable: () => state === GATE_STATES.AVAILABLE,
         awayReason: () => (state === GATE_STATES.AWAY ? away_reason : null),
         desktopAvailable,

@@ -28,6 +28,15 @@
 // exists (node genesis/world/bootstrap.js writes it once the starter camp is built and
 // checked). It also needs the operator's Minecraft username under "operators".
 //
+// GENESIS_WORLD_FILE names the world file instead of the setting (in Docker: a path in ./bots).
+//
+// The database (optional): GENESIS_DATABASE_URL, a postgres:// address with its password, in the
+// launcher's environment (the same .env file as the other secrets), NEVER in the settings file.
+// When it is set, the planner call records, the goal store and the checkpoint mirror are kept
+// there (the tables are made at start, genesis/store/migrations); it is the dashboard's database,
+// so the Decision trace shows the context, the options offered, the latency and the tokens of
+// every call. Without it everything works from memory and files, as before.
+//
 // Recovery ("genesis_recovery" in the settings file) goes with planning: it is on whenever
 // planning is, unless it says "enabled": false. Then a supervisor in this process restarts
 // an agent process that ended (after 5 seconds, 30 seconds, 2 minutes and 5 minutes; after 5
@@ -46,15 +55,22 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildSettings, checkProfiles, checkSettings, checkWorld, checkBootstrap } from './lib/config.js';
+import { buildSettings, applyEnvironment, checkDatabaseUrl, checkProfiles, checkSettings, checkWorld, checkBootstrap, DATABASE_ENV, WORLD_FILE_ENV } from './lib/config.js';
 
 const repo_root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(repo_root); // upstream resolves profiles and ./bots relative to the working directory
 
 const settings_file = process.env.GENESIS_SETTINGS_FILE || path.join(repo_root, 'genesis', 'settings.json');
-const settings = buildSettings(JSON.parse(readFileSync(settings_file, 'utf8')), process.env.SETTINGS_JSON, process.env.GENESIS_LOAD_MEMORY);
+const settings = applyEnvironment(buildSettings(JSON.parse(readFileSync(settings_file, 'utf8')), process.env.SETTINGS_JSON, process.env.GENESIS_LOAD_MEMORY), process.env);
+// The database address holds a password: it is read here, kept in this process only, and taken out of
+// the environment before upstream starts the agent processes. It never goes into the settings.
+const database_url = process.env[DATABASE_ENV] || '';
+delete process.env[DATABASE_ENV];
+// the same for the RCON password (the skin service uses it): this process only
+const rcon_password = process.env.GENESIS_RCON_PASSWORD || '';
+delete process.env.GENESIS_RCON_PASSWORD;
 const world_problems = checkWorld(settings, repo_root);
-const problems = [...checkSettings(settings), ...checkProfiles(settings, repo_root), ...world_problems,
+const problems = [...checkSettings(settings), ...checkDatabaseUrl(database_url), ...checkProfiles(settings, repo_root), ...world_problems,
     // the bootstrap is only looked at once the world file itself reads cleanly
     ...(world_problems.length === 0 ? checkBootstrap(settings, repo_root) : [])];
 
@@ -62,11 +78,15 @@ const problems = [...checkSettings(settings), ...checkProfiles(settings, repo_ro
 // read by main.js, or through allow_insecure_coding. Remove the first, the second is forced to false above.
 // buildSettings also forces pathfinding_no_dig on: agents never dig to get somewhere.
 delete process.env.INSECURE_CODING;
+// The agents log in a few seconds apart (seen on the real server: Paper answers several logins from one
+// address within 4 seconds with "connection throttled"). main.js reads this; 0 starts them all at once.
+if (settings.genesis_planning?.enabled === true && settings.genesis_start_gap_ms === undefined) settings.genesis_start_gap_ms = 5000;
 process.env.SETTINGS_JSON = JSON.stringify(settings);
 
 const check_only = process.argv.includes('--check');
 if (check_only) {
-    console.log(JSON.stringify({ settings_file, settings, problems }, null, 2));
+    const environment = { [DATABASE_ENV]: database_url ? 'set (not shown)' : 'not set', [WORLD_FILE_ENV]: process.env[WORLD_FILE_ENV] || 'not set' };
+    console.log(JSON.stringify({ settings_file, environment, settings, problems }, null, 2));
     process.exit(problems.length > 0 ? 1 : 0);
 }
 if (problems.length > 0) {
@@ -81,6 +101,11 @@ if (settings.genesis_events?.enabled === true) {
 }
 if (settings.genesis_planning?.enabled === true) {
     const event_sink = event_hub ? event_hub.accept : null;
+    if (event_sink) {
+        // the site, the zones and the summary of the bootstrap manifest, as events (the dashboard's World view)
+        const { announceWorld } = await import('./world/announce.js');
+        announceWorld({ planning: settings.genesis_planning, repo_root, event_sink });
+    }
     const extensions = [];
     let recovery = null;
     if (settings.genesis_recovery?.enabled !== false) {
@@ -97,10 +122,21 @@ if (settings.genesis_planning?.enabled === true) {
         relay = startRelay(settings.genesis_relay ?? {}, { agents: names, event_sink });
         extensions.push((socket, helpers) => relay.attach(socket, helpers));
     }
+    // agent skins: the dashboard hands a skin over, this process tells SkinsRestorer over RCON (never an agent)
+    {
+        const { startSkins, rconOnDemand } = await import('./skins/server.js');
+        const names = settings.profiles.map((profile) => JSON.parse(readFileSync(path.resolve(repo_root, profile), 'utf8')).name);
+        const skins = startSkins({
+            event_sink, agents: names,
+            rcon: rcon_password ? rconOnDemand({ host: process.env.GENESIS_RCON_HOST || settings.host, port: Number(process.env.GENESIS_RCON_PORT || 25575), password: rcon_password }) : null,
+        });
+        extensions.push((socket, helpers) => skins.attach(socket, helpers));
+    }
     // the planner broker lives in this (the MindServer's) process; the agents reach it over their sockets
     const { startPlanning } = await import('./planning/server.js');
     const host = await startPlanning(settings.genesis_planning, {
         event_sink, extensions, onGate: recovery ? (state, detail) => recovery.onGate(state, detail) : null,
+        postgres_url: database_url || null,
     });
     // the model writes the spoken lines through the broker, and the chest ledger follows what the agents agree on
     if (relay) relay.bind({ broker: host.broker, ledger: host.ledger, ledgerUpdated: () => host.ledgerUpdated() });

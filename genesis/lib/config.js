@@ -25,10 +25,16 @@ export const REQUIRED_BLOCKED_ACTIONS = ['!newAction', '!startConversation', '!e
 export const PLACEHOLDERS = ['GENESIS_MODEL', 'DESKTOP_IP'];
 // "Not filled in yet" for the Redis address in genesis_events.redis_url.
 export const REDIS_PLACEHOLDER = 'REDIS_HOST';
-// "Not filled in yet" for the Postgres address in genesis_planning.postgres_url.
+// "Not filled in yet" for the host of the Postgres address (the environment variable DATABASE_ENV).
 export const POSTGRES_PLACEHOLDER = 'POSTGRES_HOST';
 // "Not filled in yet" for the operator's Minecraft username in genesis_planning.operators.
 export const OPERATOR_PLACEHOLDER = 'OPERATOR_NAME';
+// The launcher's environment variable with the agents' Postgres address (it holds the password):
+// planner call records, the goal store and the checkpoint mirror go there when it is set.
+export const DATABASE_ENV = 'GENESIS_DATABASE_URL';
+// The launcher's environment variable that says where the world file is (it replaces
+// genesis_planning.world_file; no secret). In Docker it points into the mounted ./bots folder.
+export const WORLD_FILE_ENV = 'GENESIS_WORLD_FILE';
 // What a Minecraft Java username looks like.
 export const MINECRAFT_NAME = /^[A-Za-z0-9_]{3,16}$/;
 
@@ -62,6 +68,26 @@ export function buildSettings(file_settings, env_settings_json, load_memory_env)
     }
     settings.blocked_actions = blocked;
     return settings;
+}
+
+// What the launcher's environment may put into the settings: only what is no secret.
+// Returns the settings (changed in place).
+export function applyEnvironment(settings, env = {}) {
+    const world_file = env[WORLD_FILE_ENV];
+    const planning = settings.genesis_planning;
+    if (typeof world_file === 'string' && world_file.length > 0 && planning !== null && typeof planning === 'object' && !Array.isArray(planning)) {
+        settings.genesis_planning = { ...planning, world_file };
+    }
+    return settings;
+}
+
+// Checks the database address of the launcher's environment. Empty or missing is fine: everything
+// then works without a database. A problem never repeats the address (it holds a password).
+export function checkDatabaseUrl(url) {
+    if (url === undefined || url === null || url === '') return [];
+    if (typeof url !== 'string' || !/^postgres(ql)?:\/\/[^/]+/.test(url)) return [`environment: ${DATABASE_ENV} must be a postgres:// address, or empty for none`];
+    if (url.includes(POSTGRES_PLACEHOLDER)) return [`environment: ${DATABASE_ENV} still holds a placeholder (${POSTGRES_PLACEHOLDER})`];
+    return [];
 }
 
 // Checks the settings that are not about profiles. Returns a list of problems (empty = fine).
@@ -210,13 +236,12 @@ function checkPlanningSettings(planning) {
             problems.push(`settings: "genesis_planning.${key}" must be a path, or left out for the default`);
         }
     }
+    // Decided: the database address holds a password and is never read from the settings file. It
+    // comes from the launcher's environment (DATABASE_ENV below). A value here is refused, not ignored,
+    // so that a password never sits in a tracked file by mistake. (Its text is not repeated.)
     const postgres = planning.postgres_url;
     if (postgres !== undefined && postgres !== null && postgres !== '') {
-        if (typeof postgres !== 'string' || !/^postgres(ql)?:\/\/[^/]+/.test(postgres)) {
-            problems.push('settings: "genesis_planning.postgres_url" must be a postgres:// address, or empty for none');
-        } else if (postgres.includes(POSTGRES_PLACEHOLDER)) {
-            problems.push(`settings: "genesis_planning.postgres_url" still holds a placeholder (${postgres})`);
-        }
+        problems.push(`settings: "genesis_planning.postgres_url" is not read any more and must be empty: the database address comes from the environment variable ${DATABASE_ENV} of the launcher (the same .env file as the other secrets)`);
     }
     return problems;
 }

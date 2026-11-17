@@ -71,8 +71,10 @@ export const CATALOG_DEFAULTS = Object.freeze({
     free_slots_needed: 3,   // gather_blocks and harvest_replant
     max_options: 16,        // how many options one offer holds at most
     per_skill: { travel: 5, gather_blocks: 3, craft_item: 3, store_items: 2, fetch_items: 2, harvest_replant: 1, sow_field: 1, build_blueprint: 1, smelt_item: 2, give_items: 2,
-        ask_agent: 2, offer_agent: 1 }, // proposed: how many messages the planner is offered to send at a time
+        ask_agent: 3, offer_agent: 1 }, // proposed: how many messages the planner is offered to send at a time
     ask_count: 8,           // proposed: items one ask_agent goal asks for at most
+    ask_any_count: 4,       // proposed: items asked for when it is not the agent's own work that is short of them
+    ask_rotate_ms: 10 * 60 * 1000, // proposed: which of those items come up first changes this often
     offer_count: 8,         // proposed: items one offer_agent goal offers at most
     handoff_distance: 16,   // proposed: within this many blocks items are handed over directly, further away they go through the shared chest
     handoff_chest: 'shared',

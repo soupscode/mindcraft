@@ -6,7 +6,9 @@
 //
 // Goal: { id, title, option_id }   title up to 60 chars; option_id is the planner option
 //                                   the goal came from, or null
-// Change record: { id, agent, scope, before, after, reason, source, call_id, ts }
+// Change record: { id, agent, scope, before, after, reason, source, call_id, ts, thought? }
+//   thought: the model's own sentence, on a change the planner made with a reply that had one
+//   (decided: a field of its own; the reason is the reason, and nobody has to parse it out)
 //
 // Storage is injected:
 //   load(agent) -> Promise<{ long_term: [...], short_term: [...] } | null>
@@ -29,6 +31,7 @@ export function goalChangedEventData(change) {
     return {
         scope: change.scope, before: change.before, after: change.after,
         reason: change.reason, source: change.source, call_id: change.call_id,
+        ...(typeof change.thought === 'string' && change.thought.length > 0 ? { thought: change.thought } : {}),
     };
 }
 
@@ -86,7 +89,7 @@ export function createGoalStore({ storage, clock = { now: Date.now }, ids = null
     }
 
     // `next` is the new list, or a function (current list) -> new list.
-    async function apply(agent, scope, next, { reason, source, call_id = null } = {}) {
+    async function apply(agent, scope, next, { reason, source, call_id = null, thought = null } = {}) {
         if (typeof agent !== 'string' || agent.trim().length === 0) return refusal('bad_agent', 'agent must be a non-empty string');
         if (!GOAL_SCOPES.includes(scope)) return refusal('bad_scope', `scope must be one of ${GOAL_SCOPES.join(', ')}`);
         if (typeof reason !== 'string' || reason.trim().length === 0) {
@@ -120,6 +123,7 @@ export function createGoalStore({ storage, clock = { now: Date.now }, ids = null
         const change = {
             id: nextId(), agent, scope, before: copy(before), after: copy(cleaned.goals),
             reason: reason.trim(), source, call_id, ts: new Date(clock.now()).toISOString(),
+            ...(typeof thought === 'string' && thought.trim().length > 0 ? { thought: thought.trim() } : {}),
         };
         const new_state = { ...state, [scope]: cleaned.goals };
         try {
@@ -152,7 +156,7 @@ export function createGoalStore({ storage, clock = { now: Date.now }, ids = null
                 return refusal('storage_error', `goals could not be loaded: ${err?.message ?? err}`);
             }
         },
-        // meta: { reason, source, call_id }
+        // meta: { reason, source, call_id, thought? }
         setLongTerm: (agent, goals, meta) => change(agent, 'long_term', goals, meta),
         setShortTerm: (agent, goals, meta) => change(agent, 'short_term', goals, meta),
         // Adds a goal at the end of the short-term queue. Refused when the queue is full.

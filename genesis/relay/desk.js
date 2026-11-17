@@ -53,9 +53,8 @@ import { DECISIONS, DECISION_REASON_MAX } from './decisions.js';
 export const DESK_RULES = Object.freeze({
     food_reserve: KIT_FOOD.take,   // proposed: of its food an agent keeps this many (what a kit holds)
     send_timeout_ms: 5000,
-    decide_timeout_ms: 60 * 1000,  // proposed: how long the desk waits for the model's decision before the code rule decides
-                                   // (the asker's line, the wait for a busy model and the call itself come to 50 seconds
-                                   // at most; a request expires after 120)
+    decide_timeout_ms: 120 * 1000, // decided: the desk waits for the model's decision as long as the message lives (120 seconds;
+                                   // it was 60). A message that expires meanwhile is not answered at all
 });
 
 // The messages a goal of the planner may send (ask_agent, offer_agent), and nothing else.

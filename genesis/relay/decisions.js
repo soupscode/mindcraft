@@ -9,10 +9,12 @@
 //
 // and nothing else: the model decides yes or no, never what is handed over, how many, or to
 // whom. Those stay the structured content of the message. A decision the model made is
-// recorded with source "planner". When the model is away, the limit is spent, the call fails
-// or the reply does not validate, the code rule of the message desk decides instead
-// (genesis/relay/desk.js) and is recorded with source "routine". A contested chest claim
-// goes the same way.
+// recorded with source "planner". Decided: a request or an offer WAITS for the model's answer
+// up to the message's expiry (120 seconds) when the model is busy with another call. When the
+// model is away, the limit is spent, the call fails or the reply does not validate, the code
+// rule of the message desk decides instead (genesis/relay/desk.js) and is recorded with source
+// "routine"; a message whose life ends while it waits for a busy model expires unanswered. A
+// contested chest claim goes the same way.
 //
 // The model's reason is recorded (the call record, the agent's own event). It is never put
 // into a message another agent receives: nothing between agents is free text.
@@ -31,7 +33,8 @@ export const DECISION_LIMITS = Object.freeze({
     max_calls_per_hour: 20,   // proposed: decisions the model makes per agent per real hour; after that the code rule decides
     max_tokens: 80,           // proposed: the model's own token limit for a decision (Ollama's num_predict)
     timeout_ms: 15 * 1000,    // proposed: a decision that takes longer is not waited for
-    wait_ms: 20 * 1000,       // proposed: how long a decision waits for a model that is busy with another call
+    wait_ms: 120 * 1000,      // decided: a decision waits for a model that is busy with another call up to the message's expiry
+                              // (120 seconds; it was 20, then the code rule decided). A smaller value here is a shorter wait
 });
 
 export const DECISION_REASON_MAX = 140; // decided: the reason is at most 140 characters

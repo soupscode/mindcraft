@@ -3,6 +3,7 @@
 // History comes from Postgres. While Postgres is down the same endpoints answer from the
 // live view in memory and say so ("source": "memory"), so the pages keep working.
 
+import { SKIN_LIMITS, type Skins } from './skins.js';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { applyEvent, emptyState, foldIncidents } from '../shared/fold.js';
 import type { Entry, GenesisEvent } from '../shared/types.js';
@@ -19,6 +20,8 @@ export interface Controls {
 }
 
 export interface AppDeps {
+    allow?: string[];
+    skins?: Skins | null;
     live: Live;
     store: Store;
     controls: Controls | null;
@@ -49,9 +52,12 @@ function matches(entry: Entry, query: EventQuery): boolean {
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const { live, store, controls, roster } = deps;
+    const skins = deps.skins ?? null;
     const clock = deps.clock ?? { now: Date.now };
     const app = Fastify({ logger: false, bodyLimit: 64 * 1024 });
     app.removeContentTypeParser('text/plain'); // only JSON bodies are read (a plain HTML form cannot send one)
+    // ... and a PNG, for an agent's skin: taken as bytes, never parsed here (the same size cap applies)
+    app.addContentTypeParser('image/png', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
 
     // Events, newest first: Postgres, or the ring in memory while Postgres is down.
     async function events(query: EventQuery): Promise<{ source: 'postgres' | 'memory'; entries: Entry[] }> {
@@ -61,6 +67,19 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
             const held = live.ring().reverse().filter((entry) => matches(entry, query));
             return { source: 'memory', entries: held.slice(0, query.limit) };
         }
+    }
+
+    // An optional allow-list (the env file's GENESIS_DASHBOARD_ALLOW): with one, only those addresses and
+    // this machine itself are answered. UNVERIFIED on the VM: which address the container sees for a
+    // client behind Docker's published port; a refusal names the address that was seen.
+    const allow = (deps.allow ?? []).filter(Boolean);
+    const local = (ip: string) => ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    if (allow.length > 0) {
+        app.addHook('onRequest', async (request, reply) => {
+            const ip = request.ip.replace(/^::ffff:/, '');
+            if (local(request.ip) || allow.includes(ip)) return;
+            return reply.code(403).send({ error: `this address is not on the dashboard's allow-list (seen: ${ip})` });
+        });
     }
 
     // The panel has no password (decided). A page of another site still cannot use it from the
@@ -183,6 +202,33 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         if (!body || typeof body !== 'object' || Array.isArray(body)) return reply.code(400).send({ ok: false, error: 'a JSON object is expected' });
         const result = await controls.execute(body as Command, originOf(request.ip));
         return reply.code(result.ok ? 200 : 409).send(result);
+    });
+
+    // ---- the agents' skins (the operator uploads them; the skin service applies them) ----
+    app.get('/api/skins', async (_request, reply) => {
+        if (!skins) return reply.code(503).send({ error: 'skins are not configured' });
+        try { return { limits: SKIN_LIMITS, skins: await skins.list() }; } catch (err: any) { return reply.code(503).send({ error: String(err?.message ?? err) }); }
+    });
+    app.get('/api/skins/:agent/image', async (request, reply) => {
+        if (!skins) return reply.code(503).send({ error: 'skins are not configured' });
+        const png = await skins.image(String((request.params as any).agent)).catch(() => null);
+        if (!png) return reply.code(404).send({ error: 'no skin is set for this agent' });
+        return reply.header('content-type', 'image/png').header('cache-control', 'no-store').send(png);
+    });
+    app.put('/api/skins/:agent', async (request, reply) => {
+        if (!skins) return reply.code(503).send({ ok: false, error: 'skins are not configured' });
+        if (!String(request.headers['content-type'] ?? '').startsWith('image/png')) return reply.code(415).send({ ok: false, error: 'send the PNG file as the body, with content-type image/png' });
+        try {
+            const result = await skins.upload(String((request.params as any).agent), request.body, String((request.query as any)?.variant ?? 'classic'));
+            return result.ok ? result : reply.code(result.status).send({ ok: false, error: result.error });
+        } catch (err: any) { return reply.code(503).send({ ok: false, error: String(err?.message ?? err) }); }
+    });
+    app.delete('/api/skins/:agent', async (request, reply) => {
+        if (!skins) return reply.code(503).send({ ok: false, error: 'skins are not configured' });
+        try {
+            const result = await skins.clear(String((request.params as any).agent));
+            return result.ok ? result : reply.code(result.status).send({ ok: false, error: result.error });
+        } catch (err: any) { return reply.code(503).send({ ok: false, error: String(err?.message ?? err) }); }
     });
 
     if (deps.public_dir) {

@@ -17,22 +17,55 @@ function rig() {
     return { clock, state, feed };
 }
 
-test('the thought is the model\'s own sentence from the planner\'s goal change, with its time', () => {
+test('the thought is the `thought` field of the planner\'s goal change (decided), never parsed out of a reason', () => {
     const { state, feed, clock } = rig();
     const g1 = { id: 'g1', title: 'Deliver 24 oak logs', option_id: 'give:Arthur:oak_log:24' };
     const g2 = { id: 'g2', title: 'Return to the ravine', option_id: 'explore_site:ravine' };
-    feed('Felix', 'goal.changed', { scope: 'short_term', before: [g1], after: [], reason: 'replaced by a new plan (asked because: goal_complete): Debt paid. Back to the ravine.', source: 'planner', call_id: 'c7' });
-    assert.equal(state.agents.Felix.thought?.text, 'Debt paid. Back to the ravine.');
+    const thought = 'Debt paid. Back to the ravine.';
+    feed('Felix', 'goal.changed', { scope: 'short_term', before: [g1], after: [], reason: `replaced by a new plan (asked because: goal_complete): ${thought}`, source: 'planner', call_id: 'c7', thought });
+    assert.equal(state.agents.Felix.thought?.text, thought);
     clock.advance(1000);
-    const event = feed('Felix', 'goal.changed', { scope: 'short_term', before: [], after: [g2], reason: 'Debt paid. Back to the ravine.', source: 'planner', call_id: 'c7' });
-    assert.deepEqual(state.agents.Felix.thought, { text: 'Debt paid. Back to the ravine.', at: event.ts, call_id: 'c7' });
+    const event = feed('Felix', 'goal.changed', { scope: 'short_term', before: [], after: [g2], reason: thought, source: 'planner', call_id: 'c7', thought });
+    assert.deepEqual(state.agents.Felix.thought, { text: thought, at: event.ts, call_id: 'c7' });
+    // a reason alone is not a thought any more: nothing is parsed out of it
+    clock.advance(1000);
+    feed('Felix', 'goal.changed', { scope: 'short_term', before: [g2], after: [g1], reason: 'A sentence that only sits in the reason.', source: 'planner', call_id: 'c8' });
+    assert.equal(state.agents.Felix.thought?.text, thought);
     // what code wrote is never shown as a thought
-    feed('Felix', 'goal.changed', { scope: 'short_term', before: [g2], after: [], reason: 'completed', source: 'executor', call_id: 'c7' });
+    feed('Felix', 'goal.changed', { scope: 'short_term', before: [g1], after: [], reason: 'completed', source: 'executor', call_id: 'c7' });
     feed('Felix', 'goal.changed', { scope: 'short_term', before: [], after: [g1], reason: 'routine: gather near home', source: 'routine', call_id: null });
-    assert.equal(state.agents.Felix.thought?.text, 'Debt paid. Back to the ravine.');
-    assert.equal(thoughtOf('the planner chose'), null, 'the placeholder the planner writes for an empty thought is not a thought');
+    assert.equal(state.agents.Felix.thought?.text, thought);
+    assert.deepEqual([thoughtOf({ thought: '  ' }), thoughtOf({ reason: 'the planner chose' }), thoughtOf(null), thoughtOf({ thought: ' Yes. ' })], [null, null, null, 'Yes.']);
     assert.deepEqual(state.goal_changes[0].added, ['Deliver 24 oak logs']);
     assert.equal(state.goal_changes[0].source, 'routine');
+});
+
+test('long-term goals, the routine\'s phase and bounds, the world, the server wait and the skins are read from their own events', () => {
+    const { state, feed } = rig();
+    // decided: long-term goals are emitted as events, also when none has changed
+    feed('Mira', 'agent.state', { state: 'goals', detail: { long_term: [{ id: 'l1', title: 'Feed the village', option_id: null }], short_term: [{ id: 's1', title: 'Sow the field', option_id: 'sow_field:wheat_seeds' }] } });
+    assert.deepEqual([state.agents.Mira.long_term.map((goal) => goal.title), state.agents.Mira.short_term.map((goal) => goal.title)], [['Feed the village'], ['Sow the field']]);
+    // the routine's phase and bounds
+    const bounds = { daylight_ticks_left: 4200, health: 18, food: 7, free_slots: 20, home_distance: 12, breached: ['food'], limits: { min_health: 10, min_food: 8, min_free_slots: 3, max_deaths: 2, range: 32 } };
+    const told = feed('Mira', 'agent.state', { state: 'routine', detail: { name: 'Field round', phase: 'Shelter', phases: ['Kit check', 'Harvest', 'Bake', 'Stock', 'Shelter'], away: true, parked: false, deaths: 0, bounds } });
+    assert.deepEqual(state.agents.Mira.routine, { name: 'Field round', phase: 'Shelter', phases: ['Kit check', 'Harvest', 'Bake', 'Stock', 'Shelter'], away: true, parked: false, deaths: 0, bounds, at: told.ts });
+    assert.equal(state.agents.Mira.last_state, null, 'a report is not something that happened to the agent');
+    // the world: two events of the service "world", which never becomes an agent card
+    feed('world', 'agent.state', { state: 'world_zones', detail: { home: [40, 65, -8], floor_y: 64, plots: [{ id: 'arthur-1', owner: 'Arthur' }] } });
+    feed('world', 'agent.state', { state: 'world_bootstrap', detail: { verified: true, site: { method: 'automatic' }, levelling: { blocks_changed: 519 } } });
+    assert.deepEqual([state.world.zones?.home, state.world.bootstrap?.site.method, state.world.bootstrap?.levelling.blocks_changed], [[40, 65, -8], 'automatic', 519]);
+    // the supervisor's plain line: an agent process waits for the Minecraft server, and comes back
+    feed('supervisor', 'agent.state', { state: 'server_down_wait', detail: { agent: 'Nova', attempt: 3, delay_ms: 20000, waited_ms: 15000, message: 'Nova cannot reach the Minecraft server' } });
+    assert.deepEqual(Object.keys(state.server.waiting), ['Nova']);
+    assert.equal(state.server.waiting.Nova.attempt, 3);
+    feed('supervisor', 'agent.state', { state: 'server_back', detail: { agent: 'Nova', waited_ms: 35000, message: 'Nova is back' } });
+    assert.deepEqual(state.server.waiting, {});
+    // a skin applied or failed, next to the agent it is for
+    const failed = feed('skins', 'agent.state', { state: 'skin_failed', detail: { agent: 'Arthur', reason: 'no_signer' } }, { severity: 'warn' });
+    assert.deepEqual(state.agents.Arthur.skin, { state: 'failed', at: failed.ts, reason: 'no_signer' });
+    feed('skins', 'agent.state', { state: 'skin_applied', detail: { agent: 'Arthur', skin_name: 'genesis_arthur' } });
+    assert.equal(state.agents.Arthur.skin?.state, 'applied');
+    for (const service of ['world', 'supervisor', 'skins', 'planner']) assert.equal(state.agents[service], undefined, `${service} became an agent card`);
 });
 
 test('steps come from the skill template and say so; a routine choice is marked as routine', () => {

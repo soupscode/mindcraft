@@ -115,13 +115,35 @@ const doneSteps = (plan, command) => (plan?.steps ?? []).filter((step) => step.c
 
 // ---- travel ------------------------------------------------------------------------------
 
+// A patrol waypoint is a column: its nominal height is the home's, which on real land is inside a hill or
+// in the air ("no way to the goal without breaking blocks"). Where the land is known (the chunk is loaded)
+// the waypoint is put on the ground: the nearest height within 12 blocks where one can stand. Where it is
+// not known the nominal point stays.
+const PASSABLE = new Set(['air', 'cave_air', 'short_grass', 'tall_grass', 'fern', 'large_fern', 'snow', 'dandelion', 'poppy', 'torch']);
+const WET = new Set(['water', 'lava']);
+export function onGround(state, pos, reach = 12) {
+    try {
+        const at = (y) => state.view.blockAt({ x: pos.x, y, z: pos.z });
+        for (let step = 0; step <= 2 * reach; step++) {
+            const y = pos.y + (step % 2 === 1 ? (step + 1) / 2 : -step / 2);
+            const [under, feet, head] = [at(y - 1), at(y), at(y + 1)];
+            if (!under || !feet || !head) return pos; // not loaded: nothing is known
+            if (!PASSABLE.has(under.name) && !WET.has(under.name) && PASSABLE.has(feet.name) && PASSABLE.has(head.name)) return { ...pos, y };
+        }
+    } catch { /* a view that cannot be read: the nominal point */ }
+    return pos;
+}
+
 const travel = {
     name: 'travel',
     progress_unit: 'blocks covered',
     failures: ['unknown_place', 'out_of_range', 'avoid_area', 'already_there', 'ledger_fresh', 'no_safe_path', 'path_unknown', 'path_leaves_range', 'wrong_chest', 'no_chest'],
     id: (args) => `travel:${args.place}`,
     parse: (parts) => (parts.length === 1 && /^[A-Za-z0-9_-]{1,60}$/.test(parts[0]) ? { place: parts[0] } : null),
-    place: (args, state) => state.zones.places(state.agent).find((place) => place.id === args.place) ?? null,
+    place(args, state) {
+        const place = state.zones.places(state.agent).find((entry) => entry.id === args.place) ?? null;
+        return place && place.kind === 'patrol' ? { ...place, pos: onGround(state, place.pos) } : place;
+    },
     candidates(state) {
         const here = state.view.position();
         const places = state.zones.places(state.agent);
@@ -794,11 +816,14 @@ const give_items = {
 //   - the agent has an open conversation slot and message budget left
 //   - the same request or offer does not still wait for its answer, and the relay would not
 //     block it as a repeat
-//   - ask: the item is something the catalog knows (ctx.known)
+//   - ask: the item is something the catalog knows (ctx.known). Decided: an agent may ask another for
+//     ANYTHING the catalog knows (it was: blueprint materials and seeds only)
 //   - offer: the items are held beyond the agent's own reserve (talk.spare)
-// What is asked for is filled in by code: what the agent's own work is short of right now
-// (materials the blueprint of its plot still wants, seeds for the bare field) and that no
-// registered chest has. What is offered: what the agent can spare, most first.
+// What is asked for is filled in by code: first what the agent's own work is short of right now
+// (materials the blueprint of its plot still wants, seeds for the bare field), then everything
+// else the catalog knows that the agent holds none of; never what a registered chest has for
+// it. Any other known item can be asked for by its option id as well: the check is the same.
+// What is offered: what the agent can spare, most first.
 const AGENT_NAME = /^[A-Za-z0-9_]{3,16}$/;
 const parseTalk = (parts) => {
     const count = whole(parts[2] ?? '');
@@ -874,7 +899,18 @@ const ask_agent = {
     candidates(state, ctx) {
         if (!state.talk) return [];
         const others = otherAgents(state);
-        return shortOf(state, ctx).flatMap((need) => others.map((to) => ({ to, item: need.item, count: need.count })));
+        if (others.length === 0) return [];
+        const needs = shortOf(state, ctx);
+        // the agent's own work first: each need to the two nearest
+        const first = needs.flatMap((need) => others.slice(0, 2).map((to) => ({ to, item: need.item, count: need.count })));
+        // then anything else the catalog knows that the agent has none of and cannot fetch, one agent each, taking turns
+        const rest = ctx.knownItems().filter((item) => !needs.some((need) => need.item === item) && held(state, item) === 0
+            && !state.zones.chests().some((chest) => freeFor(state, chest.name, item) > 0));
+        const turn = rest.length > 0 ? Math.floor((state.now ?? 0) / ctx.config.ask_rotate_ms) % rest.length : 0;
+        const any = [...rest.slice(turn), ...rest.slice(0, turn)].map((item, index) => ({ to: others[index % others.length], item, count: ctx.config.ask_any_count }));
+        // the agents further away for the agent's own needs come before the rest of those
+        const more = needs.flatMap((need) => others.slice(2).map((to) => ({ to, item: need.item, count: need.count })));
+        return [...first, ...any.slice(0, 1), ...more, ...any.slice(1)];
     },
     check(args, state, ctx) {
         if (!ctx.known(args.item)) return 'unknown_item';

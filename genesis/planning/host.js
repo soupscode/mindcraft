@@ -11,6 +11,8 @@
 //   genesis-gate          -> every agent  { state, reason }                the model gate changed
 //   genesis-goals-load    (agent, ack)             -> ack({ ok, goals })   the goal store's storage, kept here so
 //   genesis-goals-save    (agent, goals, change, ack) -> ack({ ok })       only this process talks to Postgres
+//   genesis-checkpoint-save (agent, checkpoint, ack) -> ack({ ok } | { ok: false, code: 'no_mirror' })   the mirror of the
+//   genesis-checkpoint-load (agent, ack)             -> ack({ ok, checkpoint })    checkpoints, kept here for the same reason
 //   genesis-desktop       (name)                   'desktop_available' | 'desktop_leaving', from the desktop launcher
 //   genesis-ledger-sync     (agent, ack)           -> ack({ ok, ledger })  the ONE chest ledger lives here
 //   genesis-ledger-op       ({ agent, op })                                what an agent saw in a chest, put in or took out
@@ -23,6 +25,7 @@
 //   model, clock, calls       as the broker takes them
 //   goal_storage              { load(agent), save(agent, goals, change) }   (createHostGoalStorage below)
 //   ledger                    the shared chest ledger (genesis/catalog/shared_ledger.js)
+//   checkpoint_mirror         { save(checkpoint), load(agent) } (Postgres), or null: there is no mirror
 //   emit(type, data, opts)    where the gate's own events go (optional)
 //   onGate(state, detail)     told when the model gate changed (optional): genesis/recovery/server.js
 //                             turns it into the model.away and model.available incident events
@@ -100,7 +103,7 @@ export function createHostGoalStorage({ durable = null, max_waiting = 2000, retr
 
 export function createPlanningHost({
     model, clock = { now: Date.now, setTimeout, clearTimeout }, calls = { record() {} },
-    goal_storage = createHostGoalStorage(), ledger = null, emit = () => {}, onGate = null, broker: broker_options = {}, ...options
+    goal_storage = createHostGoalStorage(), ledger = null, emit = () => {}, onGate = null, broker: broker_options = {}, checkpoint_mirror = null, ...options
 } = {}) {
     const chest_ledger = ledger ?? createSharedLedger({ clock });
     const config = { ...HOST_DEFAULTS };
@@ -108,7 +111,7 @@ export function createPlanningHost({
         if (options[key] !== undefined) config[key] = options[key];
     }
     const agents = new Map(); // agent -> the socket of its process
-    const stats = { hellos: 0, requests: 0, refused_sender: 0, context_failures: 0, results: 0, undelivered: 0, ledger_ops: 0, ledger_updates: 0 };
+    const stats = { hellos: 0, requests: 0, refused_sender: 0, context_failures: 0, results: 0, undelivered: 0, ledger_ops: 0, ledger_updates: 0, checkpoints_mirrored: 0, checkpoint_mirror_failures: 0 };
 
     const toAgent = (agent, event, ...args) => {
         const socket = agents.get(agent);
@@ -207,6 +210,21 @@ export function createPlanningHost({
                 if (!own(agent) || typeof ack !== 'function') return;
                 try { await goal_storage.save(agent, goals, change); ack({ ok: true }); } catch (err) { ack({ ok: false, error: String(err?.message ?? err) }); }
             });
+            // the mirror of an agent's checkpoint: only its own, and only when there is a database
+            socket.on('genesis-checkpoint-save', async (agent, checkpoint, ack) => {
+                if (!own(agent) || typeof ack !== 'function') return;
+                if (!checkpoint_mirror) { ack({ ok: false, code: 'no_mirror' }); return; }
+                if (checkpoint === null || typeof checkpoint !== 'object' || checkpoint.agent !== agent) { ack({ ok: false, code: 'not_yours', error: 'the checkpoint is not this agent\'s' }); return; }
+                try { await checkpoint_mirror.save(checkpoint); stats.checkpoints_mirrored++; ack({ ok: true }); } catch (err) {
+                    stats.checkpoint_mirror_failures++;
+                    ack({ ok: false, code: 'mirror_failed', error: String(err?.message ?? err) });
+                }
+            });
+            socket.on('genesis-checkpoint-load', async (agent, ack) => {
+                if (!own(agent) || typeof ack !== 'function') return;
+                if (!checkpoint_mirror) { ack({ ok: false, code: 'no_mirror' }); return; }
+                try { ack({ ok: true, checkpoint: await checkpoint_mirror.load(agent) ?? null }); } catch (err) { ack({ ok: false, code: 'mirror_failed', error: String(err?.message ?? err) }); }
+            });
             socket.on('genesis-desktop', (name) => {
                 if (name === 'desktop_available' || name === 'desktop_leaving') broker.signal(name).catch(() => {});
             });
@@ -270,5 +288,31 @@ export function socketGoalStorage({ socket, timeout_ms = 5000, clock = { setTime
     return {
         load: async (agent) => (await ask('genesis-goals-load', agent)).goals ?? null,
         save: async (agent, goals, change) => { await ask('genesis-goals-save', agent, goals, change); },
+    };
+}
+
+// The agent's end of the checkpoint mirror: the checkpoint store's { save, load }, carried over the
+// socket to the MindServer, the only process that knows the database. A MindServer without a
+// database says so once ("no_mirror"); from then on nothing more is sent and nothing is reported.
+export function socketCheckpointMirror({ socket, timeout_ms = 5000, clock = { setTimeout, clearTimeout } } = {}) {
+    let off = false; // the MindServer has no mirror
+    const ask = (event, ...args) => new Promise((resolve, reject) => {
+        const timer = clock.setTimeout(() => reject(new Error(`the MindServer did not answer ${event} within ${timeout_ms} ms`)), timeout_ms);
+        try {
+            if (socket.connected === false) throw new Error('not connected to MindServer');
+            socket.emit(event, ...args, (answer) => {
+                clock.clearTimeout(timer);
+                if (answer?.ok) resolve(answer);
+                else if (answer?.code === 'no_mirror') { off = true; resolve(null); } else reject(new Error(String(answer?.error ?? answer?.code ?? 'refused')));
+            });
+        } catch (err) {
+            clock.clearTimeout(timer);
+            reject(err);
+        }
+    });
+    return {
+        async save(checkpoint) { if (!off) await ask('genesis-checkpoint-save', checkpoint.agent, checkpoint); },
+        async load(agent) { return off ? null : (await ask('genesis-checkpoint-load', agent))?.checkpoint ?? null; },
+        isOff: () => off,
     };
 }

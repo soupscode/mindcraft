@@ -2,22 +2,37 @@
 // new Minecraft world over RCON and CHECKS every block it placed. The agents may only start
 // planning once it has passed: the launcher asks for the manifest this script writes.
 //
-//   node genesis/world/bootstrap.js              apply the world file and check the world
+//   node genesis/world/bootstrap.js              pick the site when there is no world file yet, then apply the world file and check the world
+//   node genesis/world/bootstrap.js --pick-site  dry run: pick the site and report, write nothing, change nothing
 //   node genesis/world/bootstrap.js --validate   only check the world file (no server needed)
 //   node genesis/world/bootstrap.js --plan       print what would be placed (no server needed)
 //   options:  --settings <file>   the Genesis settings (default genesis/settings.json; GENESIS_SETTINGS_FILE)
-//             --world <file>      the world file (default: "genesis_planning.world_file" of the settings)
+//             --world <file>      the world file (default: GENESIS_WORLD_FILE, else "genesis_planning.world_file" of the settings)
 //             --manifest <file>   the manifest (default: "genesis_planning.manifest_file", else ./bots/genesis_world/bootstrap.manifest.json)
+//             --site-radius <n>   how far from the spawn the site may lie (default 48)      --site-step <n>    one column read every n blocks (default 4)
+//             --site-from <x> <z> search around this column instead of the world spawn     --site-relief <n>  how uneven a zone may be (default 3)
+//             --example <file>    the layout that is moved to the site (default ./genesis/genesis.world.example.json)
+//             --no-worldedit      level with the game's own fill command even when WorldEdit is installed
+//   GENESIS_WORLDEDIT_WORLD: the name of the world for WorldEdit's world override (default "world")
 //   RCON:     GENESIS_RCON_PASSWORD (required), GENESIS_RCON_HOST (default: "host" of the settings),
 //             GENESIS_RCON_PORT (default 25575). The password is never written anywhere.
 //
 // What it does, in this order, stopping at the first thing that fails:
+//   0. the site (decided): while there is NO world file, the place is chosen from the land itself
+//      (genesis/world/site.js: around the world spawn, flat, dry, no trees in the zones) and the
+//      world file is written for it. A world file that is there is used as it is: that is the
+//      manual override (genesis/tools/place_world.js --at <x> <y> <z> --seed <seed>).
 //   1. checks the world file (genesis/world/world_config.js); nothing is sent while it has problems
 //   2. asks the server for its seed: it must be the seed in the world file
 //   3. game rules: reads each one, sets it only when it differs, and reads it back
-//   4. levels the camp, ONCE (decided): the layers above the camp's floor are cleared, highest
-//      first, and the floor is laid, each layer with one fill command. Never done again once the
-//      manifest records it, and never where the camp already stands (see below).
+//   4. levels the camp, the field and every plot, ONCE (decided). The site's chunks are
+//      force-loaded for the run (no player needs to be online; they are released when the run
+//      ends, however it ends) and the reading commands are probed. Each zone is cleared above
+//      its floor and floored: with WorldEdit from the console when the plugin is there (decided;
+//      genesis/world/worldedit.js: probed first, and every box is read back after it was set),
+//      with the game's own fill command when it is not. A box that is already as it should be
+//      is left alone and recorded so: a site the operator flattened himself passes untouched.
+//      Never done again once the manifest records it, and never where the camp already stands.
 //   5. the starter camp: looks at each block first and places it only when it is not there yet
 //      (one shared double chest, a kits chest, four beds, a crafting table, a furnace, a 9 by 9
 //      field of bare farmland with water: nothing is sown). The agents build every house.
@@ -37,10 +52,15 @@
 // says so, and the floor check decides whether the camp is fit.
 //
 // Honesty: every block and item placed is in the manifest, attributed to "Operator", and so
-// is every rule that favours the agents. The levelling is recorded layer by layer with the
-// number of blocks the server reported as changed (removed or placed): a fill command does
-// not say which blocks they were. The script never edits server files and never deletes
-// anything in the world folder.
+// is every rule that favours the agents. The levelling is recorded per area with COUNTS
+// (decided): how many blocks were not air before, the blocks by kind as WorldEdit's //distr
+// gave them (when its answer could be read), what was laid and how many blocks changed, and
+// which method did it. How the site was chosen is recorded too. The script never edits server
+// files and never deletes anything in the world folder.
+//
+// COMMAND COUNTS for the full site (14 boxes: 7 zones, above the floor and the floor): at most
+// 5 commands a box with WorldEdit (pos1, pos2, distr, set, and the reading back), 2 to 3 with
+// fill, plus a few dozen for the floors' checks: some hundreds in all, seconds of server time.
 //
 // NOT RUN AGAINST A REAL MINECRAFT SERVER. The tests run it against an in-memory stand-in
 // that answers the way the commands are documented to (genesis/tests/helpers/fake-rcon.mjs).
@@ -54,6 +74,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { checkWorldConfig, describeProblem, worldHash, seedText } from './world_config.js';
 import { buildBootstrapPlan, serverSettingsText } from './plan.js';
 import { MANIFEST_KIND, MANIFEST_VERSION, OPERATOR, DEFAULT_MANIFEST_FILE, manifestPaths, parseManifest } from './manifest.js';
+import { createReader, probe, loadChunks, checkBox, ReadError, READ_ANSWERS, WORLD_BOTTOM } from './survey.js';
+import { probeWorldEdit, worldEditBox } from './worldedit.js';
 
 const xyz = (pos) => pos.join(' ');
 const passed = (answer) => /Test passed/i.test(answer) && !/Test failed/i.test(answer);
@@ -183,10 +205,12 @@ export async function readContainer(send, pos, { max = CONTAINER_SLOTS } = {}) {
 //     commands  every command sent: { command, changes } (changes: it can change the world)
 export async function runBootstrap({
     config, rcon, files, clock = { now: Date.now }, manifest_file = DEFAULT_MANIFEST_FILE, world_file = 'genesis.world.json', blueprints = null,
+    site = null, log = () => {}, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), load = {},
+    worldedit = true, worldedit_world = 'world',
 } = {}) {
     const result = {
         ok: false, stage: 'validate', problems: [], failed: null, commands: [], placed: { blocks: 0, items: 0, rules: 0, cleared: 0, floored: 0 },
-        manifest: null, operator_must_set: [], warnings: [],
+        manifest: null, operator_must_set: [], warnings: [], survey: { commands: 0 }, levelling: null,
     };
     const config_problems = checkWorldConfig(config, { blueprints });
     if (config_problems.length > 0) {
@@ -202,6 +226,14 @@ export async function runBootstrap({
         result.commands.push({ command, changes });
         return String(await rcon.send(command) ?? '');
     };
+    // A command that reads or changes a block. "That position is not loaded" is its own failure (seen on the
+    // real server with no player online): the area is not loaded, which says nothing about the block.
+    const look = async (command, changes = false) => {
+        const answer = await send(command, changes);
+        if (READ_ANSWERS.not_loaded(answer)) throw new ReadError('not_loaded', command, answer);
+        return answer;
+    };
+    const clip = (text) => { const value = String(text ?? ''); return value.length > 300 ? `${value.slice(0, 300)}...` : value; };
     const stop = (stage, problem, failed = null) => {
         result.stage = stage;
         result.problems.push(problem);
@@ -226,13 +258,23 @@ export async function runBootstrap({
     const carried = (list, id, same) => (previous?.[list] ?? []).find((record) => record.id === id && same(record)) ?? null;
     const records = { blocks: [], items: [], rules: [], areas: [] };
 
+    // reading the land (genesis/world/survey.js): nothing it sends can change the world
+    const reader = createReader({ send: (command) => send(command, false) });
+    let chunks = null; // the chunks force-loaded for this run, given back when it ends
+
     let failure = null;
     try {
         failure = await work();
     } catch (err) {
-        stop(result.stage, `the server could not be asked (${err?.message ?? err})`);
+        if (err instanceof ReadError && err.code === 'not_loaded') {
+            stop(result.stage, `the area is NOT LOADED: the server answered ${JSON.stringify(err.answer)} to "${err.command}". No block was read as missing or wrong because of it. `
+                + 'The chunks force-loaded for this run did not stay loaded (or the command reached outside them): run the bootstrap again, and send this line if it repeats.',
+            { id: 'not_loaded', pos: null, expected: 'a loaded position', answer: err.answer });
+        } else stop(result.stage, `the server could not be asked (${err?.message ?? err})`);
         failure = true;
     }
+    try { await chunks?.release(); } catch { /* the connection is gone: the report says which chunks stay marked */ }
+    result.survey.commands = reader.stats().commands;
 
     async function work() {
         // ---- 2. the seed ----
@@ -250,6 +292,7 @@ export async function runBootstrap({
         result.stage = 'rules';
         for (const rule of plan.rules) {
             const record = { id: rule.id, kind: rule.kind, value: rule.expect, favours_agents: rule.favours_agents, why: rule.why, by: OPERATOR, status: null, at: now(), run };
+            if (rule.kind === 'time') continue; // only on the first bootstrap of a NEW world: decided below, once it is known whether a camp stands
             if (rule.query === null) {
                 const before = carried('rules', rule.id, (old) => old.value === rule.expect);
                 if (before) { records.rules.push(before); continue; }
@@ -276,13 +319,37 @@ export async function runBootstrap({
             records.rules.push({ ...record, status: 'set' });
         }
 
-        // ---- 4. the camp is levelled, once: cleared above the floor (highest layer first), then floored ----
+        // ---- 4. the site is levelled, once: the camp, the field and every plot (decided) ----
         result.stage = 'level';
+        // with no player online only the chunks at the spawn are loaded: the site's are force-loaded for this run
+        const land = { min: [Math.min(...plan.zones.map((zone) => zone.min[0])), Math.min(...plan.zones.map((zone) => zone.min[1]))],
+            max: [Math.max(...plan.zones.map((zone) => zone.max[0])), Math.max(...plan.zones.map((zone) => zone.max[1]))] };
+        chunks = await loadChunks({ send: (command) => send(command, false), reader, box: land, sleep, log, ...load });
+        if (!chunks.ok) { stop('level', `the site's chunks could not be loaded: ${chunks.problem}`); return true; }
+        // the probe: every reading command once, where the answer is known. Stops with the raw answer.
+        const home_column = [config.home[0], config.home[2]];
+        const probed = await probe(reader, home_column, { log, names: false });
+        if (!probed.ok) { stop('level', probed.problem, { id: 'probe', pos: null, expected: 'the answers of genesis/world/survey.js', answer: probed.answer }); return true; }
+
         const to_level = [];
         for (const area of plan.areas) {
             const before = carried('areas', area.id, (old) => old.block === area.block && sameBox(old, area));
             if (before) records.areas.push(before); else to_level.push(area);
         }
+        const levelled_zones = new Set();
+        // the morning of the first run (decided): set ONCE, on the first bootstrap of a new world, never again
+        const morning = plan.rules.find((rule) => rule.kind === 'time');
+        const morning_before = morning ? carried('rules', morning.id, () => true) : null;
+        const firstMorning = async (camp_stands) => {
+            if (!morning) return;
+            if (morning_before) { records.rules.push(morning_before); return; }
+            const record = { id: morning.id, kind: morning.kind, value: morning.expect, favours_agents: morning.favours_agents, why: morning.why, by: OPERATOR, status: null, at: now(), run };
+            if (camp_stands) { records.rules.push({ ...record, favours_agents: false, status: 'not set: the world was bootstrapped before' }); return; }
+            await send(morning.set, true);
+            result.placed.rules++;
+            records.rules.push({ ...record, status: 'set, once' });
+        };
+        if (to_level.length === 0) await firstMorning(true);
         if (to_level.length > 0) {
             // never over a camp that stands: with no record of the levelling, a block of the camp that is
             // already there means the manifest was lost, not that the world is new
@@ -290,27 +357,87 @@ export async function runBootstrap({
                 && block.pos[2] >= plan.floor.min[1] && block.pos[2] <= plan.floor.max[1] && block.pos[1] > plan.floor.y);
             let standing = null;
             for (const block of camp_cells) {
-                if (passed(await send(`execute if block ${xyz(block.pos)} ${block.expect}`, false))) { standing = block; break; }
+                if (passed(await look(`execute if block ${xyz(block.pos)} ${block.expect}`))) { standing = block; break; }
             }
-            for (const area of to_level) {
-                const record = { id: area.id, kind: area.kind, min: area.min, max: area.max, block: area.block, purpose: area.purpose, by: OPERATOR, changed: 0, placed: false, status: null, at: now(), run };
-                if (standing) {
-                    records.areas.push({ ...record, status: 'not levelled: the camp was already standing' });
-                    continue;
-                }
-                const command = `fill ${xyz(area.min)} ${xyz(area.max)} ${area.block}`;
-                const answer = await send(command, true);
-                const changed = ANSWERS.fill(answer);
-                if (changed === null) {
-                    stop('level', `the ${area.purpose} could not be filled: the server's answer to "${command}" was not understood: ${JSON.stringify(answer)}`,
-                        { id: area.id, pos: area.min, expected: area.block, answer });
-                    return true;
-                }
-                result.placed[area.kind === 'floor' ? 'floored' : 'cleared'] += changed;
-                records.areas.push({ ...record, changed, placed: changed > 0, status: changed > 0 ? 'filled' : 'nothing to change' });
-            }
+            await firstMorning(standing !== null);
+            const volume = (area) => (area.max[0] - area.min[0] + 1) * (area.max[1] - area.min[1] + 1) * (area.max[2] - area.min[2] + 1);
+            const blank = (area) => ({ id: area.id, zone: area.zone, kind: area.kind, min: area.min, max: area.max, block: area.block, purpose: area.purpose, by: OPERATOR,
+                method: null, cells: volume(area), before: null, laid: { block: area.block, count: 0 }, changed: 0, placed: false, status: null, at: now(), run });
             if (standing) {
-                result.warnings.push(`The camp was NOT levelled: the manifest has no record of the levelling, but the ${standing.purpose} already stands at ${standing.pos.join(', ')}. Nothing was cleared or floored; the floor check below decides whether the camp is fit.`);
+                for (const area of to_level) records.areas.push({ ...blank(area), status: 'not levelled: the camp was already standing' });
+                result.warnings.push(`The site was NOT levelled: the manifest has no record of the levelling, but the ${standing.purpose} already stands at ${standing.pos.join(', ')}. Nothing was cleared or floored; the floor check below decides whether the camp is fit.`);
+            } else {
+                // ---- how: WorldEdit from the console (decided), or the game's own fill command when the plugin is absent ----
+                let edit = null;
+                if (worldedit !== false) {
+                    const found = await probeWorldEdit({ send: (command) => send(command, false), world: worldedit_world, at: [config.home[0], WORLD_BOTTOM, config.home[2]] });
+                    if (found.present && !found.ok) { stop('level', found.problem, { id: 'worldedit.probe', pos: null, expected: 'the answers of genesis/world/worldedit.js', answer: JSON.stringify(found.answers) }); return true; }
+                    if (found.present) {
+                        edit = worldEditBox({ send: (command) => send(command, /^\/+set /.test(command)), prefix: found.prefix });
+                        result.levelling = { method: 'worldedit', version: found.version, prefix: found.prefix, world: found.world };
+                        log(`Levelling with WorldEdit ${found.version ?? ''} from the console (commands are sent as "${found.prefix}set ...", world "${found.world}").`);
+                    } else {
+                        result.warnings.push(`WorldEdit is not installed on this server (the answer to "worldedit version" was ${JSON.stringify(found.answer)}): the site was levelled with the game's own fill command instead.`);
+                    }
+                }
+                if (!edit) {
+                    result.levelling = { method: 'vanilla', version: null, why: worldedit === false ? 'WorldEdit was switched off for this run (--no-worldedit)' : 'WorldEdit is not installed' };
+                    log('Levelling with the game\'s own fill command.');
+                }
+                const target = (area) => area.block.replace(/^minecraft:/, '');
+                for (const [index, area] of to_level.entries()) {
+                    const record = { ...blank(area), method: result.levelling.method };
+                    // what is there, read with the game's own commands (probed above): the blocks that are not air,
+                    // and whether anything needs to change at all. A site that is already flat and floored is left as it is.
+                    const not_air = await reader.count(area);
+                    const wrong = area.kind === 'clear' ? not_air > 0 : (await checkBox(reader, area, [area.block])) !== null;
+                    record.before = { not_air, by_type: null };
+                    if (!wrong) {
+                        records.areas.push({ ...record, status: 'nothing to change' });
+                        levelled_zones.add(area.zone);
+                        log(`Levelled ${index + 1} of ${to_level.length}: ${area.purpose}: already as it should be, nothing changed`);
+                        continue;
+                    }
+                    let changed = null;
+                    if (edit) {
+                        const unset = await edit.select(area);
+                        if (unset) {
+                            stop('level', `the ${area.purpose} could not be selected in WorldEdit: the answer to "${unset.command}" was not understood: ${JSON.stringify(unset.answer)}`,
+                                { id: area.id, pos: area.min, expected: 'First/Second position set to (x, y, z)', answer: unset.answer });
+                            return true;
+                        }
+                        // what was there before, by kind of block (decided: counts by block type per area)
+                        const distribution = await edit.distribution();
+                        record.before.by_type = distribution.counts;
+                        if (!distribution.counts) record.before.not_read = clip(distribution.answer);
+                        const done = await edit.set(area.block);
+                        // WorldEdit's own word is not relied on: the box is read back
+                        const left = area.kind === 'clear' ? ((await reader.count(area)) > 0 ? { found: 'blocks that are not air' } : null) : await checkBox(reader, area, [area.block]);
+                        if (left) {
+                            stop('level', `the ${area.purpose} is not ${area.block} after "${done.command}": the box still holds ${left.found}${left.pos ? ` at ${left.pos.join(', ')}` : ''}. WorldEdit answered ${JSON.stringify(clip(done.answer))}`,
+                                { id: area.id, pos: left.pos ?? area.min, expected: area.block, answer: done.answer });
+                            return true;
+                        }
+                        // the blocks that changed: every cell that was not the target block already
+                        changed = area.kind === 'clear' ? not_air
+                            : (distribution.counts ? record.cells - (distribution.counts[target(area)] ?? 0) : done.affected);
+                        record.worldedit = { affected: done.affected };
+                    } else {
+                        const command = `fill ${xyz(area.min)} ${xyz(area.max)} ${area.block}`;
+                        const answer = await send(command, true);
+                        if (READ_ANSWERS.not_loaded(answer)) throw new ReadError('not_loaded', command, answer);
+                        changed = ANSWERS.fill(answer);
+                        if (changed === null) {
+                            stop('level', `the ${area.purpose} could not be filled: the server's answer to "${command}" was not understood: ${JSON.stringify(answer)}`,
+                                { id: area.id, pos: area.min, expected: area.block, answer });
+                            return true;
+                        }
+                    }
+                    result.placed[area.kind === 'floor' ? 'floored' : 'cleared'] += changed ?? 0;
+                    records.areas.push({ ...record, laid: { block: area.block, count: changed }, changed: changed ?? 0, placed: true, status: 'filled' });
+                    levelled_zones.add(area.zone);
+                    log(`Levelled ${index + 1} of ${to_level.length}: ${area.purpose}: ${changed ?? 'an unknown number of'} blocks changed`);
+                }
             }
         }
 
@@ -321,11 +448,11 @@ export async function runBootstrap({
             const same = (old) => old.block === block.place && old.pos.join(',') === block.pos.join(',');
             const before = carried('blocks', block.id, same);
             if (block.once && before) { records.blocks.push(before); continue; } // the agents' business since the first run
-            const there = passed(await send(`execute if block ${xyz(block.pos)} ${block.once ? block.place : block.expect}`, false));
+            const there = passed(await look(`execute if block ${xyz(block.pos)} ${block.once ? block.place : block.expect}`));
             if (there) {
                 records.blocks.push(before ?? { id: block.id, pos: block.pos, block: block.place, purpose: block.purpose, by: OPERATOR, placed: false, at: now(), run });
             } else {
-                await send(`setblock ${xyz(block.pos)} ${block.place}`, true);
+                await look(`setblock ${xyz(block.pos)} ${block.place}`, true);
                 result.placed.blocks++;
                 records.blocks.push({ id: block.id, pos: block.pos, block: block.place, purpose: block.purpose, by: OPERATOR, placed: true, at: now(), run });
             }
@@ -340,13 +467,14 @@ export async function runBootstrap({
             const same = (old) => old.item === item.item && old.count === item.count && old.slot === item.slot && old.pos.join(',') === item.pos.join(',');
             const before = carried('items', item.id, same);
             if (before) { records.items.push(before); continue; }
-            in_chest ??= (await readContainer(send, item.pos)).slots ?? new Map();
+            // (through look(): "not loaded" is the one named failure, whatever command met it)
+            in_chest ??= (await readContainer(look, item.pos)).slots ?? new Map();
             const held = in_chest.get(item.slot);
             const record = { id: item.id, chest: item.chest, pos: item.pos, slot: item.slot, item: item.item, count: item.count, by: OPERATOR, placed: true, at: now(), run };
             if (held && held.item === item.item && held.count === item.count) {
                 records.items.push({ ...record, placed: false });
             } else {
-                await send(`item replace block ${xyz(item.pos)} container.${item.slot} with ${item.item} ${item.count}`, true);
+                await look(`item replace block ${xyz(item.pos)} container.${item.slot} with ${item.item} ${item.count}`, true);
                 result.placed.items++;
                 records.items.push(record);
             }
@@ -355,25 +483,19 @@ export async function runBootstrap({
 
         // ---- 7. check every block again, and the camp's floor ----
         result.stage = 'check';
-        for (let x = plan.floor.min[0]; x <= plan.floor.max[0]; x++) {
-            for (let z = plan.floor.min[1]; z <= plan.floor.max[1]; z++) {
-                const pos = [x, plan.floor.y, z];
-                let answer = '';
-                let fits = false;
-                for (const accepted of plan.floor.accepts) {
-                    answer = await send(`execute if block ${xyz(pos)} ${accepted}`, false);
-                    if (passed(answer)) { fits = true; break; }
-                }
-                if (!fits) {
-                    stop('check', `floor check failed at ${pos.join(', ')}: the camp floor should be ${plan.floor.accepts.join(' or ')}, the server says ${JSON.stringify(answer)}`,
-                        { id: 'camp.floor', pos, expected: plan.floor.accepts.join(' | '), answer });
-                    return true;
-                }
+        for (const floor of plan.floors) {
+            // the camp's floor in every run; a plot's only in the run that levelled it (then it is its owner's)
+            if (!floor.every_run && !levelled_zones.has(floor.zone)) continue;
+            const wrong = await checkBox(reader, { min: [floor.min[0], floor.y, floor.min[1]], max: [floor.max[0], floor.y, floor.max[1]] }, floor.accepts);
+            if (wrong) {
+                stop('check', `floor check failed at ${wrong.pos.join(', ')}: the ${floor.label} floor should be ${floor.accepts.join(' or ')}, the server says it is ${wrong.found}`,
+                    { id: floor.id, pos: wrong.pos, expected: floor.accepts.join(' | '), answer: wrong.found });
+                return true;
             }
         }
         for (const block of to_check) {
             const expected = block.once ? block.place : block.expect;
-            const answer = await send(`execute if block ${xyz(block.pos)} ${expected}`, false);
+            const answer = await look(`execute if block ${xyz(block.pos)} ${expected}`);
             if (!passed(answer)) {
                 stop('check', `block check failed at ${block.pos.join(', ')}: ${block.purpose} should be ${expected}, the server says ${JSON.stringify(answer)}`,
                     { id: block.id, pos: block.pos, expected, answer });
@@ -382,7 +504,7 @@ export async function runBootstrap({
         }
         if (new_items.length > 0) {
             const pos = new_items[0].pos;
-            const { slots, answer, not_loaded } = await readContainer(send, pos);
+            const { slots, answer, not_loaded } = await readContainer(look, pos);
             for (const item of new_items) {
                 const held = slots?.get(item.slot);
                 if (!held || held.item !== item.item || held.count !== item.count) {
@@ -423,11 +545,18 @@ export async function runBootstrap({
         world_sha256: worldHash(config),
         seed: plan.seed,
         attributed_to: OPERATOR,
+        // how the site was chosen (decided: recorded): by genesis/world/site.js with its scores, or by hand
+        site: site ?? (previous?.site && previous.world_sha256 === worldHash(config) ? previous.site : {
+            method: 'manual', by: OPERATOR, at: now(), home: [...config.home],
+            how: 'the operator gave the coordinates (genesis/tools/place_world.js --at, or a world file written by hand)',
+        }),
+        // how the site was levelled: WorldEdit from the console, or the game's own fill command
+        levelling: result.levelling ?? previous?.levelling ?? null,
         verified: result.ok,
         verified_at: result.ok ? now() : null,
         runs: [...(previous?.runs ?? []), {
             run, at: now(), blocks_placed: result.placed.blocks, items_placed: result.placed.items, rules_set: result.placed.rules,
-            blocks_cleared: result.placed.cleared, floor_blocks_placed: result.placed.floored,
+            blocks_cleared: result.placed.cleared, floor_blocks_placed: result.placed.floored, reading_commands: result.survey.commands,
             result: result.ok ? 'ok' : result.problems.join('; '),
         }],
         areas: merged('areas'),
@@ -460,7 +589,7 @@ export function reportLines(result, { manifest_file = DEFAULT_MANIFEST_FILE } = 
     const lines = [];
     const changing = result.commands.filter((entry) => entry.changes).length;
     lines.push(`Bootstrap ${result.ok ? 'PASSED' : `FAILED at stage "${result.stage}"`}: ${result.commands.length} commands sent, ${changing} of them changing the world.`);
-    lines.push(`Levelled the camp: ${result.placed.cleared} blocks cleared, ${result.placed.floored} floor blocks placed.`);
+    lines.push(`Levelled the site (camp, field, plots)${result.levelling ? ` with ${result.levelling.method === 'worldedit' ? `WorldEdit ${result.levelling.version ?? ''}`.trim() : 'the game\'s fill command'}` : ''}: ${result.placed.cleared} blocks cleared, ${result.placed.floored} floor blocks placed (counts per area and by kind of block are in the manifest).`);
     lines.push(`Placed: ${result.placed.blocks} blocks, ${result.placed.items} item stacks; rules set: ${result.placed.rules}.`);
     for (const problem of result.problems) lines.push(`PROBLEM: ${problem}`);
     if (result.failed?.pos) lines.push(`Failed position: ${result.failed.pos.join(', ')}`);
@@ -481,8 +610,44 @@ function option(argv, name) {
     return index >= 0 && index + 1 < argv.length ? argv[index + 1] : null;
 }
 
+// The site stage: no world file yet, so the place is chosen from the land itself and the world
+// file is written for it. Resolves to { ok, config, site, lines }. `files` as for runBootstrap.
+export async function runSiteStage({
+    rcon, files, example, world_file, manifest_file = DEFAULT_MANIFEST_FILE, blueprints = null, options = {}, from = null,
+    dry_run = false, clock = { now: Date.now }, log = () => {}, sleep,
+} = {}) {
+    const { pickSite, siteReportLines, SITE_RECORD_FILE } = await import('./site.js');
+    const seed_answer = String(await rcon.send('seed') ?? '');
+    const seed = ANSWERS.seed(seed_answer);
+    if (seed === null) {
+        return { ok: false, config: null, site: null, lines: [`Site selection FAILED: the server's answer to "seed" was not understood: ${JSON.stringify(seed_answer)}. Nothing was changed.`] };
+    }
+    const picked = await pickSite({ send: (command) => rcon.send(command), example, seed, blueprints, options, from, clock, log, ...(sleep ? { sleep } : {}) });
+    const lines = siteReportLines(picked, { dry_run });
+    if (!picked.ok || dry_run) return { ok: picked.ok, config: picked.world, site: picked.record, lines, picked };
+    try {
+        await files.write(world_file, `${JSON.stringify(picked.world, null, 4)}\n`);
+        await files.write(path.join(manifestPaths(manifest_file).dir, SITE_RECORD_FILE), `${JSON.stringify(picked.record, null, 2)}\n`);
+    } catch (err) {
+        return { ok: false, config: null, site: null, lines: [...lines, `PROBLEM: the world file could not be written (${err?.message ?? err})`], picked };
+    }
+    lines.push(`Wrote ${world_file} (seed ${picked.world.seed}) and the record of the selection next to the manifest.`);
+    return { ok: true, config: picked.world, site: picked.record, lines, picked };
+}
+
+// The record of an automatic selection for exactly this world file, or null (the site was given by hand).
+export async function readSiteRecord({ files, manifest_file = DEFAULT_MANIFEST_FILE, config }) {
+    try {
+        const { SITE_RECORD_FILE, SITE_RECORD_KIND } = await import('./site.js');
+        const record = JSON.parse(await files.read(path.join(manifestPaths(manifest_file).dir, SITE_RECORD_FILE)) ?? 'null');
+        return record?.kind === SITE_RECORD_KIND && record.world_sha256 === worldHash(config) ? record : null;
+    } catch {
+        return null;
+    }
+}
+
 async function main(argv) {
-    const { readFileSync } = await import('node:fs');
+    const { readFileSync, existsSync } = await import('node:fs');
     const { nodeFiles } = await import('../store/node_files.js');
     const { fileBlueprints } = await import('../catalog/blueprints.js');
     const { createRconClient, RCON_DEFAULT_PORT } = await import('./rcon.js');
@@ -495,26 +660,33 @@ async function main(argv) {
         console.error(`The Genesis settings cannot be read (${settings_file}): ${err.message}`);
         return 1;
     }
-    const world_file = option(argv, '--world') ?? settings.genesis_planning?.world_file ?? './genesis/genesis.world.json';
+    const world_file = option(argv, '--world') ?? process.env.GENESIS_WORLD_FILE ?? settings.genesis_planning?.world_file ?? './genesis/genesis.world.json';
     const manifest_file = option(argv, '--manifest') ?? settings.genesis_planning?.manifest_file ?? DEFAULT_MANIFEST_FILE;
-    let config;
-    try { config = JSON.parse(readFileSync(world_file, 'utf8')); } catch (err) {
-        console.error(`The world file cannot be read (${world_file}): ${err.code === 'ENOENT' ? 'the file does not exist' : err.message}`);
-        return 1;
-    }
     const blueprints = fileBlueprints();
-    const problems = checkWorldConfig(config, { blueprints });
-    if (problems.length > 0) {
-        for (const problem of problems) console.error(`World file problem: ${describeProblem(problem)}`);
-        console.error(`Nothing was sent to the server. Fix ${world_file} first.`);
-        return 1;
+    const pick_only = argv.includes('--pick-site');
+    const have_world = existsSync(world_file);
+    const log = (line) => console.log(line); // progress, as it happens
+
+    let config = null;
+    if (have_world && !pick_only) {
+        try { config = JSON.parse(readFileSync(world_file, 'utf8')); } catch (err) {
+            console.error(`The world file cannot be read (${world_file}): ${err.message}`);
+            return 1;
+        }
+        const problems = checkWorldConfig(config, { blueprints });
+        if (problems.length > 0) {
+            for (const problem of problems) console.error(`World file problem: ${describeProblem(problem)}`);
+            console.error(`Nothing was sent to the server. Fix ${world_file} first.`);
+            return 1;
+        }
     }
-    if (argv.includes('--validate')) {
-        console.log(`${world_file} is valid (seed ${seedText(config.seed)}, sha256 ${worldHash(config)}).`);
-        return 0;
-    }
-    if (argv.includes('--plan')) {
-        console.log(JSON.stringify(buildBootstrapPlan(config), null, 2));
+    if (argv.includes('--validate') || argv.includes('--plan')) {
+        if (!config) {
+            console.error(`The world file cannot be read (${world_file}): the file does not exist. Run the bootstrap without --validate: it picks the site and writes the file.`);
+            return 1;
+        }
+        if (argv.includes('--validate')) console.log(`${world_file} is valid (seed ${seedText(config.seed)}, sha256 ${worldHash(config)}).`);
+        else console.log(JSON.stringify(buildBootstrapPlan(config), null, 2));
         return 0;
     }
     const password = process.env.GENESIS_RCON_PASSWORD;
@@ -534,7 +706,42 @@ async function main(argv) {
         rcon.end();
         return 1;
     }
-    const result = await runBootstrap({ config, rcon, files: nodeFiles(), manifest_file, world_file, blueprints });
+    const files = nodeFiles();
+    let site = null;
+    if (!config) {
+        // ---- the site stage: no world file, so the bootstrap picks the place itself (decided) ----
+        const whole = (name) => { const value = option(argv, name); return value !== null && /^-?\d+$/.test(value) ? Number(value) : null; };
+        const from_at = argv.indexOf('--site-from');
+        const from = from_at >= 0 ? [Number(argv[from_at + 1]), Number(argv[from_at + 2])] : null;
+        if (from && !from.every(Number.isInteger)) {
+            console.error('--site-from needs two whole numbers: <x> <z>');
+            rcon.end();
+            return 1;
+        }
+        const options = {};
+        if (whole('--site-radius') !== null) options.radius = whole('--site-radius');
+        if (whole('--site-step') !== null) options.step = Math.max(1, whole('--site-step'));
+        if (whole('--site-relief') !== null) options.max_relief = whole('--site-relief');
+        let example;
+        const example_file = option(argv, '--example') ?? './genesis/genesis.world.example.json';
+        try { example = JSON.parse(readFileSync(example_file, 'utf8')); } catch (err) {
+            console.error(`The example world file cannot be read (${example_file}): ${err.message}`);
+            rcon.end();
+            return 1;
+        }
+        if (have_world && pick_only) console.log(`${world_file} is already there: this dry run does not look at it and does not replace it.`);
+        const stage = await runSiteStage({ rcon, files, example, world_file, manifest_file, blueprints, options, from, dry_run: pick_only, log });
+        for (const line of stage.lines) console.log(line);
+        if (!stage.ok || pick_only) { rcon.end(); return stage.ok ? 0 : 1; }
+        config = stage.config;
+        site = stage.site;
+    } else {
+        site = await readSiteRecord({ files, manifest_file, config });
+    }
+    const result = await runBootstrap({
+        config, rcon, files, manifest_file, world_file, blueprints, site, log,
+        worldedit: !argv.includes('--no-worldedit'), worldedit_world: process.env.GENESIS_WORLDEDIT_WORLD || 'world',
+    });
     rcon.end();
     for (const line of reportLines(result, { manifest_file })) console.log(line);
     return result.ok ? 0 : 1;

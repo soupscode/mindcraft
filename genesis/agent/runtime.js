@@ -62,6 +62,7 @@ import { createWatchdog, progressSignature, SIGNATURE_DEFAULTS, BLOCKED_REASONS 
 import { createDeathRecovery, DEATH_RULES } from '../recovery/death.js';
 import { createMessageDesk } from '../relay/desk.js';
 import { MESSAGE_STEP } from '../catalog/ops.js';
+import { PATROL_OPTION } from '../catalog/zones.js';
 
 export function createAgentRuntime({
     agent, zones, catalog, view, ops, goal_storage, checkpoints, send, emit = () => null, getSeq = () => 0,
@@ -214,7 +215,9 @@ export function createAgentRuntime({
             if (end.origin === 'recovery') return; // a goal of a recovery detour is nobody's work
             last_worker = end.source === 'routine' ? 'routine' : 'planner';
             if (end.source === 'routine') routine?.goalEnded(end);
-            if (end.outcome === 'failed' && end.parked) {
+            // (decided: a patrol waypoint that could not be reached is skipped quietly: no incident)
+            const patrol_skip = end.source === 'routine' && PATROL_OPTION.test(end.option_id ?? '');
+            if (end.outcome === 'failed' && end.parked && !patrol_skip) {
                 // decided: a step is tried 3 times, then it is parked and ONE incident is logged
                 const stuck = end.reason === 'stuck';
                 const incident = reporter.detected({
@@ -250,7 +253,9 @@ export function createAgentRuntime({
     // Is the agent shut in? Nothing in hand, and the last goal ended because the agent could not get there.
     function blocked() {
         const last = executor.lastOutcome();
-        return last !== null && (last.outcome === 'failed' || last.outcome === 'dropped') && BLOCKED_REASONS.includes(last.reason);
+        // (a patrol waypoint that was skipped is not the agent being shut in: the watchdog does not count it as stuck)
+        return last !== null && (last.outcome === 'failed' || last.outcome === 'dropped') && BLOCKED_REASONS.includes(last.reason)
+            && !PATROL_OPTION.test(last.option_id ?? '');
     }
 
     // Why the agent is not stuck even when nothing moves, or null when it is trying to work.
@@ -350,7 +355,12 @@ export function createAgentRuntime({
             // the shared ledger as the MindServer has it (not connected: the copy starts empty and learns by looking)
             try { await ledger.sync?.(); } catch { /* the copy works on what it knows */ }
             const got = await goals.get(agent);
-            if (got.ok) { long_term = got.goals.long_term; queued = got.goals.short_term.length; short_term = got.goals.short_term; }
+            if (got.ok) {
+                long_term = got.goals.long_term; queued = got.goals.short_term.length; short_term = got.goals.short_term;
+                // decided: long-term goals are emitted as events. A change is a goal.changed; this is the list as the
+                // agent starts with it, so that a reader knows the goals of an agent that has changed none yet
+                say('agent.state', { state: 'goals', detail: { long_term: got.goals.long_term, short_term: got.goals.short_term } }, { corr: null });
+            }
             routine?.awayStarted(); // until the broker says the model is there, it is away
             try {
                 send('genesis-hello', agent, (answer) => { if (answer?.gate) planner.onGate({ state: answer.gate, reason: answer.reason ?? null }); });

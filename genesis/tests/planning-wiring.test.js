@@ -26,7 +26,7 @@ import { classifyFailure } from '../catalog/ops.js';
 import { createCheckpointStore } from '../store/checkpoint.js';
 import { nodeFiles } from '../store/node_files.js';
 import { createAgentRuntime } from '../agent/runtime.js';
-import { socketGoalStorage } from '../planning/host.js';
+import { socketGoalStorage, socketCheckpointMirror } from '../planning/host.js';
 import { startPlanning, memoryCallStore, BROKER_EVENT_AGENT } from '../planning/server.js';
 import { emitEvent, agentEventStats, initAgentEvents } from '../events/agent_emit.js';
 import { validateEvent } from '../shared/events.js';
@@ -276,6 +276,17 @@ test('the chest ledger of an agent process is the MindServer\'s: ops, reservatio
     assert.deepEqual(saved.chests.shared.base, { bread: 8 });
 });
 
+// Two ends of one socket: what the client emits (with its acknowledgement) runs the server's handler.
+function fakeWire() {
+    const handlers = new Map();
+    const sent = [];
+    return {
+        sent,
+        server: { on: (event, handler) => handlers.set(event, handler), emit() {}, connected: true },
+        client: { connected: true, emit(event, ...args) { sent.push(event); handlers.get(event)?.(...args); } },
+    };
+}
+
 test('planning server: no database configured keeps calls in memory; a configured one gets the calls and the goals', async () => {
     const store = memoryCallStore(2);
     for (const id of ['a', 'b', 'c']) store.record({ call_id: id });
@@ -283,12 +294,34 @@ test('planning server: no database configured keeps calls in memory; a configure
 
     const pool = recordingPool([]);
     const extensions = [];
-    const second = await startPlanning({ ...PLANNING, postgres_url: 'postgres://genesis@db:5432/genesis' }, {
+    // decided: the address is the launcher's to give (from its environment); one in the settings is not looked at
+    const ignored = await startPlanning({ ...PLANNING, postgres_url: 'postgres://genesis@db:5432/genesis' }, {
+        setSocketExtension: () => {}, clock: fakeClock(), createModel: () => stubModel(clock), createPool: async () => { throw new Error('a pool was made from the settings file'); },
+    });
+    assert.deepEqual(ignored.database, { configured: false, connected: false, migrated: false, migrations: [] });
+    ignored.stop();
+
+    const notes = [];
+    const second = await startPlanning(PLANNING, {
+        postgres_url: 'postgres://genesis@db:5432/genesis', warn: (line) => notes.push(JSON.parse(line)),
         setSocketExtension: (extension) => extensions.push(extension), clock: fakeClock(),
         createModel: () => stubModel(clock), createPool: async ({ url }) => { pool.url = url; return pool; },
     });
     assert.equal(pool.url, 'postgres://genesis@db:5432/genesis');
     assert.equal(extensions.length, 1);
+    // the tables are made at start, from the files of genesis/store/migrations, in order
+    assert.deepEqual(second.database, { configured: true, connected: true, migrated: true, migrations: ['001_planner_calls.sql', '002_goals.sql', '003_checkpoints.sql'] });
+    assert.deepEqual(pool.queries.slice(0, 3).map((query) => /CREATE TABLE IF NOT EXISTS ([a-z_]+)/.exec(query.text)[1]), ['planner_calls', 'agent_goals', 'agent_checkpoints']);
+    assert.ok(pool.queries.slice(0, 3).every((query) => query.values.length === 0 && !/\bDROP\b|\bDELETE\b|\bTRUNCATE\b/i.test(query.text)));
+    assert.equal(notes.find((note) => note.event === 'genesis_planning_database_ready').level, 'info');
+    // the checkpoint mirror: an agent's own checkpoint goes to the database through its socket, and comes back
+    const wire = fakeWire();
+    extensions[0](wire.server, { isAgentSocket: (name) => name === 'Nova' });
+    const mirror = socketCheckpointMirror({ socket: wire.client });
+    await mirror.save({ v: 1, agent: 'Nova', seq: 7, saved_at: '2026-01-01T00:00:00.000Z' });
+    assert.ok(pool.queries.some((query) => /INSERT INTO agent_checkpoints/.test(query.text) && query.values[0] === 'Nova' && query.values[1] === 7), 'the checkpoint did not reach the database');
+    await assert.rejects(mirror.save({ v: 1, agent: 'Arthur', seq: 1, saved_at: '2026-01-01T00:00:00.000Z' }), /did not answer|not this agent/);
+    assert.equal(second.stats().checkpoints_mirrored, 1);
     await second.goal_storage.save('Nova', { long_term: [], short_term: [] },
         { id: 'c1', agent: 'Nova', scope: 'short_term', before: [], after: [], reason: 'r', source: 'executor', call_id: null, ts: '2026-01-01T00:00:00.000Z' });
     await settle();
@@ -297,14 +330,41 @@ test('planning server: no database configured keeps calls in memory; a configure
 
     // a database that cannot be reached at start is not a reason to stop: everything is kept in memory
     const warnings = [];
-    const third = await startPlanning({ ...PLANNING, postgres_url: 'postgres://genesis@db:5432/genesis' }, {
-        setSocketExtension: () => {}, clock: fakeClock(), createModel: () => stubModel(clock), warn: (line) => warnings.push(JSON.parse(line)),
+    const third_extensions = [];
+    const third = await startPlanning(PLANNING, {
+        postgres_url: 'postgres://genesis@db:5432/genesis',
+        setSocketExtension: (extension) => third_extensions.push(extension), clock: fakeClock(), createModel: () => stubModel(clock), warn: (line) => warnings.push(JSON.parse(line)),
         createPool: async () => { throw new Error("Cannot find package 'pg'"); },
     });
     assert.equal(warnings[0].event, 'genesis_planning_no_database');
     await third.goal_storage.save('Nova', { long_term: [], short_term: [] }, {});
     assert.deepEqual(await third.goal_storage.load('Nova'), { long_term: [], short_term: [] });
+    // without a database the agent's mirror is told so once, and then stays quiet: nothing fails, nothing is reported
+    const lone = fakeWire();
+    third_extensions[0](lone.server, { isAgentSocket: () => true });
+    const no_mirror = socketCheckpointMirror({ socket: lone.client });
+    await no_mirror.save({ v: 1, agent: 'Nova', seq: 1, saved_at: '2026-01-01T00:00:00.000Z' });
+    assert.equal(no_mirror.isOff(), true);
+    const sent_before = lone.sent.length;
+    await no_mirror.save({ v: 1, agent: 'Nova', seq: 2, saved_at: '2026-01-01T00:00:30.000Z' });
+    assert.equal(await no_mirror.load('Nova'), null);
+    assert.equal(lone.sent.length, sent_before, 'the agent kept asking a MindServer that has no mirror');
     third.stop();
+
+    // a database that is not up yet when the launcher starts: the tables are tried again until they are made
+    const late_clock = fakeClock();
+    const late_notes = [];
+    let attempts = 0;
+    const late = await startPlanning(PLANNING, {
+        postgres_url: 'postgres://genesis@db:5432/genesis', setSocketExtension: () => {}, clock: late_clock, createModel: () => stubModel(clock),
+        warn: (line) => late_notes.push(JSON.parse(line)), createPool: async () => recordingPool([]),
+        migrate: async () => { if (++attempts < 3) throw new Error('connect ECONNREFUSED'); return ['001_planner_calls.sql']; },
+    });
+    assert.deepEqual([late.database.connected, late.database.migrated, attempts], [true, false, 1]);
+    assert.match(late_notes[0].message, /connect ECONNREFUSED; trying again in 30 s/);
+    await late_clock.advance(61 * 1000);
+    assert.deepEqual([late.database.migrated, attempts], [true, 3]);
+    late.stop();
 });
 
 // ---- the executor on a bot ---------------------------------------------------------------

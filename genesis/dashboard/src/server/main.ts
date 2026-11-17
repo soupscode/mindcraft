@@ -6,6 +6,7 @@
 // Nothing here waits for Redis, Postgres or the MindServer to be there: each is retried in
 // the background and the pages say what is missing.
 
+import { createSkins } from './skins.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readConfig } from './config.js';
@@ -82,7 +83,10 @@ async function main() {
 
     const link = await createMindLink({ url: config.mindserver_url, live });
     const controls = createControls({ link, store, live, ids: createUlidFactory() });
-    const app = await buildApp({ live, store, controls, roster: config.roster, public_dir: config.public_dir });
+    const skins = createSkins({ store, link, roster: config.roster });
+    // (the skin service is told what is stored, so that it applies a skin again when its agent logs in)
+    setTimeout(() => { skins.announce().catch(() => {}); }, 5000).unref();
+    const app = await buildApp({ live, store, controls, skins, roster: config.roster, public_dir: config.public_dir, allow: config.allow });
 
     ingest.run().catch((err) => log('error', 'dashboard_ingest_ended', { message: String(err?.message ?? err) }));
 

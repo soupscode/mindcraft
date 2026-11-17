@@ -12,6 +12,7 @@ export interface Config {
     mindserver_url: string;
     roster: { name: string; role: string }[];
     public_dir: string;
+    allow: string[];
     migrations_dir: string;
 }
 
@@ -35,6 +36,7 @@ export function readConfig(env: Record<string, string | undefined>, base_dir: st
         group: env.DASHBOARD_CONSUMER_GROUP ?? 'dashboard',
         consumer: env.DASHBOARD_CONSUMER_NAME ?? 'dashboard-1',
         mindserver_url: env.GENESIS_MINDSERVER_URL ?? 'http://agents:8081',
+        allow: String(env.DASHBOARD_ALLOW ?? '').split(',').map((address) => address.trim()).filter(Boolean),
         roster: parseRoster(env.GENESIS_AGENTS ?? DEFAULT_AGENTS),
         public_dir: env.DASHBOARD_PUBLIC_DIR ?? `${base_dir}/public`,
         migrations_dir: env.DASHBOARD_MIGRATIONS_DIR ?? `${base_dir}/../migrations`,

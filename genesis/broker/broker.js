@@ -65,7 +65,7 @@ export const DECISION_CALL_DEFAULTS = Object.freeze({
     min_gap_ms: 0,
     timeout_ms: 15 * 1000,          // a decision that takes longer is given up (the code rule decides)
     max_tokens: 80,                 // the reply's own token limit
-    wait_ms: 20 * 1000,             // how long a decision waits for a model that is busy with another call
+    wait_ms: 120 * 1000,            // decided: a decision waits for a model that is busy with another call up to the message's expiry
 });
 
 export const SMALL_KINDS = Object.freeze(['chat_line', 'message_decision']);
@@ -507,8 +507,16 @@ export function createPlannerBroker({
         start({ probe_first = true } = {}) {
             running = true;
             scheduleProbe();
-            if (probe_first) return signal('desktop_available');
+            // decided: the gate says its state at start. A probe that passes announces "available" itself;
+            // one that fails changes nothing, so the state it leaves (away) is said here, once.
+            if (probe_first) {
+                return signal('desktop_available').then((state) => {
+                    if (!gate.isAvailable()) gate.report({ reason: 'not_reachable_at_start', at_start: true });
+                    return state;
+                });
+            }
             pump();
+            gate.report({ at_start: true });
             return Promise.resolve(gate.state());
         },
         // Stops the timers. Requests stay in the queue; a call in flight is left to end.

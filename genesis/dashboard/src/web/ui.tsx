@@ -41,6 +41,7 @@ function StatusPills() {
             {model.state === 'available' && <div class="pill">Model available</div>}
             {(model.state === 'away' || model.state === 'leaving') && <div class="pill gold">Model away{since(model.since)}</div>}
             {model.state === 'unknown' && loaded && <div class="pill quiet">Model unknown</div>}
+            {Object.keys(live.server?.waiting ?? {}).length > 0 && <div class="pill gold" title={Object.values(live.server.waiting)[0]?.message}>Minecraft server unreachable · {Object.keys(live.server.waiting).length} waiting</div>}
             {health?.redis_ok === false && <div class="pill fail">Redis down{since(health.redis_down_since)}</div>}
             {health?.postgres_ok === false && <div class="pill fail">Postgres down{since(health.postgres_down_since)}</div>}
             {health?.postgres_ok === false && <div class="pill quiet">Live view from memory</div>}

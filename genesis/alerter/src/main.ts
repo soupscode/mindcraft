@@ -6,6 +6,7 @@
 // It needs neither store to start: Redis and Postgres are retried in the background, and
 // either one being unreachable for 60 seconds is itself an alert.
 
+import { sendTestPush } from './test_push.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAlerter } from './alerter.js';
@@ -68,6 +69,14 @@ async function main() {
     const store = pool ? createPgAlertStore(pool) : noStore();
     const stream = await createRedisStream({ url: config.redis_url });
     const notifier = createNtfy({ server: config.ntfy_server, topic: config.ntfy_topic, token: config.ntfy_token });
+    if (process.argv.includes('--test-push')) {
+        // one harmless push through the alerter's own notifier, and a closed record of how it went
+        // (genesis/up.sh --test-alert; genesis/status.sh shows whether one was ever accepted)
+        const outcome = await sendTestPush({ notifier, store, ids: createUlidFactory() });
+        console.log(outcome.line);
+        await pool?.end();
+        process.exit(outcome.ok ? 0 : 1);
+    }
     if (!notifier.enabled()) log('error', 'alerter_no_topic', { message: 'NTFY_TOPIC is not set: alerts are recorded, nobody is pinged' });
 
     const alerter = createAlerter({ notifier, store, marks: stream, ids: createUlidFactory(), warn: (line) => console.log(line) });

@@ -19,7 +19,8 @@ import { Trace } from './views/Trace';
 import { Controls } from './views/Controls';
 import { Digest } from './views/Digest';
 import { Routines } from './views/Routines';
-import { Memory, Repair, World } from './views/Pending';
+import { Memory, Repair } from './views/Pending';
+import { World } from './views/World';
 
 function currentPath(): { path: string; arg: string | null } {
     const hash = location.hash.replace(/^#/, '') || '/';

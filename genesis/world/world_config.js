@@ -244,7 +244,8 @@ export function checkWorldConfig(config, { blueprints = null } = {}) {
                 if (far > owner.range) add('outside_owner_range', `${where} reaches ${Math.ceil(far)} blocks from ${owner.name}'s home, outside the range of ${owner.range}`);
             }
         }
-        if (plot.min[1] < BUILD_HEIGHT.min || plot.max[1] > BUILD_HEIGHT.max) add('outside_build_height', `${where} leaves the build height (${BUILD_HEIGHT.min} to ${BUILD_HEIGHT.max})`);
+        // (the layer under a plot is its floor, which the bootstrap lays: it must exist too)
+        if (plot.min[1] - 1 < BUILD_HEIGHT.min || plot.max[1] > BUILD_HEIGHT.max) add('outside_build_height', `${where} leaves the build height (${BUILD_HEIGHT.min} to ${BUILD_HEIGHT.max})`);
     });
 
     // ---- the blocks of the camp ----

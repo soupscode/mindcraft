@@ -226,13 +226,20 @@ export function createMindServer(host_public = false, port = 8080, listen_host =
             const agent = agent_connections[agentName];
             if (agent) {
                 agent.setSettings(settings);
-                agent.socket.emit('restart-agent');
+                // Genesis: an agent whose process is not connected has no socket to tell (it threw here)
+                if (agent.socket) agent.socket.emit('restart-agent');
             }
         });
 
         socket.on('restart-agent', (agentName) => {
+            // Genesis: an unknown agent, or one whose process is not connected, cannot be restarted (it threw here)
+            const agent = agent_connections[agentName];
+            if (!agent || !agent.socket) {
+                console.warn(`Cannot restart agent ${agentName}: it is not connected`);
+                return;
+            }
             console.log(`Restarting agent: ${agentName}`);
-            agent_connections[agentName].socket.emit('restart-agent');
+            agent.socket.emit('restart-agent');
         });
 
         socket.on('stop-agent', (agentName) => {

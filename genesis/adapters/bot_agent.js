@@ -5,6 +5,7 @@
 // NOT RUN AGAINST A REAL MINECRAFT SERVER, MINDSERVER OR MODEL. This file is the wiring; the
 // parts it joins are tested with stand-ins (see genesis/tests).
 
+import { installGateKeeper } from '../lib/gate_keeper.js';
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import * as skills from '../../src/agent/library/skills.js';
@@ -19,7 +20,7 @@ import { fileBlueprints } from '../catalog/blueprints.js';
 import { createScaffoldTracker, placementSink } from '../executor/scaffold.js';
 import { createCheckpointStore } from '../store/checkpoint.js';
 import { nodeFiles } from '../store/node_files.js';
-import { socketGoalStorage } from '../planning/host.js';
+import { socketGoalStorage, socketCheckpointMirror } from '../planning/host.js';
 import { createAgentRuntime } from '../agent/runtime.js';
 import { DEFAULT_CHECKPOINT_DIR, DEFAULT_WORLD_FILE, genesisRecoveryOn, genesisRelayOn } from '../agent/hooks.js';
 import { installBotGuards } from '../lib/bot_guards.js';
@@ -46,6 +47,8 @@ export async function buildBotRuntime(agent, settings) {
     // every block the bot places is tracked as scaffolding, except a torch of upstream's idle torch reflex
     // (decided: those may stay in the camp, the field and the plots; genesis/executor/scaffold.js)
     const guards = installBotGuards(bot, { zones, onPlace: placementSink(scaffold, () => agent.actions?.currentActionLabel ?? null) });
+    // the camp is fenced: a gate the pathfinder opened is closed again behind the agent (genesis/lib/gate_keeper.js)
+    installGateKeeper(bot, { inCamp: (pos) => zones.protectedAt({ x: pos.x, y: pos.y, z: pos.z }) === 'camp' });
     const socket = serverProxy.getSocket();
     const send = (event, ...args) => {
         if (!socket.connected) throw new Error('not connected to MindServer');
@@ -64,6 +67,8 @@ export async function buildBotRuntime(agent, settings) {
         goal_storage: socketGoalStorage({ socket }),
         checkpoints: createCheckpointStore({
             files: nodeFiles(), dir: planning.checkpoint_dir || DEFAULT_CHECKPOINT_DIR,
+            // the copy in the database, through the MindServer (which says so when it has none)
+            mirror: socketCheckpointMirror({ socket }),
             report: (problem) => logLine({ event: 'genesis_checkpoint_problem', ...problem }),
         }),
         send,
