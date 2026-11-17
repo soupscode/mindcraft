@@ -24,7 +24,7 @@ import {
     checkWorldConfig, worldHash, WORLD_PROBLEMS, DECIDED_RANGES, DECIDED_RULES, DECIDED_BORDER_SIZE, PLOT_SIZE, borderBox, seedText,
 } from '../world/world_config.js';
 import { buildBootstrapPlan, serverSettingsText, GAME_RULES_USED, CAMP_LEVELLING, FILL_LIMIT, COMMANDS_USED } from '../world/plan.js';
-import { runBootstrap, reportLines, parseItems, ANSWERS } from '../world/bootstrap.js';
+import { runBootstrap, reportLines, parseItems, parseItemCompound, readContainer, ANSWERS } from '../world/bootstrap.js';
 import { OPERATOR, MANIFEST_KIND, checkManifest, parseManifest, manifestPaths, RESET_MARKER_FILE, SERVER_SETTINGS_FILE } from '../world/manifest.js';
 import { planReset, runReset, resetFiles, resetLines, RESET_FLAG, RESET_TABLES } from '../world/reset.js';
 import { checkBootstrap, checkWorld } from '../lib/config.js';
@@ -493,6 +493,82 @@ test('bootstrap: a second run on a bootstrapped world issues no placing commands
     assert.match(holed.result.problems[0], /floor check failed at 7, 63, -3: the camp floor should be minecraft:grass_block or minecraft:dirt, the server says "Test failed"/);
     assert.deepEqual(first.server.changing(), [], 'a check never repairs: the floor is the operator\'s to put right');
     assert.equal(parseManifest(first.files.store.get(MANIFEST)).verified, false);
+});
+
+// Found on the first real server (Paper 1.21.6): the answer to "data get block <pos> Items" for the
+// kits chest came back cut off, and the bootstrap, which had filled the chest correctly, failed its own check.
+test('kit check: a container list the server cuts off is read one stack at a time, as on the real server', async () => {
+    // the real answer, word for word
+    const cut_off = '276, 68, -14 has the following block data: [{Slot: 0b, id: "minecraft:stone_axe", count: 1}, {Slot: 1b, id: "...';
+    assert.equal(parseItems(cut_off), null);
+    assert.deepEqual(parseItemCompound('{Slot: 0b, id: "minecraft:stone_axe", count: 1}'), { slot: 0, item: 'minecraft:stone_axe', count: 1 });
+    assert.equal(parseItemCompound('{Slot: 1b, id: "...'), null);
+
+    // a server that answers like that one: eight stacks do not fit in one answer
+    const kit = ['stone_axe', 'stone_pickaxe', 'stone_hoe', 'stone_sword', 'bread', 'torch', 'wheat_seeds', 'wheat_seeds'];
+    const answers = (stacks, limit = 70) => {
+        const sent = [];
+        const print = (name, slot) => `{Slot: ${slot}b, id: "minecraft:${name}", count: ${slot + 1}}`;
+        const reply = (data) => `276, 68, -14 has the following block data: ${data.length > limit ? `${data.slice(0, limit - 3)}...` : data}`;
+        const send = async (command) => {
+            sent.push(command);
+            const path = command.split(' ')[6];
+            const element = /^Items\[(\d+)\](?:\.(Slot|id|count))?$/.exec(path);
+            if (path === 'Items') return reply(`[${stacks.map(print).join(', ')}]`);
+            const index = Number(element[1]);
+            if (index >= stacks.length) return `Found no elements matching ${path}`;
+            if (element[2] === 'Slot') return reply(`${index}b`);
+            if (element[2] === 'id') return reply(`"minecraft:${stacks[index]}"`);
+            if (element[2] === 'count') return reply(`${index + 1}`);
+            return reply(print(stacks[index], index));
+        };
+        return { send, sent };
+    };
+    const real = answers(kit);
+    const read = await readContainer(real.send, [276, 68, -14]);
+    assert.equal(read.not_loaded, false);
+    assert.deepEqual([...read.slots].map(([slot, stack]) => [slot, stack.item, stack.count]), kit.map((name, slot) => [slot, `minecraft:${name}`, slot + 1]));
+    assert.deepEqual(real.sent.slice(0, 2), ['data get block 276 68 -14 Items', 'data get block 276 68 -14 Items[0]']);
+    assert.equal(real.sent.at(-1), 'data get block 276 68 -14 Items[8]', 'it stops at the first element the server does not have');
+
+    // a list that fits is still one command
+    const short = answers(['bread']);
+    assert.equal((await readContainer(short.send, [276, 68, -14])).slots.get(0).item, 'minecraft:bread');
+    assert.equal(short.sent.length, 1);
+
+    // a single stack that is itself cut off is read field by field
+    const narrow = answers(kit, 40);
+    const fields = await readContainer(narrow.send, [276, 68, -14]);
+    assert.deepEqual(fields.slots.get(1), { item: 'minecraft:stone_pickaxe', count: 2 });
+    assert.ok(narrow.sent.includes('data get block 276 68 -14 Items[1].id'));
+
+    // an area that is not loaded is named as that, never as a wrong item
+    const away = await readContainer(async () => 'That position is not loaded', [276, 68, -14]);
+    assert.deepEqual([away.slots, away.not_loaded], [null, true]);
+    // and an answer nobody understands stays "not understood"
+    const odd = await readContainer(async () => 'The target block is not a block entity', [276, 68, -14]);
+    assert.deepEqual([odd.slots, odd.not_loaded], [null, false]);
+});
+
+test('kit check: the bootstrap passes on a server that cuts the kit list off, and says so when the area is not loaded', async () => {
+    const config = exampleWorld();
+    const server = fakeMinecraft({ seed: seedText(config.seed) });
+    assert.ok(server.data_reply_limit < 200, 'the stand-in cuts long answers off, as the real server does');
+    const first = await bootstrap(config, { server });
+    assert.equal(first.result.ok, true, first.result.problems.join('; '));
+    assert.ok(first.result.commands.some((entry) => /^data get block .* Items\[0\]$/.test(entry.command)), 'the stacks were read one at a time');
+
+    // the same world again: the kit is recognised, nothing is put into the chest a second time
+    const again = await bootstrap(config, { server, files: first.files });
+    assert.equal(again.result.ok, true, again.result.problems.join('; '));
+    assert.equal(again.result.commands.filter((entry) => entry.command.startsWith('item replace')).length, 0);
+
+    // a fresh world whose kits chest cannot be read because nobody is near
+    const far = fakeMinecraft({ seed: seedText(config.seed) });
+    far.unloaded = () => true;
+    const stopped = await bootstrap(config, { server: far });
+    assert.equal(stopped.result.ok, false);
+    assert.match(stopped.result.problems[0], /item check failed .* the area is not loaded on the server/);
 });
 
 test('bootstrap: levelling never runs over a camp that stands, and a fill the server does not take stops the run', async () => {
