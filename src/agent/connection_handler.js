@@ -28,7 +28,7 @@ const ERROR_DEFINITIONS = {
         isFatal: false
     },
     'network_error': {
-        keywords: ['timeout', 'timed out', 'connection lost', 'reset', 'refused', 'keepalive'],
+        keywords: ['timeout', 'timed out', 'connection lost', 'reset', 'refused', 'keepalive', 'throttled'],
         msg: 'Network Error: Connection timed out or was lost.',
         isFatal: false
     },

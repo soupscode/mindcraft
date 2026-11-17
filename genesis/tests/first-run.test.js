@@ -26,7 +26,7 @@ test('packages: mineflayer is installed in the version its patch was made for', 
     const patch = readdirSync(path.join(REPO_ROOT, 'patches')).find((name) => /^mineflayer\+[^+]+\.patch$/.test(name));
     assert.ok(patch, 'patches/ has no patch for mineflayer');
     const version = /^mineflayer\+([^+]+)\.patch$/.exec(patch)[1];
-    // a range ("^4.33.0") installs whatever is newest: 4.39.0 changed all three patched files and the patch was skipped
+    // a range ("^4.33.0") installs whatever is newest, and a patch made for another version is then skipped
     assert.equal(root.dependencies.mineflayer, version, 'the root package.json must name the exact version of patches/' + patch);
     // the installed copy cannot be looked at here (the tests run without node_modules): node genesis/tools/preflight.js does
 });
