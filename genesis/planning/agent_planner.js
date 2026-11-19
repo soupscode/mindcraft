@@ -37,7 +37,10 @@
 // last_outcome, routine, home_distance, memory }, onGoals(queued goals, origin), onGate(state, before),
 // inHand() -> the id of the goal being carried out that a reply must not replace, or null,
 // keeps(goal) -> true for a waiting goal a reply must not replace (a commitment to another agent),
-// held() -> true while the operator holds the agent.
+// held() -> true while the operator holds the agent,
+// rank(options, state) -> Promise<[{ id, label, estimate, score, need }] | null>: the learner's order and annotations
+// for what the catalog offered (genesis/learning; left out: the catalog's order, no annotation),
+// onDecision({ call_id, offered, chosen, default_choice }): told what a valid reply chose among what was offered.
 // Depends only on other Genesis files.
 
 import { buildPlanContext } from './context.js';
@@ -56,7 +59,7 @@ const URGENT = new Set(['operator_message', 'agent_request', 'step_failed', 'ref
 
 export function createAgentPlanner({
     agent, send, clock, catalog, state, goals, describe = () => ({}), onGoals = () => {}, onGate = () => {},
-    buildContext = buildPlanContext, inHand = () => null, held = () => false, keeps = () => false, ...options
+    buildContext = buildPlanContext, inHand = () => null, held = () => false, keeps = () => false, rank = null, onDecision = () => {}, ...options
 } = {}) {
     const config = { ...PLANNER_CLIENT_DEFAULTS };
     for (const key of Object.keys(PLANNER_CLIENT_DEFAULTS)) {
@@ -71,6 +74,7 @@ export function createAgentPlanner({
     let last_thought = null;    // { text, at } the model's own sentence, from its last valid reply
     let last_failure = null;    // { reason, at } of the last request that brought no goals
     let counter = 0;
+    let last_offer = null;      // what the model was shown for the request in hand: { request_id, offered, default_choice } (for the decision row)
     // What just could not be done: option id -> { reason, kind, title, at, stamp }.
     //   kind 'failed'       it was tried and failed. Not offered again until what the reason depends on changes
     //                       (stamp), or failed_memory_ms have passed.
@@ -166,14 +170,38 @@ export function createAgentPlanner({
                 if (options.length === 0 && failed.size > 0) options = catalog.offer(now_state); // rather the same again than nothing
                 else stats.withheld += failed.size;
                 if (options.length === 0) { ack({ error: 'no_options: nothing can be started right now' }); return; }
-                const about = describe() ?? {};
-                const built = buildContext({
-                    agent, role: about.role ?? null, trigger: request?.trigger ?? pending?.trigger ?? last_trigger,
-                    view: now_state.view, home_distance: about.home_distance ?? null, long_term: about.long_term ?? [],
-                    last_outcome: about.last_outcome ?? null, routine: about.routine ?? null, memory: about.memory ?? '', options,
-                    recent_failures: [...failed.values()].slice(-2).map((entry) => ({ title: entry.title, reason: entry.reason, kind: entry.kind })),
-                });
-                ack({ context: built.context, options: built.options, tokens: built.tokens });
+                // The learner orders and annotates what the catalog offered (genesis/learning). THE SAME options: one it
+                // leaves out stays in the list behind the others, one it names that was not offered is ignored.
+                const finish = (ranked) => {
+                    try {
+                        const by_id = new Map(options.map((option) => [option.id, option]));
+                        const shown = [];
+                        for (const entry of Array.isArray(ranked) ? ranked : []) {
+                            const option = by_id.get(entry?.id);
+                            if (!option || shown.some((it) => it.id === option.id)) continue;
+                            shown.push({ ...option, ...(typeof entry.label === 'string' && entry.label.length > 0 ? { label: entry.label } : {}), estimate: entry.estimate ?? null, score: entry.score ?? null, need: entry.need ?? null });
+                        }
+                        for (const option of options) if (!shown.some((it) => it.id === option.id)) shown.push(option);
+                        const about = describe() ?? {};
+                        const built = buildContext({
+                            agent, role: about.role ?? null, trigger: request?.trigger ?? pending?.trigger ?? last_trigger,
+                            view: now_state.view, home_distance: about.home_distance ?? null, long_term: about.long_term ?? [],
+                            last_outcome: about.last_outcome ?? null, routine: about.routine ?? null, memory: about.memory ?? '', options: shown,
+                            recent_failures: [...failed.values()].slice(-2).map((entry) => ({ title: entry.title, reason: entry.reason, kind: entry.kind })),
+                        });
+                        last_offer = {
+                            request_id: request?.id ?? null, default_choice: options[0].id, annotated: Array.isArray(ranked),
+                            offered: shown.map((option) => ({ id: option.id, p_ok: option.estimate?.p_ok ?? null, p_danger: option.estimate?.p_danger ?? null, secs: option.estimate?.secs ?? null, n: option.estimate?.n ?? 0, need: option.need ?? null, score: option.score ?? null })),
+                        };
+                        ack({ context: built.context, options: built.options, tokens: built.tokens });
+                    } catch (err) {
+                        ack({ error: `context could not be built: ${err?.message ?? err}` });
+                    }
+                };
+                if (typeof rank !== 'function') { finish(null); return; }
+                let asked;
+                try { asked = Promise.resolve(rank(options, now_state)); } catch { asked = Promise.resolve(null); }
+                asked.then(finish, () => finish(null));
             } catch (err) {
                 ack({ error: `context could not be built: ${err?.message ?? err}` });
             }
@@ -251,6 +279,12 @@ export function createAgentPlanner({
             // only the goals this reply put in are the planner's with this call id; the goal in hand keeps its own origin
             const added = change.ok ? queued.filter((goal) => !change.change.before.some((old) => old.id === goal.id)) : [];
             stats.goals_queued += added.length;
+            // the choice, with everything that was on offer and what the learner said about it (the decision row)
+            if (last_offer && (last_offer.request_id === null || last_offer.request_id === result.request_id)) {
+                const offer = last_offer;
+                last_offer = null;
+                try { onDecision({ call_id: result.call_id ?? null, offered: offer.offered, default_choice: offer.default_choice, annotated: offer.annotated, chosen: wanted_all.map((goal) => goal.option_id), added: added.map((goal) => goal.option_id) }); } catch { /* the listener's problem */ }
+            }
             onGoals(added, { source: 'planner', call_id: result.call_id }, { dropped, kept: queued.length - added.length, stale });
             return { kind: 'goals', goals: queued, added, dropped, stale, call_id: result.call_id };
         },

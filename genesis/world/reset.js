@@ -14,6 +14,13 @@
 //   goals          the tables agent_goals and goal_changes, and the checkpoint mirror
 //                  agent_checkpoints, when a Postgres address is configured. Without one the
 //                  goals only live in the launcher's memory and are gone when it stops.
+//   places         what the learner remembers of PLACES in the old world (decided): the file
+//                  <learning_dir>/places.json, and with a database the row "places" of learning_state
+//   the town       the town file (the plots, homes and proposals of the old world), and with a
+//                  database the table builds
+// KEPT OF WHAT WAS LEARNED (decided): the network (its weight files), the count table, the
+// experience and decision rows, lessons and plays. A new world starts with everything the
+// agents learned about night, distance and tools, and with no memory of where things were.
 // KEPT: identity (the profiles, and <bots>/<Agent>/last_profile.json), the settings, the
 // world file with its seed, the blueprints, incidents, logs, the planner call records, and
 // the bootstrap manifest of the old world (the next bootstrap files it away).
@@ -42,6 +49,9 @@ import { DEFAULT_MANIFEST_FILE, manifestPaths } from './manifest.js';
 export const RESET_FLAG = '--yes-wipe-everything';
 export const DEFAULT_MEMORY_DIR = './bots';
 export const RESET_TABLES = Object.freeze(['agent_goals', 'goal_changes', 'agent_checkpoints']);
+// with the learner and the town (only when their folders are given): remembered places and the old world's builds
+export const RESET_LEARNING_STATEMENTS = Object.freeze(["DELETE FROM learning_state WHERE name = 'places'", 'DELETE FROM builds']);
+export const PLACES_FILE = 'places.json';
 const AGENT_NAME = /^[A-Za-z0-9_]{1,64}$/;
 
 const inside = (root, target) => target === root || target.startsWith(root + path.sep);
@@ -81,7 +91,7 @@ export async function resetFiles() {
 //               database: [statements], marker, roots, kept: [notes] }.
 export async function planReset({
     agents = [], memory_dir = DEFAULT_MEMORY_DIR, checkpoint_dir, ledger_file, manifest_file = DEFAULT_MANIFEST_FILE,
-    protect = [], database = false, files, cwd = process.cwd(),
+    protect = [], database = false, files, cwd = process.cwd(), learning_dir = null, town_file = null,
 } = {}) {
     const abs = (file) => path.resolve(cwd, file);
     const plan = { ok: true, refused: [], remove: [], skipped: [], database: [], marker: abs(manifestPaths(manifest_file).reset_marker), roots: [], kept: [] };
@@ -103,8 +113,10 @@ export async function planReset({
         memory: names.map((agent) => abs(path.join(memory_dir, agent))),
         checkpoints: [abs(checkpoint_dir)],
         ledger: [abs(path.dirname(ledger_file))],
+        learning: typeof learning_dir === 'string' && learning_dir.length > 0 ? [abs(learning_dir)] : [],
+        town: typeof town_file === 'string' && town_file.length > 0 ? [abs(path.dirname(town_file))] : [],
     };
-    plan.roots = [...roots.memory, ...roots.checkpoints, ...roots.ledger];
+    plan.roots = [...roots.memory, ...roots.checkpoints, ...roots.ledger, ...roots.learning, ...roots.town];
     const filesystem_root = path.parse(abs('.')).root;
     for (const root of plan.roots) {
         if (root === filesystem_root || root === abs('.') || inside(root, abs('.'))) refuse(`the data folder ${root} is the working folder or lies above it`);
@@ -160,8 +172,20 @@ export async function planReset({
         await want(ledger_file, 'the chest ledger', roots.ledger);
         await want(`${ledger_file}.tmp`, 'the chest ledger (unfinished write)', roots.ledger);
     }
-    if (database) plan.database = RESET_TABLES.map((table) => `DELETE FROM ${table}`);
+    // remembered places, and nothing else of the learner's: the weights and the count table stay where they are
+    for (const root of roots.learning) {
+        if (!(await realFolder(root, root))) continue;
+        await want(path.join(root, PLACES_FILE), 'remembered places (the learner)', roots.learning);
+        await want(path.join(root, `${PLACES_FILE}.tmp`), 'remembered places (unfinished write)', roots.learning);
+    }
+    for (const root of roots.town) {
+        if (!(await realFolder(root, root))) continue;
+        await want(town_file, 'the town file (plots, homes and proposals of the old world)', roots.town);
+        await want(`${town_file}.tmp`, 'the town file (unfinished write)', roots.town);
+    }
+    if (database) plan.database = [...RESET_TABLES.map((table) => `DELETE FROM ${table}`), ...(roots.learning.length > 0 ? RESET_LEARNING_STATEMENTS : [])];
     plan.kept = [
+        ...(roots.learning.length > 0 ? ['what the agents learned: the network, the count table, experience, lessons and plays'] : []),
         'the profiles and each agent\'s last_profile.json (identity)',
         'the settings and the world file with its seed',
         'the blueprints',
@@ -273,6 +297,8 @@ async function main(argv) {
     const planning = settings.genesis_planning ?? {};
     const { DEFAULT_CHECKPOINT_DIR, DEFAULT_WORLD_FILE, DEFAULT_LEDGER_FILE } = await import('../agent/hooks.js');
     const { BLUEPRINT_DIR } = await import('../catalog/blueprints.js');
+    const { LEARNING_DIR } = await import('../learning/store.js');
+    const { DEFAULT_TOWN_FILE } = await import('../town/town_file.js');
     const profiles = Array.isArray(settings.profiles) ? settings.profiles : [];
     const agents = [];
     for (const profile of profiles) {
@@ -298,6 +324,7 @@ async function main(argv) {
     const outcome = await runReset({
         agents, memory_dir: DEFAULT_MEMORY_DIR, checkpoint_dir: planning.checkpoint_dir || DEFAULT_CHECKPOINT_DIR,
         ledger_file: planning.ledger_file || DEFAULT_LEDGER_FILE, manifest_file: planning.manifest_file || DEFAULT_MANIFEST_FILE,
+        learning_dir: LEARNING_DIR, town_file: planning.town_file || DEFAULT_TOWN_FILE,
         protect: [...profiles, settings_file, world_file, BLUEPRINT_DIR, './genesis', './src'], database,
     }, { confirmed, files: await resetFiles(), pool, seed, world_file });
     try { await pool?.end?.(); } catch { /* closing is best effort */ }

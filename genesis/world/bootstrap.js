@@ -684,7 +684,7 @@ export async function readSiteRecord({ files, manifest_file = DEFAULT_MANIFEST_F
 async function main(argv) {
     const { readFileSync, existsSync } = await import('node:fs');
     const { nodeFiles } = await import('../store/node_files.js');
-    const { fileBlueprints } = await import('../catalog/blueprints.js');
+    const { buildBlueprints } = await import('../catalog/blueprints.js');
     const { createRconClient, RCON_DEFAULT_PORT } = await import('./rcon.js');
     const repo_root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
     process.chdir(repo_root);
@@ -697,7 +697,7 @@ async function main(argv) {
     }
     const world_file = option(argv, '--world') ?? process.env.GENESIS_WORLD_FILE ?? settings.genesis_planning?.world_file ?? './genesis/genesis.world.json';
     const manifest_file = option(argv, '--manifest') ?? settings.genesis_planning?.manifest_file ?? DEFAULT_MANIFEST_FILE;
-    const blueprints = fileBlueprints();
+    const blueprints = buildBlueprints();
     const pick_only = argv.includes('--pick-site');
     const have_world = existsSync(world_file);
     const log = (line) => console.log(line); // progress, as it happens

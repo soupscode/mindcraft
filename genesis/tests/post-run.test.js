@@ -19,7 +19,7 @@ import { createEmitter } from '../events/agent_emit.js';
 import { runBootstrap } from '../world/bootstrap.js';
 import { worldZonesDetail, bootstrapSummary, announceWorld, WORLD_EVENT_AGENT } from '../world/announce.js';
 import { worldHash } from '../world/world_config.js';
-import { fileBlueprints } from '../catalog/blueprints.js';
+import { buildBlueprints } from '../catalog/blueprints.js';
 import { checkSkinPng, createSkinService, SKIN_LIMITS, SKIN_COMMANDS } from '../skins/skins.js';
 import { startSkins } from '../skins/server.js';
 
@@ -82,7 +82,7 @@ test('the world is announced as events: the zones of the world file and the summ
     const files = fakeFiles();
     const server = fakeMinecraft({ seed: '20261116', worldedit: {} });
     server.blocks.set('3,64,3', { name: 'oak_log', states: {} });
-    const done = await runBootstrap({ config, rcon: server, files, clock: fakeClock(), manifest_file: '/w/bootstrap.manifest.json', blueprints: fileBlueprints(path.join(REPO_ROOT, 'src', 'agent', 'npc', 'construction')), sleep: async () => {} });
+    const done = await runBootstrap({ config, rcon: server, files, clock: fakeClock(), manifest_file: '/w/bootstrap.manifest.json', blueprints: buildBlueprints({ root: REPO_ROOT }), sleep: async () => {} });
     assert.equal(done.ok, true, done.problems.join('; '));
 
     const zones = worldZonesDetail(config);

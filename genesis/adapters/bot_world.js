@@ -8,7 +8,7 @@
 // Injected (the real ones are passed in by genesis/adapters/bot_agent.js):
 //   world   src/agent/library/world.js   getInventoryCounts (line 262), getNearestBlocks (line 118)
 //   mc      src/utils/mcdata.js           getItemId (158), getBlockId (174), getItemCraftingRecipes (248),
-//                                         isSmeltable (286), getSmeltingFuel (291), getFuelSmeltOutput (301)
+//                                         isSmeltable (286), getSmeltingFuel (291), getFuelSmeltOutput (301), isHostile (145)
 //   pf      mineflayer-pathfinder          Movements, goals.GoalNear
 //   Vec3    vec3
 // Depends on nothing else.
@@ -47,6 +47,8 @@ export function createBotView(bot, { world, mc, pf, Vec3, now = Date.now, ...opt
         // daylight cycle (mineflayer's bot.time.doDaylightCycle: false with "gamerule doDaylightCycle false")
         timeOfDay: () => Number(bot.time?.timeOfDay ?? 0) % 24000,
         daylightStopped: () => bot.time?.doDaylightCycle === false,
+        // the day of the world (mineflayer's bot.time.day), for "verified on day 33"
+        day: () => Math.floor(Number(bot.time?.day ?? 0)),
         blockAt(pos) {
             return seen(bot.blockAt(new Vec3(Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z))));
         },
@@ -104,6 +106,34 @@ export function createBotView(bot, { world, mc, pf, Vec3, now = Date.now, ...opt
         agentPosition(name) {
             const at = bot.players?.[name]?.entity?.position;
             return at ? { x: at.x, y: at.y, z: at.z } : null;
+        },
+        // ---- what the learning step records of a situation (genesis/learning/recorder.js) ----
+        // Hostile mobs within `distance` blocks, as upstream tells them (src/utils/mcdata.js isHostile, line 145;
+        // the entities are mineflayer's bot.entities, which only holds what the server has sent the bot).
+        hostilesNear(distance = 16) {
+            let count = 0;
+            try {
+                const here = bot.entity.position;
+                for (const entity of Object.values(bot.entities ?? {})) {
+                    if (!entity || entity === bot.entity || !entity.position) continue;
+                    if (here.distanceTo(entity.position) <= distance && mc.isHostile(entity)) count++;
+                }
+            } catch { /* nothing is known: none are counted */ }
+            return count;
+        },
+        // Is it raining or thundering (mineflayer's bot.isRaining and bot.thunderState).
+        raining: () => bot.isRaining === true || Number(bot.thunderState ?? 0) > 0,
+        // The other agents within `distance` blocks, nearest first: [{ name, dist }]. `names` are the agents of the
+        // world file; anybody else who is logged in (the operator, the camera) is not an agent.
+        agentsNear(names, distance = 16) {
+            const here = bot.entity.position;
+            const near = [];
+            for (const name of names ?? []) {
+                if (name === bot.username) continue;
+                const at = bot.players?.[name]?.entity?.position;
+                if (at && here.distanceTo(at) <= distance) near.push({ name, dist: Math.round(here.distanceTo(at) * 10) / 10 });
+            }
+            return near.sort((a, b) => a.dist - b.dist || a.name.localeCompare(b.name));
         },
         fuel() {
             const fuel = mc.getSmeltingFuel(bot);

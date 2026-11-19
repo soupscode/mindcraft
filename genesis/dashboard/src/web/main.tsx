@@ -22,6 +22,8 @@ import { Routines } from './views/Routines';
 import { Memory, Repair } from './views/Pending';
 import { World } from './views/World';
 import { Skins } from './views/Skins';
+import { Learning } from './views/Learning';
+import { Town } from './views/Town';
 
 function currentPath(): { path: string; arg: string | null } {
     const hash = location.hash.replace(/^#/, '') || '/';
@@ -48,6 +50,8 @@ function App() {
             {path === '/digest' && <Digest />}
             {path === '/routines' && <Routines />}
             {path === '/memory' && <Memory />}
+            {path === '/learning' && <Learning />}
+            {path === '/town' && <Town />}
             {path === '/world' && <World />}
             {path === '/skins' && <Skins />}
             {path === '/repair' && <Repair />}

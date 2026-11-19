@@ -38,6 +38,11 @@
         "enabled": true
     },
 
+    "genesis_learning": {
+        "enabled": true,
+        "explore_rate": 0.25
+    },
+
     "genesis_relay": {
         "enabled": true,
         "model_lines": true,

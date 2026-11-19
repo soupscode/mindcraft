@@ -45,11 +45,13 @@
 //     fuel() -> { name, count, per_item } | null   isSmeltable(item) -> boolean
 //   avoid: [{ x, y, z, radius }]  areas nothing may be aimed at (around a death point)
 //
-// Depends only on other files of genesis/catalog.
+// Depends only on other files of genesis/catalog, and on the prefab format and the unlock rule of genesis/build.
 
 import { STATION_RANGE, COMMON_FAILURES, isEmptyBlock } from './ops.js';
 import { boxContains, flatDistance } from './zones.js';
 import { parseChestView, contestedClaim } from './ledger.js';
+import { stagesOf, stageIndex, partsOf } from '../build/prefab.js';
+import { unlockState } from '../build/unlock.js';
 
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 const held = (state, item) => state.view.inventory()[item] ?? 0;
@@ -111,6 +113,17 @@ function chestRefusal(state, chest_name, ctx) {
 }
 
 const walkTo = (pos, ctx) => ({ command: 'goToPosition', args: [pos.x, pos.y, pos.z, ctx.config.arrive_distance] });
+// For the situation snapshot of the learning step (the template's target()): the middle of the field at the
+// agent's height, and where the other agent of a message or hand-over stands (null when it is not in sight).
+function fieldCentre(state) {
+    const field = state.zones.field();
+    return { x: Math.floor((field.min.x + field.max.x) / 2), y: Math.round(state.view.position().y), z: Math.floor((field.min.z + field.max.z) / 2) };
+}
+function recipientTarget(args, state, ctx) {
+    const there = state.view.agentPosition?.(args.to) ?? null;
+    const near = there !== null && dist(state.view.position(), there) <= ctx.config.handoff_distance;
+    return { pos: there, recipient: { near } };
+}
 const doneSteps = (plan, command) => (plan?.steps ?? []).filter((step) => step.command === command && step.status === 'done').length;
 
 // ---- travel ------------------------------------------------------------------------------
@@ -170,6 +183,11 @@ const travel = {
         return pathRefusal(state, place.pos, ctx.config.arrive_distance, ctx);
     },
     title: (args) => clip(`Walk to ${args.place}`),
+    // what the goal is aimed at, for the learning step's situation snapshot: { pos, kind?, path? } (path: the way there is checked)
+    target(args, state) {
+        const place = travel.place(args, state);
+        return place ? { pos: place.pos, kind: place.kind, path: true } : null;
+    },
     describe(args, state) {
         const place = travel.place(args, state);
         const far = place ? round(dist(state.view.position(), place.pos)) : 0;
@@ -250,6 +268,10 @@ const gather_blocks = {
         return null;
     },
     title: (args) => clip(`Gather ${args.count} ${args.type}`),
+    target(args, state, ctx) {
+        const near = gatherTargets(args, state, ctx).targets[0];
+        return near ? { pos: { x: near.x, y: near.y, z: near.z } } : null;
+    },
     describe(args, state, ctx) {
         const near = gatherTargets(args, state, ctx).targets[0];
         return `Gather up to ${args.count} ${args.type}${near ? ` (nearest ${round(dist(state.view.position(), near))} blocks away)` : ''}`;
@@ -322,6 +344,22 @@ const craft_item = {
 
 // ---- store_items -------------------------------------------------------------------------
 
+// The items the agent's own builds still want (every member of a family the catalog knows): Set of item names.
+// started_only: only of builds that were started (state.building says so).
+function ownBuildItems(state, ctx, started_only = false) {
+    const items = new Set();
+    try {
+        for (const plot of state.zones.plots()) {
+            if (!plot.blueprint || plot.owner !== state.agent) continue;
+            if (started_only && state.building?.started?.(plot.id, plot.blueprint) !== true) continue;
+            const survey = surveyPlot({ plot: plot.id }, state, ctx);
+            if (!survey || !survey.fits) continue;
+            for (const want of Object.keys(billOfWork(survey))) for (const item of membersKnown(want, ctx)) items.add(item);
+        }
+    } catch { /* a view that cannot be read: nothing is the build's */ }
+    return items;
+}
+
 const store_items = {
     name: 'store_items',
     progress_unit: 'items stored',
@@ -331,16 +369,24 @@ const store_items = {
     candidates(state, ctx) {
         const chest = state.zones.chest('shared') ? 'shared' : state.zones.chests()[0]?.name;
         if (!chest) return [];
+        // decided: an agent that lives in its home keeps a personal chest there. What its own build still wants goes
+        // into that one; everything else goes to the shared chest, which stays for the town's supplies.
+        // The materials of a build it has STARTED stay with the builder, wherever it lives (they were being put into a
+        // chest between two planning calls and fetched back eight at a time).
+        const own = state.zones.homeChest?.(state.agent) ?? null;
+        const in_use = state.building ? ownBuildItems(state, ctx, true) : new Set();
+        const mine = own ? ownBuildItems(state, ctx) : new Set();
         return Object.entries(state.view.inventory())
-            .filter(([item, count]) => count > 0 && !ctx.keep(item))
-            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-            .map(([item]) => ({ chest, item }));
+            .filter(([item, count]) => count > 0 && !ctx.keep(item) && !in_use.has(item))
+            .sort((a, b) => (mine.has(b[0]) ? 1 : 0) - (mine.has(a[0]) ? 1 : 0) || b[1] - a[1] || a[0].localeCompare(b[0]))
+            .map(([item]) => ({ chest: mine.has(item) ? own : chest, item }));
     },
     check(args, state, ctx) {
         if (held(state, args.item) <= 0) return 'not_held';
         return chestRefusal(state, args.chest, ctx);
     },
     title: (args) => clip(`Store ${args.item} in the ${args.chest} chest`),
+    target: (args, state) => { const pos = state.zones.chest(args.chest); return pos ? { pos, kind: 'chest', path: true } : null; },
     describe: (args, state) => `Put all ${held(state, args.item)} ${args.item} into the ${args.chest} chest`,
     steps: (args, state, ctx) => [walkTo(state.zones.chest(args.chest), ctx), { command: 'putInChest', args: [args.item, -1] }],
     baseline: (args, state) => ({ had: held(state, args.item) }),
@@ -411,6 +457,7 @@ const fetch_items = {
         return chestRefusal(state, args.chest, ctx);
     },
     title: (args) => clip(`Fetch ${args.count} ${args.item} from the ${args.chest} chest`),
+    target: (args, state) => { const pos = state.zones.chest(args.chest); return pos ? { pos, kind: 'chest', path: true } : null; },
     describe: (args, state) => `Take up to ${args.count} ${args.item} from the ${args.chest} chest (the ledger says ${state.ledger.count(args.chest, args.item)}, ${freeFor(state, args.chest, args.item)} not reserved by others)`,
     steps: (args, state, ctx) => [walkTo(state.zones.chest(args.chest), ctx), { command: 'takeFromChest', args: [args.item, args.count] }],
     baseline: (args, state) => ({ had: held(state, args.item) }),
@@ -466,6 +513,7 @@ const harvest_replant = {
         return null;
     },
     title: () => 'Harvest the field and replant',
+    target: (args, state) => ({ pos: fieldCentre(state) }),
     describe: (args, state, ctx) => `Harvest the ${matureCrops(state, ctx).length} mature crops in the field and replant them`,
     steps(args, state, ctx) {
         const here = state.view.position();
@@ -541,6 +589,7 @@ const sow_field = {
         return null;
     },
     title: (args) => clip(`Sow the field with ${args.seed}`),
+    target: (args, state) => ({ pos: fieldCentre(state) }),
     describe(args, state, ctx) {
         const bare = bareFarmland(state).length;
         return `Sow ${Math.min(bare, held(state, args.seed), ctx.config.sow_batch)} of the ${bare} bare cells of the field with ${args.seed}`;
@@ -603,8 +652,7 @@ export function buildNeeds(state, ctx) {
             if (!plot.blueprint || plot.owner !== state.agent) continue;
             const survey = surveyPlot({ plot: plot.id }, state, ctx);
             if (!survey || !survey.fits) continue;
-            const wanted = new Map();
-            for (const cell of survey.work) if (cell.want !== 'air') wanted.set(cell.want, (wanted.get(cell.want) ?? 0) + 1);
+            const wanted = new Map(Object.entries(billOfWork(survey)));
             const items = new Set();
             for (const [want, count] of wanted) {
                 if (heldOf(state, want) >= count) continue;
@@ -626,55 +674,229 @@ export function leadsTo(skill, args, needs, ctx) {
     return false;
 }
 
-// Every cell of the blueprint, in the world, lowest layer first. The blueprint has upstream's
-// construction format (src/agent/npc/construction/*.json): blocks[y][z][x]. Its lowest
-// layer lies on the plot's lowest layer and its corner on the plot's min corner.
+// ---- the cells of a build ----
+// A blueprint is upstream's construction format ({ name, blocks[y][z][x] }) or a PREFAB, which is the same
+// with more in it (genesis/build/prefab.js): `below` (layers set into the ground), `stages` (built in
+// order), `parts` (a door is two cells and one item), cells to keep clear ("air"), cells to leave alone
+// (""), `keeps` (cells an upgrade never breaks). A blueprint without those is one stage on the ground.
+const leftAlone = (want) => want === null || want === undefined || want === '';
+const belowOf = (blueprint) => (Number.isInteger(blueprint?.below) && blueprint.below > 0 ? blueprint.below : 0);
+const cellKey = (pos) => `${pos.x},${pos.y},${pos.z}`;
+// how many cells one item of this block fills ("door" is upstream's family name for any door)
+const cellsPerItem = (want, blueprint) => (want === 'door' ? 2 : partsOf(want, blueprint.parts ?? {}));
+
+// Every cell of the blueprint that is to hold a block or to be kept clear, in the world, IN BUILD ORDER:
+// stage by stage, inside a stage from the bottom up. Layer `below` of the blueprint lies on the plot's
+// lowest layer and its corner on the plot's min corner.
+//   { x, y, z, want, stage, follower }   follower: the upper cell of a block of several cells (a door):
+//                                        it is never placed, it comes with the cell under it
 function blueprintCells(plot, blueprint) {
+    const below = belowOf(blueprint);
+    const stages = stagesOf(blueprint);
     const cells = [];
     blueprint.blocks.forEach((layer, ry) => layer.forEach((row, rz) => row.forEach((want, rx) => {
-        if (want === null || want === '') return;
-        cells.push({ x: plot.min.x + rx, y: plot.min.y + ry, z: plot.min.z + rz, want });
+        if (leftAlone(want)) return;
+        let follower = false;
+        const parts = want === 'air' ? 1 : cellsPerItem(want, blueprint);
+        if (parts > 1) {
+            let under = 0;
+            while (ry - under - 1 >= 0 && blueprint.blocks[ry - under - 1]?.[rz]?.[rx] === want) under++;
+            follower = under % parts !== 0;
+        }
+        cells.push({ x: plot.min.x + rx, y: plot.min.y - below + ry, z: plot.min.z + rz, want, stage: Math.max(0, stageIndex(stages, ry, want)), follower });
     })));
+    return cells.sort((a, b) => a.stage - b.stage || a.y - b.y || a.z - b.z || a.x - b.x);
+}
+
+// The plot with the layers a prefab sets into the ground under it.
+const buildBox = (plot, blueprint) => ({ min: { ...plot.min, y: plot.min.y - belowOf(blueprint) }, max: plot.max });
+
+// UPGRADE IN PLACE (decided): on a plot whose last build is verified (plot.built names its prefab), a cell
+// that still holds exactly what that build put there is the builder's own work and may be cleared by the
+// plot's owner. Everything else that is not the ground stays foreign and still blocks. The cells that
+// build `keeps` (the personal chest) are never broken.
+//   -> Map of "x,y,z" -> { x, y, z, want, keep }
+function ownCells(plot, state) {
+    const cells = new Map();
+    const before = plot.built && plot.built !== plot.blueprint ? state.blueprints.get(plot.built) : null;
+    if (!before) return cells;
+    const below = belowOf(before);
+    const kept = new Set((before.keeps ?? []).map((keep) => cellKey({ x: plot.min.x + keep.at[0], y: plot.min.y - below + keep.at[1], z: plot.min.z + keep.at[2] })));
+    for (const cell of blueprintCells(plot, before)) if (cell.want !== 'air') cells.set(cellKey(cell), { ...cell, keep: kept.has(cellKey(cell)) });
+    // the owner's bed in the place the build before kept for it is the owner's furniture: taken along, never foreign
+    for (const key of bedPlace(plot, before)) {
+        const [x, y, z] = key.split(',').map(Number);
+        cells.set(key, { x, y, z, want: 'bed', stage: 0, follower: false, keep: false });
+    }
     return cells;
+}
+const isOwn = (own, pos, name) => { const was = own.get(cellKey(pos)); return Boolean(was) && !was.keep && satisfied(was.want, name); };
+
+// The two cells a home prefab keeps clear for its owner's bed, in the world: Set of "x,y,z".
+function bedPlace(plot, blueprint) {
+    const below = belowOf(blueprint);
+    return new Set((blueprint?.bed ? [blueprint.bed.head, blueprint.bed.foot] : []).map(([x, y, z]) => cellKey({ x: plot.min.x + x, y: plot.min.y - below + y, z: plot.min.z + z })));
 }
 
 // Sorts the cells into: matching, to clear, to place, not natural, not loaded.
+//   stages [{ name, total, matching }], stage (the index of the earliest stage with work left, or null)
 function surveyPlot(args, state, ctx) {
     const plot = state.zones.plot(args.plot);
     const blueprint = plot?.blueprint ? state.blueprints.get(plot.blueprint) : null;
     if (!plot || !blueprint) return null;
-    const survey = { plot, blueprint, total: 0, matching: 0, work: [], foreign: 0, unloaded: 0, fits: true };
+    const stages = stagesOf(blueprint).map((stage) => ({ name: stage.name, total: 0, matching: 0 }));
+    const survey = { plot, blueprint, total: 0, matching: 0, placed: 0, work: [], foreign: 0, unloaded: 0, fits: true, stages, stage: null, recovered: {} };
     const size = { x: blueprint.blocks[0]?.[0]?.length ?? 0, y: blueprint.blocks.length, z: blueprint.blocks[0]?.length ?? 0 };
-    survey.fits = size.x > 0 && plot.min.x + size.x - 1 <= plot.max.x && plot.min.y + size.y - 1 <= plot.max.y && plot.min.z + size.z - 1 <= plot.max.z;
+    const box = buildBox(plot, blueprint);
+    survey.fits = size.x > 0 && plot.min.x + size.x - 1 <= plot.max.x && box.min.y + size.y - 1 <= plot.max.y && plot.min.z + size.z - 1 <= plot.max.z;
     if (!survey.fits) return survey;
+    const own = ownCells(plot, state);
+    const bed = bedPlace(plot, blueprint);
+    const wanted = new Set();
     for (const cell of blueprintCells(plot, blueprint)) {
+        wanted.add(cellKey(cell));
         survey.total++;
+        stages[cell.stage].total++;
         const block = state.view.blockAt(cell);
         if (!block) { survey.unloaded++; continue; }
         const empty = isEmptyBlock(block.name);
-        if (cell.want === 'air' ? empty : satisfied(cell.want, block.name)) { survey.matching++; continue; }
-        if (!empty && !ctx.natural(block.name)) { survey.foreign++; continue; }
-        survey.work.push({ ...cell, clear: !empty });
+        // (a bed standing in the place this prefab keeps for it is where it belongs)
+        if (cell.want === 'air' ? (empty || (bed.has(cellKey(cell)) && block.name.endsWith('_bed'))) : satisfied(cell.want, block.name)) {
+            survey.matching++;
+            stages[cell.stage].matching++;
+            if (cell.want !== 'air') survey.placed++;
+            continue;
+        }
+        const mine = !empty && isOwn(own, cell, block.name);
+        if (!empty && !mine && !ctx.natural(block.name)) { survey.foreign++; continue; }
+        if (mine) survey.recovered[block.name] = (survey.recovered[block.name] ?? 0) + 1;
+        survey.work.push({ ...cell, clear: !empty, own: mine });
     }
+    // what the build before left standing where the new one wants nothing is taken away first
+    const leftover = [];
+    for (const was of own.values()) {
+        if (wanted.has(cellKey(was)) || was.keep) continue;
+        const block = state.view.blockAt(was);
+        if (!block || isEmptyBlock(block.name) || !satisfied(was.want, block.name)) continue;
+        survey.recovered[block.name] = (survey.recovered[block.name] ?? 0) + 1;
+        leftover.push({ x: was.x, y: was.y, z: was.z, want: 'air', stage: 0, follower: false, clear: true, own: true, leftover: true });
+    }
+    // LEVELLING BY HAND (decided: a new plot of the town is levelled by its builder, not by an Operator WorldEdit
+    // run). On a plot marked `level` the builder first makes the ground under the build even: a hole in the layer
+    // the build stands on is filled with dirt, and ground that rises into the build's box where the prefab leaves
+    // a cell alone is taken away. Both come before the first stage, and only ever touch the ground.
+    const levelling = plot.level === true ? levelCells(plot, blueprint, state, ctx, wanted) : [];
+    survey.levelling = levelling.length;
+    survey.work.unshift(...leftover, ...levelling);
+    survey.stage = survey.work.length > 0 ? survey.work.reduce((first, cell) => Math.min(first, cell.stage), Infinity) : null;
     return survey;
 }
 
-// The cells one goal works on: only what can be done with what is held now.
+// What a `level` plot's ground needs under and inside the build: [{ x, y, z, want: 'dirt' | 'air', stage: 0, clear, level: true }].
+function levelCells(plot, blueprint, state, ctx, wanted) {
+    const cells = [];
+    const size = { x: blueprint.blocks[0]?.[0]?.length ?? 0, y: blueprint.blocks.length, z: blueprint.blocks[0]?.length ?? 0 };
+    const below = belowOf(blueprint);
+    for (let rz = 0; rz < size.z; rz++) {
+        for (let rx = 0; rx < size.x; rx++) {
+            const x = plot.min.x + rx;
+            const z = plot.min.z + rz;
+            // the layer the build stands on (a prefab with a floor set into the ground lays that layer itself)
+            if (below === 0 && blueprint.blocks.some((layer) => !leftAlone(layer[rz]?.[rx]))) {
+                const floor = { x, y: plot.min.y - 1, z };
+                const block = state.view.blockAt(floor);
+                if (block && isEmptyBlock(block.name)) cells.push({ ...floor, want: 'dirt', stage: 0, follower: false, clear: false, level: true });
+            }
+            // ground standing in the box where the prefab says nothing
+            for (let ry = below; ry < size.y; ry++) {
+                const pos = { x, y: plot.min.y - below + ry, z };
+                if (wanted.has(cellKey(pos))) continue;
+                const block = state.view.blockAt(pos);
+                if (block && !isEmptyBlock(block.name) && ctx.natural(block.name)) cells.push({ ...pos, want: 'air', stage: 0, follower: false, clear: true, level: true });
+            }
+        }
+    }
+    return cells;
+}
+
+// What the cells still to build want, as items: { want: count }. A block of several cells is one item.
+// stage: only the cells of that stage (the index), or null for everything.
+function billOfWork(survey, stage = null) {
+    const bill = {};
+    for (const cell of survey?.work ?? []) {
+        if (cell.want === 'air' || cell.follower || (stage !== null && cell.stage !== stage)) continue;
+        bill[cell.want] = (bill[cell.want] ?? 0) + 1;
+    }
+    return bill;
+}
+
+// The cells one goal works on: of the earliest unfinished stage, and only what can be done with what is held now.
 function buildBatch(survey, state, ctx) {
     const stock = { ...state.view.inventory() };
     const batch = [];
-    for (const cell of survey.work) {
+    const in_stage = survey.work.filter((cell) => cell.stage === survey.stage);
+    const by_key = new Map(in_stage.map((cell) => [cellKey(cell), cell]));
+    const taken = new Set();
+    for (const cell of in_stage) {
         if (batch.length >= ctx.config.build_batch) break;
+        if (taken.has(cell)) continue;
+        if (cell.follower) {
+            // the upper half of a door comes with the lower: only something standing in its place is this goal's
+            if (cell.clear) { batch.push({ ...cell, item: null }); taken.add(cell); }
+            continue;
+        }
         let item = null;
         if (cell.want !== 'air') {
             // the member of the family that is held ("planks" is built with the oak_planks in the inventory)
             item = memberHeld(stock, cell.want);
             if (!item) continue;
             stock[item]--;
+            // the cell over a door is cleared before the door is put in
+            const over = by_key.get(cellKey({ x: cell.x, y: cell.y + 1, z: cell.z }));
+            if (over?.follower && over.clear && !taken.has(over)) { batch.push({ ...over, item: null }); taken.add(over); }
         }
         batch.push({ ...cell, item });
+        taken.add(cell);
     }
     return batch;
+}
+
+// What "the town holds" for a build (decided): the shared chest's ledger plus what the builder carries,
+// and what the build gives back or already has in place.
+function townStock(state, ctx, survey) {
+    const stock = { ...state.view.inventory() };
+    // (and the builder's own chest at home, once it lives there)
+    const own_chest = state.zones.homeChest?.(state.agent) ?? null;
+    for (const chest of [...(ctx.config.town_chests ?? []), ...(own_chest ? [own_chest] : [])]) {
+        for (const [item, count] of Object.entries(state.ledger.stock(chest) ?? {})) stock[item] = (stock[item] ?? 0) + count;
+    }
+    for (const [item, count] of Object.entries(survey.recovered)) stock[item] = (stock[item] ?? 0) + count;
+    return stock;
+}
+
+// THE BUILDING LADDER (decided: the one thing that is earned). A build that has not been started may only
+// start when genesis/build/unlock.js says its prefab is open to this builder: every block obtainable, the
+// builder's to build, a verified build of the tier below, and the whole first stage of materials in the
+// town. A build that was started goes on whatever the town holds. state.building is the agent's copy of
+// the town's builds (genesis/town/client.js); without it (and for a blueprint that is not a prefab) there
+// is no ladder to ask.
+//   state.building: { builds [{ builder, prefab, tier, verified_at }], ladder [prefab], started(plot, prefab) -> boolean }
+const LOCK_REASONS = Object.freeze({ not_buildable: 'not_buildable', not_yours: 'not_your_build', needs_tier: 'tier_locked', town_short: 'town_short' });
+function buildLock(survey, state, ctx) {
+    const building = state.building ?? null;
+    const prefab = survey.blueprint;
+    if (!building || typeof prefab.kind !== 'string' || !Number.isInteger(prefab.tier)) return null;
+    if (building.started?.(survey.plot.id, prefab.name) === true) return null;
+    // an upgrade's first stage: what is already in place counts as held
+    const stock = townStock(state, ctx, survey);
+    const first = stagesOf(prefab)[0]?.name ?? null;
+    for (const cell of blueprintCells(survey.plot, prefab)) {
+        if (cell.stage !== 0 || cell.want === 'air' || cell.follower) continue;
+        const block = state.view.blockAt(cell);
+        if (block && satisfied(cell.want, block.name)) stock[cell.want] = (stock[cell.want] ?? 0) + 1;
+    }
+    const unlock = unlockState({ prefab, builder: state.agent, builds: building.builds ?? [], stock, ladder: building.ladder ?? [], obtainable: ctx.obtainable });
+    return unlock.state === 'open' ? null : { reason: LOCK_REASONS[unlock.code] ?? 'tier_locked', unlock, stage: first };
 }
 
 const build_blueprint = {
@@ -682,7 +904,7 @@ const build_blueprint = {
     progress_unit: 'matching cells',
     failures: ['plot_not_registered', 'not_your_plot', 'plot_overlaps_zone', 'no_blueprint', 'blueprint_too_big', 'out_of_range',
         'plot_not_loaded', 'plot_not_natural', 'already_built', 'missing_materials', 'outside_plot', 'cell_occupied',
-        'nothing_to_place_on', 'place_failed'],
+        'nothing_to_place_on', 'place_failed', 'not_buildable', 'not_your_build', 'tier_locked', 'town_short'],
     id: (args) => `build_blueprint:${args.plot}`,
     parse: (parts) => (parts.length === 1 && /^[A-Za-z0-9_-]{1,40}$/.test(parts[0]) ? { plot: parts[0] } : null),
     candidates: (state) => state.zones.plots()
@@ -700,41 +922,63 @@ const build_blueprint = {
         if (survey.unloaded > 0) return 'plot_not_loaded';
         if (survey.foreign > 0) return 'plot_not_natural';
         if (survey.work.length === 0) return 'already_built';
+        const lock = buildLock(survey, state, ctx);
+        if (lock) return lock.reason;
         if (buildBatch(survey, state, ctx).length === 0) return 'missing_materials';
         return null;
     },
     title: (args) => clip(`Build on plot ${args.plot}`),
+    // the plot's middle, how many cells this goal would change, and the share of the stage's bill the agent holds
+    target(args, state, ctx) {
+        const survey = surveyPlot(args, state, ctx);
+        if (!survey || !survey.fits) return null;
+        const plot = survey.plot;
+        const bill = survey.stage === null ? {} : billOfWork(survey, survey.stage);
+        const need = Object.values(bill).reduce((n, count) => n + count, 0);
+        const have = Object.entries(bill).reduce((n, [want, count]) => n + Math.min(count, heldOf(state, want)), 0);
+        return {
+            pos: { x: Math.floor((plot.min.x + plot.max.x) / 2), y: plot.min.y, z: Math.floor((plot.min.z + plot.max.z) / 2) }, kind: 'plot',
+            cells: buildBatch(survey, state, ctx).length, materials_share: need > 0 ? have / need : 1,
+        };
+    },
     describe(args, state, ctx) {
         const survey = surveyPlot(args, state, ctx);
         if (!survey) return `Build on plot ${args.plot}`;
-        return `Build ${buildBatch(survey, state, ctx).length} more cells of ${survey.blueprint.name ?? survey.plot.blueprint} on plot ${args.plot} (${survey.matching}/${survey.total} done)`;
+        const stage = Array.isArray(survey.blueprint.stages) && survey.stage !== null ? `, stage ${survey.stages[survey.stage].name}` : '';
+        return `Build ${buildBatch(survey, state, ctx).length} more cells of ${survey.blueprint.name ?? survey.plot.blueprint} on plot ${args.plot} (${survey.matching}/${survey.total} done${stage})`;
     },
     steps(args, state, ctx) {
         const steps = [];
-        for (const cell of buildBatch(surveyPlot(args, state, ctx), state, ctx)) {
+        const batch = buildBatch(surveyPlot(args, state, ctx), state, ctx);
+        for (const cell of batch) {
             if (cell.clear) steps.push({ command: 'breakBlockAt', args: [cell.x, cell.y, cell.z] });
-            if (cell.want !== 'air') steps.push({ command: 'placeBlock', args: [cell.item ?? cell.want, cell.x, cell.y, cell.z] });
+            if (cell.want !== 'air' && !cell.follower) steps.push({ command: 'placeBlock', args: [cell.item ?? cell.want, cell.x, cell.y, cell.z] });
         }
+        // what an upgrade takes down comes back as items and goes into the new build
+        if (batch.some((cell) => cell.own)) steps.push({ command: 'pickupNearbyItems', args: [] });
         return steps;
     },
     baseline: () => ({}),
     before(step, args, state, ctx) {
+        if (step.command === 'pickupNearbyItems') return null;
         const plot = state.zones.plot(args.plot);
         if (!plot) return { fail: 'plot_not_registered' };
         const [x, y, z] = step.command === 'placeBlock' ? step.args.slice(1) : step.args;
         const pos = { x, y, z };
-        if (!boxContains(plot, pos)) return { fail: 'outside_plot' };
+        const blueprint = plot.blueprint ? state.blueprints.get(plot.blueprint) : null;
+        const box = blueprint ? buildBox(plot, blueprint) : plot;
+        // (on a plot the builder levels by hand the layer the build stands on is the build's to fill)
+        if (!boxContains(plot.level === true ? { min: { ...box.min, y: Math.min(box.min.y, plot.min.y - 1) }, max: box.max } : box, pos)) return { fail: 'outside_plot' };
         const block = state.view.blockAt(pos);
         if (!block) return { fail: 'plot_not_loaded' };
         if (step.command === 'breakBlockAt') {
             if (isEmptyBlock(block.name)) return { skip: 'already_clear' };
-            // only the ground is ever cleared: something that was built is left alone
-            return ctx.natural(block.name) ? null : { fail: 'plot_not_natural' };
+            // only the ground is ever cleared, and on an upgrade the builder's own earlier work: anything else that was built is left alone
+            return ctx.natural(block.name) || isOwn(ownCells(plot, state), pos, block.name) ? null : { fail: 'plot_not_natural' };
         }
         const want = step.args[0];
         // what the BLUEPRINT wants in this cell (a family, perhaps), not only the item this step would place:
         // a cell that already holds another member of the family matches
-        const blueprint = plot.blueprint ? state.blueprints.get(plot.blueprint) : null;
         const cell = blueprint ? blueprintCells(plot, blueprint).find((c) => c.x === pos.x && c.y === pos.y && c.z === pos.z) : null;
         if (satisfied(cell?.want ?? want, block.name) || satisfied(want, block.name)) return { skip: 'already_matches' };
         // upstream's placeBlock breaks whatever is in the cell (skills.js 709-715): never hand it an occupied one
@@ -743,12 +987,23 @@ const build_blueprint = {
         return { intend: [pos] };
     },
     after: () => null,
-    // every cell that is still to build wants one of its material (a family name stands for all its members)
+    // every cell that is still to build wants one of its material (a family name stands for all its members;
+    // a door is one item for its two cells)
     needs(args, state, ctx) {
+        return Object.entries(billOfWork(surveyPlot(args, state, ctx))).map(([want, count]) => ({ want, count }));
+    },
+    // What the dashboard and the build tracker read: where the build stands, and why it may not start.
+    //   -> { plot, prefab, total, matching, stage, stages, started_cells, lock: { reason, unlock } | null, bill, stage_bill } | null
+    survey(args, state, ctx) {
         const survey = surveyPlot(args, state, ctx);
-        const wanted = new Map();
-        for (const cell of survey?.work ?? []) if (cell.want !== 'air') wanted.set(cell.want, (wanted.get(cell.want) ?? 0) + 1);
-        return [...wanted].map(([want, count]) => ({ want, count }));
+        if (!survey || !survey.fits) return null;
+        return {
+            plot: survey.plot.id, prefab: survey.blueprint.name ?? survey.plot.blueprint, total: survey.total, matching: survey.matching, placed: survey.placed,
+            foreign: survey.foreign, unloaded: survey.unloaded, work: survey.work.length,
+            stage: survey.stage === null ? null : survey.stages[survey.stage].name, stages: survey.stages.map((stage) => ({ ...stage })),
+            lock: survey.work.length > 0 ? buildLock(survey, state, ctx) : null,
+            bill: billOfWork(survey), stage_bill: survey.stage === null ? {} : billOfWork(survey, survey.stage),
+        };
     },
     progress(args, state, ctx) {
         const survey = surveyPlot(args, state, ctx);
@@ -794,6 +1049,7 @@ const smelt_item = {
         return pathRefusal(state, furnace, ctx.config.arrive_distance, ctx) ? 'furnace_unreachable' : null;
     },
     title: (args) => clip(`Smelt ${args.count} ${args.item}`),
+    target(args, state, ctx) { const furnace = smelt_item.furnace(state, ctx); return furnace ? { pos: { x: furnace.x, y: furnace.y, z: furnace.z }, path: true } : null; },
     describe: (args, state) => `Smelt ${args.count} ${args.item} in the nearest furnace, with ${state.view.fuel()?.name ?? 'fuel'}`,
     steps(args, state, ctx) {
         const furnace = smelt_item.furnace(state, ctx);
@@ -846,6 +1102,7 @@ const give_items = {
         return chestRefusal(state, ctx.config.handoff_chest, ctx);
     },
     title: (args) => clip(`Give ${args.count} ${args.item} to ${args.to}`),
+    target: (args, state, ctx) => recipientTarget(args, state, ctx),
     describe: (args, state, ctx) => `Give ${args.count} ${args.item} to ${args.to}, who asked for them (${nearEnough(args, state, ctx) ? 'handed over directly' : `through the ${ctx.config.handoff_chest} chest`})`,
     steps(args, state, ctx) {
         if (nearEnough(args, state, ctx)) return [{ command: 'giveToPlayer', args: [args.item, args.to, args.count] }];
@@ -941,8 +1198,8 @@ function shortOf(state, ctx) {
         if (!plot.blueprint || (plot.owner !== null && plot.owner !== state.agent)) continue;
         const survey = surveyPlot({ plot: plot.id }, state, ctx);
         if (!survey || !survey.fits) continue;
-        const wanted = new Map();
-        for (const cell of survey.work) if (cell.want !== 'air') wanted.set(cell.want, (wanted.get(cell.want) ?? 0) + 1);
+        // the bill of the STAGE the build is at: what comes later is not asked for yet
+        const wanted = new Map(Object.entries(billOfWork(survey, survey.stage)));
         // (a family is asked for by a member the catalog knows: "planks" as oak_planks)
         for (const [want, count] of [...wanted].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) add(membersKnown(want, ctx)[0] ?? want, count - heldOf(state, want), `plot ${plot.id}`);
     }
@@ -992,6 +1249,7 @@ const ask_agent = {
         return talkRefusal('request', args, state);
     },
     title: (args) => clip(`Ask ${args.to} for ${args.count} ${args.item}`),
+    target: (args, state, ctx) => recipientTarget(args, state, ctx),
     describe(args, state, ctx) {
         const why = shortOf(state, ctx).find((need) => need.item === args.item)?.why ?? null;
         return `Ask ${args.to} for ${args.count} ${args.item}${why ? ` (for ${why})` : ''}: ${args.to} may say no`;
@@ -1029,6 +1287,7 @@ const offer_agent = {
         return state.talk.spare(args.item) >= args.count ? null : 'not_spare';
     },
     title: (args) => clip(`Offer ${args.count} ${args.item} to ${args.to}`),
+    target: (args, state, ctx) => recipientTarget(args, state, ctx),
     describe: (args, state) => `Offer ${args.count} of your ${held(state, args.item)} ${args.item} to ${args.to}: handed over if ${args.to} says yes`,
     steps: (args) => relayStep('offer', args),
     baseline: () => ({}),
@@ -1040,7 +1299,69 @@ const offer_agent = {
     progress: relayProgress,
 };
 
+// ---- furnish_home (the agent's bed in its own finished home; not one of the nine) ----------------
+
+// Decided: an agent lives in its finished home, and places its bed as furniture in the cells the prefab keeps clear
+// for it. The bed is not a cell of the prefab (which way it lies cannot be controlled: upstream's placeBlock, skills.js
+// line 613) and it is never verified as part of the build. Offered only while: the agent's home is verified
+// (state.zones.livesAt), its bed is not placed, both cells are clear, and the agent holds a bed (any colour).
+// NOT PLACED BY A REAL BOT YET: on a server the bed may come to lie across another cell than the second one kept
+// for it; the goal counts as done when a bed stands in either of the two.
+const bedHeld = (state) => Object.entries(state.view.inventory()).filter(([item, count]) => count > 0 && item.endsWith('_bed')).sort((a, b) => a[0].localeCompare(b[0]))[0]?.[0] ?? null;
+const bedCells = (state) => {
+    const home = state.zones.livesAt?.(state.agent) ?? null;
+    if (!home?.bed || !Array.isArray(home.bed.foot) || !Array.isArray(home.bed.head)) return null;
+    const cell = ([x, y, z]) => ({ x, y, z });
+    return { home, foot: cell(home.bed.foot), head: cell(home.bed.head) };
+};
+const bedStands = (state, cells) => [cells.foot, cells.head].some((pos) => String(state.view.blockAt(pos)?.name ?? '').endsWith('_bed'));
+const furnish_home = {
+    name: 'furnish_home',
+    progress_unit: 'beds placed',
+    failures: ['no_home', 'already_placed', 'no_bed', 'bed_place_not_clear', 'out_of_range', 'place_failed', 'nothing_to_place_on'],
+    id: () => 'furnish_home:bed',
+    parse: (parts) => (parts.length === 1 && parts[0] === 'bed' ? {} : null),
+    candidates: (state) => (bedCells(state) ? [{}] : []),
+    check(args, state) {
+        const cells = bedCells(state);
+        if (!cells) return 'no_home';
+        if (cells.home.bed.placed === true || bedStands(state, cells)) return 'already_placed';
+        if (!bedHeld(state)) return 'no_bed';
+        if (!state.zones.inRange(state.agent, cells.foot)) return 'out_of_range';
+        for (const pos of [cells.foot, cells.head]) { const block = state.view.blockAt(pos); if (!block || !isEmptyBlock(block.name)) return 'bed_place_not_clear'; }
+        return null;
+    },
+    title: () => 'Put my bed in my home',
+    describe: (args, state) => `Place your ${bedHeld(state) ?? 'bed'} in the place your home keeps for it: you sleep at home from then on`,
+    target: (args, state) => { const cells = bedCells(state); return cells ? { pos: cells.foot, kind: 'plot' } : null; },
+    steps(args, state, ctx) {
+        const cells = bedCells(state);
+        return [walkTo(cells.foot, ctx), { command: 'placeBlock', args: [bedHeld(state), cells.foot.x, cells.foot.y, cells.foot.z] }];
+    },
+    baseline: () => ({}),
+    before(step, args, state) {
+        if (step.command !== 'placeBlock') return null;
+        const cells = bedCells(state);
+        if (!cells) return { fail: 'no_home' };
+        if (bedStands(state, cells)) return { skip: 'already_placed' };
+        const [item, x, y, z] = step.args;
+        if (x !== cells.foot.x || y !== cells.foot.y || z !== cells.foot.z || !String(item).endsWith('_bed')) return { fail: 'bed_place_not_clear' };
+        if (held(state, item) <= 0) return { fail: 'no_bed' };
+        for (const pos of [cells.foot, cells.head]) { const block = state.view.blockAt(pos); if (!block || !isEmptyBlock(block.name)) return { fail: 'bed_place_not_clear' }; }
+        return { intend: [cells.foot, cells.head] };
+    },
+    after(step, result, args, state) {
+        if (step.command !== 'placeBlock') return null;
+        const cells = bedCells(state);
+        if (cells && bedStands(state, cells)) { state.furnished?.('bed'); return { ok: true }; }
+        return null;
+    },
+    progress(args, state) { const cells = bedCells(state); return { done: cells && bedStands(state, cells) ? 1 : 0, total: 1 }; },
+};
+
 export const TEMPLATES = Object.freeze([travel, gather_blocks, craft_item, store_items, fetch_items, harvest_replant, sow_field, build_blueprint, smelt_item]);
+// The furniture of an agent's own home (decided: the bed). Only ever offered to an agent that lives in a verified home.
+export const HOME_TEMPLATES = Object.freeze([furnish_home]);
 // The messages the planner may choose to send as goals (decided). Not skill templates: their one step is Genesis's own.
 export const MESSAGE_TEMPLATES = Object.freeze([ask_agent, offer_agent]);
 // Templates beside the nine skill templates. They are only ever offered for a commitment.

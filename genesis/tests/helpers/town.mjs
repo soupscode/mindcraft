@@ -14,6 +14,15 @@ import { createAgentRuntime } from '../../agent/runtime.js';
 import { createLedgerClient } from '../../catalog/ledger_client.js';
 import { createPlanningHost, createHostGoalStorage, socketGoalStorage } from '../../planning/host.js';
 import { startRelay } from '../../relay/server.js';
+import { createLearner } from '../../learning/learner.js';
+import { createScorer } from '../../learning/scorer.js';
+import { memoryLearningStore } from '../../learning/store.js';
+import { createLearningService } from '../../learning/service.js';
+import { createLearningClient } from '../../learning/client.js';
+import { startTown } from '../../town/server.js';
+import { createTownClient, townZones, townBlueprints, building } from '../../town/client.js';
+import { buildBlueprints } from '../../catalog/blueprints.js';
+import { REPO_ROOT } from './stubs.mjs';
 
 // Two ends of one connection: what one end emits, the other end's handlers get (ack
 // callbacks included, as with socket.io).
@@ -54,6 +63,7 @@ export function stubModel(clock) {
         // `decisions` queues answers: 'accept' | 'decline', { decision, reason }, a raw string, an Error, or a
         // function (request) -> one of those. By default the model accepts.
         decision_requests: [], decisions: [], decision_delay_ms: 0,
+        goal_requests: [], goal_choices: [],
         async probe() { model.probes++; return model.probe_ok; },
         chat(request) {
             if (request.format?.properties?.decision) {
@@ -85,6 +95,20 @@ export function stubModel(clock) {
                     clock.setTimeout(() => { try { resolve(answer()); } catch (err) { reject(err); } }, model.line_delay_ms);
                 });
             }
+            // the small call that chooses an agent's long-term goals (genesis/town/goals.js): kept apart as well.
+            // `goal_choices` queues answers: a list of ids, { goals, reason }, a raw string, an Error, or a function
+            // (request, ids) -> one of those. By default the model takes the first id.
+            if (Array.isArray(request.format?.properties?.goals?.items?.enum)) {
+                model.goal_requests.push(request);
+                const ids = request.format.properties.goals.items.enum;
+                let next = model.goal_choices.length > 0 ? model.goal_choices.shift() : [ids[0]];
+                if (typeof next === 'function') next = next(request, ids);
+                return Promise.resolve().then(() => {
+                    if (next instanceof Error) throw next;
+                    const content = Array.isArray(next) ? JSON.stringify({ goals: next, reason: 'These fit my work best.' }) : (typeof next === 'string' ? next : JSON.stringify(next));
+                    return { content, prompt_tokens: 140, completion_tokens: 20, model: 'stub-model:latest' };
+                });
+            }
             model.requests.push(request);
             const offered = request.format.properties.goals.items.properties.option_id.enum;
             let next = model.replies.length > 0 ? model.replies.shift() : null;
@@ -109,10 +133,15 @@ export const BLUEPRINTS = { get: (name) => (name === 'hut' ? HUT : null) };
 // recovery: true gives every agent the watchdog and its ladder (the fake world's recovery moves).
 // relay: true (or the relay's settings) adds the message relay to the host, as the launcher does, and
 //   gives every agent its message desk; what an agent is told to say is kept in a.said.
-export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, world = null, inventories = {}, positions = {}, host: host_options = {}, runtime: runtime_options = {}, recovery = false, relay = false, blueprints = BLUEPRINTS } = {}) {
+// learning: true gives the town the one learner (genesis/learning/service.js, with everything in memory) and every
+//   agent its client; town.learning is the service, town.learning_store its store.
+// town: true (or { prefabs, roles, rules }) gives the rig the ONE town (genesis/town/server.js, its file in the rig's
+//   fake files) and every agent its copy of it: the zones are then the world file's with the town layered over, the
+//   blueprints are the prefab files, and the building ladder is asked. town.town is the service (after start()).
+export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, world = null, inventories = {}, positions = {}, host: host_options = {}, runtime: runtime_options = {}, recovery = false, relay = false, blueprints = BLUEPRINTS, learning = false, zones = null, town: town_options = false } = {}) {
     const town = { clock, calls: [], broker_events: [], agents: {} };
     town.world = world ?? campWorld(clock);
-    town.zones = createZones(config);
+    town.zones = zones ?? createZones(config);
     town.model = stubModel(clock);
     town.storage = createHostGoalStorage();
     town.host = createPlanningHost({
@@ -122,6 +151,16 @@ export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, wo
     });
     town.broker = town.host.broker;
     town.files = fakeFiles();
+    town.learning_events = [];
+    if (learning) {
+        const settings = learning === true ? {} : learning;
+        town.learning_store = settings.store ?? memoryLearningStore();
+        let service = null;
+        const learner = createLearner({ agents: settings.agents ?? ['Arthur', 'Mira', 'Felix', 'Nova'], clock, seed: settings.seed ?? 7, rules: settings.rules ?? {}, onVersion: (record) => service?.onVersion(record) });
+        const scorer = createScorer({ learner, clock, seed: settings.seed ?? 7, rules: settings.scorer ?? {} });
+        service = createLearningService({ learner, scorer, store: town.learning_store, versions: settings.versions ?? null, clock, emit: (type, data, opts) => town.learning_events.push({ type, data, ...opts }), ...(settings.service ?? {}) });
+        town.learning = service;
+    }
     town.messages = []; // every agent.message event of the relay
     if (relay) {
         town.relay_service = startRelay(relay === true ? {} : relay, {
@@ -139,7 +178,9 @@ export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, wo
         }
         const { client, server } = socketPair();
         town.host.attach(server, { isAgentSocket: () => true });
+        town.town?.attach(server, { isAgentSocket: (name) => name === agent });
         town.relay_service?.attach(server, { isAgentSocket: (name) => name === agent });
+        town.learning?.attach(server, { isAgentSocket: (name) => name === agent });
         const a = { agent, socket: client, server_socket: server, events: [], dead: false, said: [] };
         a.emitter = createEmitter({ agent, send: (event) => { if (!a.dead) a.events.push(event); }, last_seq, now: clock.now, warn: () => {}, progress_interval_ms: 0 });
         // the files as this process sees them: a process that was killed writes nothing any more
@@ -155,13 +196,27 @@ export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, wo
         a.ledger = createLedgerClient({ agent, send: (event, ...args) => client.emit(event, ...args), clock });
         client.on('genesis-ledger-update', (message) => a.ledger.onUpdate(message));
         a.claims = [];
+        // with a town: this agent's copy of it, layered over the world file's zones
+        let agent_zones = town.zones;
+        let agent_blueprints = blueprints;
+        let town_runtime = {};
+        if (town.town) {
+            a.town = createTownClient({ agent, send: (event, ...args) => client.emit(event, ...args), clock });
+            client.on('genesis-town-update', (message) => a.town.onUpdate(message));
+            agent_zones = townZones(town.zones, a.town, agent);
+            agent_blueprints = townBlueprints(town.prefabs);
+            town_runtime = { town: a.town, building: building(a.town, town.prefabs), prefabs: town.prefabs };
+        }
+        a.zones = agent_zones;
         a.runtime = createAgentRuntime({
-            agent, zones: town.zones, catalog: createCatalog({ zones: town.zones, blueprints }),
+            agent, zones: agent_zones, catalog: createCatalog({ zones: agent_zones, blueprints: agent_blueprints }),
+            ...town_runtime,
             view: town.world.view(agent), ops: a.ops, scaffold: a.scaffold,
             goal_storage: socketGoalStorage({ socket: client, clock }),
             checkpoints: createCheckpointStore({ files, dir: '/checkpoints', clock }),
             ...(recovery ? { recovery_ops: town.world.recovery(agent) } : {}),
             ...(relay ? { messaging: true, relay_limits: relay === true ? {} : relay.limits ?? {} } : {}),
+            ...(town.learning ? { learning: createLearningClient({ agent, send: (event, ...args) => client.emit(event, ...args), clock }) } : {}),
             send: (event, ...args) => client.emit(event, ...args),
             emit: a.emitter.emit, getSeq: () => a.emitter.stats().seq, clock,
             ledger: a.ledger, onContestedClaim: (claim) => a.claims.push(claim),
@@ -199,6 +254,17 @@ export function makeTown({ clock, agents = ['Arthur'], config = WORLD_CONFIG, wo
     };
     town.start = async ({ available = true } = {}) => {
         town.model.probe_ok = available;
+        if (town_options) {
+            const settings = town_options === true ? {} : town_options;
+            town.prefabs = settings.prefabs ?? buildBlueprints({ root: REPO_ROOT });
+            town.town_events = [];
+            town.town = await startTown({ town_file: '/town/genesis.town.json' }, {
+                zones_config: config, prefabs: town.prefabs, files: town.files, clock, agents, world_sha256: settings.world_sha256 ?? 'test-world',
+                roles: settings.roles ?? { Arthur: 'builder', Mira: 'farmer', Felix: 'explorer', Nova: 'merchant' }, operator_dir: '/prefabs/operator',
+                emit: (type, data, opts) => town.town_events.push({ type, data, ...opts }), warn: () => {},
+            });
+            town.town.bind({ broker: town.broker, ledger: town.host.ledger, store: town.learning_store ?? null });
+        }
         await town.host.start();
         for (const agent of agents) await town.join(agent);
         return town;

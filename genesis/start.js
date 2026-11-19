@@ -52,6 +52,13 @@
 // ("genesis_relay.decision" holds its hourly limit and token limit; "model_decisions": false
 // leaves every such decision to the code rule, as it is whenever the model is away).
 
+// Learning ("genesis_learning" in the settings file) goes with planning, unless it says "enabled": false.
+// ONE learner in this process records every goal of every agent (the situation and what it predicted
+// when the goal starts, what happened when it ends), trains a small network on those outcomes, orders
+// and annotates the options the planner is shown, and chooses among them while the model is away. It
+// never names an action the catalog did not offer and never runs code. Its weights are files under
+// ./bots/genesis_learning; its rows are in the database when there is one.
+
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -140,11 +147,37 @@ if (settings.genesis_planning?.enabled === true) {
     }
     // the planner broker lives in this (the MindServer's) process; the agents reach it over their sockets
     const { startPlanning } = await import('./planning/server.js');
+    // the town (genesis/town): the ONE town file, layered over the world file's zones by every agent. Plots and bridges
+    // that code proposes, the builds and the homes are kept there; the world file itself is never written.
+    let town = null;
+    let roles = {};
+    {
+        const { startTown } = await import('./town/server.js');
+        const { buildBlueprints } = await import('./catalog/blueprints.js');
+        const { nodeFiles } = await import('./store/node_files.js');
+        const { worldHash } = await import('./world/world_config.js');
+        const { ROUTINES } = await import('./routines/routines.js');
+        const world_file = path.resolve(repo_root, process.env[WORLD_FILE_ENV] || settings.genesis_planning.world_file);
+        const zones_config = JSON.parse(readFileSync(world_file, 'utf8'));
+        roles = Object.fromEntries(Object.entries(ROUTINES).map(([name, routine]) => [name, routine.role]));
+        town = await startTown(settings.genesis_planning, {
+            zones_config, prefabs: buildBlueprints({ root: repo_root }), files: nodeFiles(), event_sink, world_sha256: worldHash(zones_config), roles,
+        });
+        extensions.push((socket, helpers) => town.attach(socket, helpers));
+    }
+    // the one learner of all agents lives here too (off only with "genesis_learning": { "enabled": false })
+    const agent_names = settings.profiles.map((profile) => JSON.parse(readFileSync(path.resolve(repo_root, profile), 'utf8')).name);
+    const learning = settings.genesis_learning?.enabled !== false
+        ? { agents: agent_names, roles, ...(Number.isFinite(settings.genesis_learning?.explore_rate) ? { scorer: { explore_rate: settings.genesis_learning.explore_rate } } : {}) }
+        : null;
     const host = await startPlanning(settings.genesis_planning, {
         event_sink, extensions, onGate: recovery ? (state, detail) => recovery.onGate(state, detail) : null,
-        postgres_url: database_url || null,
+        postgres_url: database_url || null, learning,
     });
     // the model writes the spoken lines through the broker, and the chest ledger follows what the agents agree on
     if (relay) relay.bind({ broker: host.broker, ledger: host.ledger, ledgerUpdated: () => host.ledgerUpdated() });
+    // the model chooses the agents' long-term goals through the broker; the town's stock is the shared chest's ledger;
+    // the builds are also rows of the learner's store
+    town?.bind({ broker: host.broker, ledger: host.ledger, store: host.learning?.store ?? null });
 }
 await import('../main.js');

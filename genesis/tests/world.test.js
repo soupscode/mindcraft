@@ -19,7 +19,7 @@ import { fakeMinecraft } from './helpers/fake-rcon.mjs';
 import { exampleWorld, bootstrappedWorld } from './helpers/bootstrapped.mjs';
 import { WORLD_CONFIG } from './helpers/fake-world.mjs';
 import { createZones, checkZonesConfig } from '../catalog/zones.js';
-import { fileBlueprints, blueprintSize } from '../catalog/blueprints.js';
+import { fileBlueprints, buildBlueprints, blueprintSize } from '../catalog/blueprints.js';
 import {
     checkWorldConfig, worldHash, WORLD_PROBLEMS, DECIDED_RANGES, DECIDED_RULES, DECIDED_BORDER_SIZE, PLOT_SIZE, borderBox, seedText,
 } from '../world/world_config.js';
@@ -30,7 +30,9 @@ import { planReset, runReset, resetFiles, resetLines, RESET_FLAG, RESET_TABLES }
 import { checkBootstrap, checkWorld } from '../lib/config.js';
 import { ROUTINES } from '../routines/routines.js';
 
-const BLUEPRINTS = fileBlueprints(path.join(REPO_ROOT, 'src', 'agent', 'npc', 'construction'));
+// what a plot may name: the prefab files (the example's builder plot names the lean-to). UPSTREAM: the construction files upstream ships
+const BLUEPRINTS = buildBlueprints({ root: REPO_ROOT });
+const UPSTREAM = fileBlueprints(path.join(REPO_ROOT, 'src', 'agent', 'npc', 'construction'));
 const MANIFEST = '/data/genesis_world/bootstrap.manifest.json';
 const codes = (config) => checkWorldConfig(config, { blueprints: BLUEPRINTS }).map((problem) => problem.code);
 const changed = (config, edit) => { const copy = JSON.parse(JSON.stringify(config)); edit(copy); return copy; };
@@ -70,15 +72,15 @@ test('world file: the shipped example is valid, and the zones read it like the m
 });
 
 test('world file: the largest shipped blueprint is 11 by 14 and fits a 16 by 16 plot', () => {
-    const sizes = BLUEPRINTS.names().map((name) => ({ name, ...blueprintSize(BLUEPRINTS.get(name)) }));
+    const sizes = UPSTREAM.names().map((name) => ({ name, ...blueprintSize(UPSTREAM.get(name)) }));
     assert.ok(sizes.length >= 4, 'the shipped blueprints were not found');
     const largest = sizes.reduce((a, b) => (a.x * a.z >= b.x * b.z ? a : b));
     assert.deepEqual([largest.x, largest.z], [11, 14]);
     for (const size of sizes) assert.ok(size.x <= PLOT_SIZE && size.z <= PLOT_SIZE, `${size.name} does not fit a plot`);
     // every plot of the example is high enough for every shipped blueprint
-    for (const name of BLUEPRINTS.names()) {
+    for (const name of UPSTREAM.names()) {
         const config = changed(exampleWorld(), (c) => { c.plots[0].blueprint = name; });
-        assert.deepEqual(codes(config), [], `${name} does not fit the example's plot`);
+        assert.deepEqual(checkWorldConfig(config, { blueprints: UPSTREAM }).map((problem) => problem.code), [], `${name} does not fit the example's plot`);
     }
 });
 
@@ -91,7 +93,7 @@ test('world file: each kind of invalid file is rejected with a named reason', ()
         ['zone_overlap', (c) => { c.plots[4] = { ...c.plots[4], min: [-30, 64, 20], max: [-15, 77, 35] }; }, /plot arthur-1 overlaps plot spare-1/],
         ['zone_overlap', (c) => { c.field.min = [10, -4]; c.field.max = [18, 4]; c.field.water = [[14, 0]]; }, /the camp and the field overlap/],
         // a plot that is too small for its blueprint (14 layers do not fit under a height of 8)
-        ['plot_too_small_for_blueprint', (c) => { c.plots[0].blueprint = 'large_house'; c.plots[0].max[1] = 71; }, /plot arthur-1 is 16 by 16 and 8 high, the blueprint "large_house" needs 11 by 14 and 14 high/],
+        ['plot_too_small_for_blueprint', (c) => { c.plots[0].blueprint = 'house'; c.plots[0].max[1] = 69; }, /plot arthur-1 is 16 by 16 and 6 high, the blueprint "house" needs 11 by 9 and 7 high/],
         ['plot_wrong_size', (c) => { c.plots[1].max = [7, 77, 25]; }, /plot mira-1 is 12 by 12, plots are 16 by 16/],
         ['unknown_blueprint', (c) => { c.plots[0].blueprint = 'castle'; }, /no blueprint named "castle"/],
         // a wrong range: not the one the routine was decided for; and a plot outside its owner's range

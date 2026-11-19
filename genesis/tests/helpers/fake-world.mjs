@@ -25,6 +25,11 @@ export const RECIPES = {
     chest: { needs: { oak_planks: 8 }, makes: 1, table: true },
     furnace: { needs: { cobblestone: 8 }, makes: 1, table: true },
     bread: { needs: { wheat: 3 }, makes: 1, table: true },
+    // what the prefab ladder is built from beside planks and logs (the counts of Minecraft 1.21.6)
+    oak_door: { needs: { oak_planks: 6 }, makes: 3, table: true },
+    oak_slab: { needs: { oak_planks: 3 }, makes: 6, table: true },
+    oak_fence: { needs: { oak_planks: 4, stick: 2 }, makes: 3, table: true },
+    ladder: { needs: { stick: 7 }, makes: 3, table: true },
 };
 const DROPS = {
     stone: { cobblestone: 1 }, coal_ore: { coal: 1 }, iron_ore: { raw_iron: 1 }, grass_block: { dirt: 1 },
@@ -181,6 +186,7 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
             dayTicksLeft: () => Math.max(0, 12000 - (world.ticks() % DAY_TICKS)),
             timeOfDay: () => world.ticks() % DAY_TICKS,
             daylightStopped: () => world.daylight_stopped === true,
+            day: () => Math.floor(world.ticks() / DAY_TICKS),
             blockAt: (pos) => { refresh(); return seen(blocks.get(key(pos.x, pos.y, pos.z))) ?? { name: 'air' }; },
             findBlocks: (names, distance, count) => nearest(body, names, distance, count).map(seen),
             pathTo(pos) {
@@ -208,6 +214,11 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
             },
             fuel: () => fuelOf(body),
             isSmeltable: (item) => Object.hasOwn(SMELTS, item),
+            // what the learning step records: world.hostiles is a list of { x, y, z }, world.rain a flag
+            hostilesNear: (distance = 16) => (world.hostiles ?? []).filter((mob) => dist(mob, body.position) <= distance).length,
+            raining: () => world.rain === true,
+            agentsNear: (names, distance = 16) => (names ?? []).filter((name) => name !== agent && bodies.has(name) && dist(bodies.get(name).position, body.position) <= distance)
+                .map((name) => ({ name, dist: Math.round(dist(bodies.get(name).position, body.position) * 10) / 10 })).sort((a, b) => a.dist - b.dist || a.name.localeCompare(b.name)),
         };
     }
 
@@ -377,6 +388,8 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
                 if (!walk({ x, y, z }, 4, call)) return false;
                 take(body, type, 1);
                 put(x, y, z, type, 'skill');
+                // a door is one item and two cells: the upper half comes with the lower (as in the game)
+                if (type.endsWith('_door') && !blocks.get(key(x, y + 1, z))) world.set(x, y + 1, z, type);
                 log(`Placed ${type} at (${x}, ${y}, ${z}).`);
                 return true;
             },

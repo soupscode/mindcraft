@@ -14,7 +14,7 @@ import { REPO_ROOT } from './helpers/stubs.mjs';
 import { fakeFiles, fakeClock } from './helpers/fakes.mjs';
 import { fakeMinecraft } from './helpers/fake-rcon.mjs';
 import { exampleWorld } from './helpers/bootstrapped.mjs';
-import { fileBlueprints } from '../catalog/blueprints.js';
+import { buildBlueprints } from '../catalog/blueprints.js';
 import { checkWorldConfig, worldHash } from '../world/world_config.js';
 import { buildBootstrapPlan } from '../world/plan.js';
 import { runBootstrap, runSiteStage, readSiteRecord, reportLines } from '../world/bootstrap.js';
@@ -25,7 +25,7 @@ import {
 import { probeWorldEdit, parseDistribution, blockKey, WORLDEDIT_ANSWERS, WORLDEDIT_COMMANDS } from '../world/worldedit.js';
 import { pickSite, scoreSites, siteLayout, siteReportLines, SITE_DEFAULTS, SITE_REFUSALS, SITE_RECORD_FILE } from '../world/site.js';
 
-const BLUEPRINTS = fileBlueprints(path.join(REPO_ROOT, 'src', 'agent', 'npc', 'construction'));
+const BLUEPRINTS = buildBlueprints({ root: REPO_ROOT });
 const MANIFEST = '/data/genesis_world/bootstrap.manifest.json';
 const WORLD_FILE = '/data/genesis_world/genesis.world.json';
 const noSleep = async () => {};

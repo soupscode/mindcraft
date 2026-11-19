@@ -13,6 +13,9 @@ import { validateEvent } from '../src/server/contract.js';
 import { eventMaker, fakeClock, fakeStream, incident, memoryStore } from '../test/fakes.js';
 import { createControls } from '../src/server/controls.js';
 import { buildDigest } from '../../alerter/src/digest.js';
+import { createTownLearning } from '../src/server/town_learning.js';
+// @ts-ignore the stand-in for the MindServer process's learner and town is plain JavaScript, like the code it runs
+import { makeFixtureHost } from './fixture-host.mjs';
 
 const port = Number(process.argv[2] ?? 8099);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -131,6 +134,10 @@ pg.alert_rows.push(
     { id: 'al-1', problem_key: 'failure:Mira:Model call failed:ModelTimeoutError', severity: 'warning', title: 'Mira · Model call failed · ModelTimeoutError', subject: 'Mira', kind: 'model', opened_at: new Date(start + 9 * 60000).toISOString(), updated_at: new Date(start + 11 * 60000).toISOString(), closed_at: null, occurrences: 3, push_state: 'queued', pushed_at: null },
 );
 
-const app = await buildApp({ live, store: pg.store, controls, roster, public_dir: path.join(root, 'dist/public') });
+// The Learning and Town screens: the real learner and town code, fed made-up goals and builds (scripts/fixture-host.mjs).
+const host = await makeFixtureHost({ goals: Number(process.env.FIXTURE_GOALS ?? 1600) });
+const town_learning = createTownLearning({ link: host.link as any });
+
+const app = await buildApp({ live, store: pg.store, controls, town_learning, roster, public_dir: path.join(root, 'dist/public') });
 await app.listen({ host: '127.0.0.1', port });
 console.log(`fixture dashboard on http://127.0.0.1:${port}`);

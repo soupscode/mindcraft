@@ -36,6 +36,9 @@ export const CROPS = Object.freeze({
 export const CRAFT_ITEMS = Object.freeze([
     ['oak_planks', 4], ['birch_planks', 4], ['spruce_planks', 4], ['stick', 2], ['crafting_table', 1],
     ['oak_door', 1], ['birch_door', 1], ['spruce_door', 1], // the shipped houses have a door (6 planks make 3)
+    // what the prefab ladder needs beside planks, logs and doors (genesis/build/ladder.js): 3 planks make 6 slabs,
+    // 4 planks and 2 sticks make 3 fences, 7 sticks make 3 ladders. Glass is smelted from sand (smelt_item).
+    ['oak_slab', 1], ['birch_slab', 1], ['spruce_slab', 1], ['oak_fence', 1], ['birch_fence', 1], ['spruce_fence', 1], ['ladder', 1],
     ['wooden_pickaxe', 1], ['wooden_axe', 1], ['wooden_hoe', 1], ['wooden_sword', 1],
     ['stone_pickaxe', 1], ['stone_axe', 1], ['stone_hoe', 1], ['stone_sword', 1],
     ['torch', 2], ['chest', 1], ['furnace', 1], ['bread', 1],
@@ -55,7 +58,8 @@ export const NATURAL_SUFFIXES = Object.freeze(['_leaves']);
 export const CLEARABLE_BLOCKS = Object.freeze(['torch', 'wall_torch']);
 
 // Items an agent keeps when it stores things away (never offered to store_items).
-export const KEEP_SUFFIXES = Object.freeze(['_pickaxe', '_axe', '_shovel', '_hoe', '_sword', '_helmet', '_chestplate', '_leggings', '_boots']);
+// (and its bed: decided, an agent's bed is its own furniture, placed in its home)
+export const KEEP_SUFFIXES = Object.freeze(['_pickaxe', '_axe', '_shovel', '_hoe', '_sword', '_helmet', '_chestplate', '_leggings', '_boots', '_bed']);
 export const KEEP_ITEMS = Object.freeze(['torch', 'bread', 'shield', 'crafting_table']);
 
 export const CATALOG_DEFAULTS = Object.freeze({
@@ -79,4 +83,5 @@ export const CATALOG_DEFAULTS = Object.freeze({
     offer_count: 8,         // proposed: items one offer_agent goal offers at most
     handoff_distance: 16,   // proposed: within this many blocks items are handed over directly, further away they go through the shared chest
     handoff_chest: 'shared',
+    town_chests: ['shared'], // decided: what "the town holds" for a build is the shared chest's ledger plus what the builder carries
 });

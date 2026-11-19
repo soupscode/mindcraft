@@ -1,0 +1,61 @@
+{
+  "v": 1,
+  "name": "storehouse",
+  "title": "Storehouse",
+  "kind": "shared",
+  "tier": 3,
+  "by": "Generated",
+  "size": {"x":9,"y":5,"z":7},
+  "below": 1,
+  "blocks": [
+    [
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"]
+    ],
+    [
+      ["oak_log","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","oak_log"],
+      ["cobblestone","chest","air","chest","torch","chest","air","chest","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","chest","air","air","torch","air","air","chest","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","torch","air","air","air","air","air","torch","cobblestone"],
+      ["oak_log","cobblestone","cobblestone","cobblestone","oak_door","cobblestone","cobblestone","cobblestone","oak_log"]
+    ],
+    [
+      ["oak_log","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","oak_log"],
+      ["cobblestone","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","cobblestone"],
+      ["oak_log","cobblestone","cobblestone","cobblestone","oak_door","cobblestone","cobblestone","cobblestone","oak_log"]
+    ],
+    [
+      ["oak_log","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","oak_log"],
+      ["cobblestone","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","cobblestone"],
+      ["oak_log","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","oak_log"]
+    ],
+    [
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"]
+    ]
+  ],
+  "parts": {"oak_door":2},
+  "stages": [{"name":"Foundation","y":[0,0]},{"name":"Walls","y":[1,3]},{"name":"Roof","y":[4,4]},{"name":"Fittings","blocks":["oak_door","torch","chest"]}],
+  "materials": {"chest":6,"cobblestone":133,"oak_door":1,"oak_log":12,"oak_planks":63,"torch":4},
+  "keeps": []
+}

@@ -1,0 +1,63 @@
+{
+  "v": 1,
+  "name": "cabin",
+  "title": "Cabin",
+  "kind": "home",
+  "tier": 2,
+  "by": "Generated",
+  "size": {"x":7,"y":5,"z":7},
+  "below": 1,
+  "blocks": [
+    [
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"]
+    ],
+    [
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_log"],
+      ["oak_planks","chest","air","air","air","crafting_table","oak_planks"],
+      ["oak_planks","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","oak_planks"],
+      ["oak_planks","torch","air","air","air","torch","oak_planks"],
+      ["oak_log","oak_planks","oak_planks","oak_door","oak_planks","oak_planks","oak_log"]
+    ],
+    [
+      ["oak_log","oak_planks","glass","oak_planks","glass","oak_planks","oak_log"],
+      ["oak_planks","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","oak_planks"],
+      ["glass","air","air","air","air","air","glass"],
+      ["oak_planks","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","oak_planks"],
+      ["oak_log","oak_planks","oak_planks","oak_door","oak_planks","oak_planks","oak_log"]
+    ],
+    [
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_log"],
+      ["oak_planks","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","oak_planks"],
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_log"]
+    ],
+    [
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"]
+    ]
+  ],
+  "parts": {"oak_door":2},
+  "stages": [{"name":"Foundation","y":[0,0]},{"name":"Walls","y":[1,3]},{"name":"Roof","y":[4,4]},{"name":"Fittings","blocks":["oak_door","glass","torch","chest","crafting_table"]}],
+  "materials": {"chest":1,"cobblestone":49,"crafting_table":1,"glass":4,"oak_door":1,"oak_log":12,"oak_planks":54,"oak_slab":49,"torch":2},
+  "keeps": [{"block":"chest","at":[1,1,1]}],
+  "bed": {"head":[1,1,2],"foot":[1,1,3]},
+  "upgrade_of": "shack"
+}

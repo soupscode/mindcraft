@@ -54,6 +54,9 @@ export interface PlanView {
     attempt: number;
     running: string | null;      // the command running right now
     started_at: string;
+    // how the goal was chosen while the model was away: "learned" (the learner's estimate) or "trying" (an option
+    // it is unsure about); null for everything else
+    learned: 'learned' | 'trying' | null;
 }
 
 export interface ProgressView {
@@ -82,6 +85,8 @@ export interface AgentView {
     last_seen: string | null;
     routine: RoutineView | null;        // the role routine's phase and bounds, from its own event
     skin: { state: 'applied' | 'failed' | 'cleared'; at: string; reason: string | null } | null;   // from the skin service's events
+    // the learner's last choice for this agent that has not started yet (its "learned_choice" event comes before the goal's decision)
+    learned_choice: { option_id: string; explore: boolean; at: string } | null;
 }
 
 // The role routine as its "routine" event says it (genesis/routines/engine.js).
@@ -183,6 +188,21 @@ export interface LiveState {
     decisions: DecisionView[];
     world: WorldView;
     server: ServerView;
+    learning: LearningTick;
+    town: TownTick;
+}
+
+// The Learning and Town screens read their data from the MindServer when asked; these say WHEN to ask again
+// (every event of the learner or the town moves the tick) and carry the learner's short summary.
+export interface LearningTick {
+    tick: number;
+    at: string | null;
+    summary: { version: number; examples: number; frozen: boolean; error: number | null; table_error: number | null; explore_rate: number | null } | null;
+}
+export interface TownTick {
+    tick: number;
+    at: string | null;
+    last: string | null;         // the last thing that happened: town_plan | plot_proposed | build_progress | build_verified | home_changed
 }
 
 export interface Health {

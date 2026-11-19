@@ -11,7 +11,10 @@ import type {
 export const CAPS = Object.freeze({ goal_changes: 40, incidents: 150, messages: 240, decisions: 80, incident_steps: 24, agents: 32 });
 
 // Names that publish events but are not agents (genesis/planning/server.js, genesis/recovery/server.js).
-export const SERVICE_NAMES: readonly string[] = Object.freeze(['planner', 'supervisor', 'world', 'skins', 'relay']);
+export const SERVICE_NAMES: readonly string[] = Object.freeze(['planner', 'supervisor', 'world', 'skins', 'relay', 'learner', 'town']);
+// The states of the learner and the town (genesis/learning/service.js, genesis/town/town.js): each moves a tick.
+export const LEARNING_STATES: readonly string[] = Object.freeze(['experience', 'learning_update', 'learning_version', 'learning_bench']);
+export const TOWN_STATES: readonly string[] = Object.freeze(['town_plan', 'plot_proposed', 'build_progress', 'build_verified', 'home_changed', 'long_term_override']);
 
 export function emptyState(roster: readonly string[] = []): LiveState {
     const state: LiveState = {
@@ -20,6 +23,8 @@ export function emptyState(roster: readonly string[] = []): LiveState {
         goal_changes: [], incidents: [], messages: [], decisions: [],
         world: { zones: null, zones_at: null, bootstrap: null, bootstrap_at: null },
         server: { waiting: {}, last_back: null },
+        learning: { tick: 0, at: null, summary: null },
+        town: { tick: 0, at: null, last: null },
     };
     for (const name of roster) state.agents[name] = emptyAgent(name);
     return state;
@@ -29,7 +34,7 @@ export function emptyAgent(name: string): AgentView {
     return {
         name, thought: null, short_term: [], long_term: [], short_change: null, long_change: null,
         plan: null, progress: null, mode: null, mode_since: null, held: null, parked: false, detour: false,
-        last_state: null, last_seen: null, routine: null, skin: null,
+        last_state: null, last_seen: null, routine: null, skin: null, learned_choice: null,
     };
 }
 
@@ -173,6 +178,16 @@ function foldAgentState(state: LiveState, agent: AgentView | null, event: Genesi
         if (whose) whose.skin = { state: name === 'skin_applied' ? 'applied' : name === 'skin_failed' ? 'failed' : 'cleared', at: event.ts, reason: text(detail.reason) || null };
         return;
     }
+    if (LEARNING_STATES.includes(name)) {
+        state.learning.tick++;
+        state.learning.at = event.ts;
+        if (name === 'learning_update') {
+            const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+            state.learning.summary = { version: Number(detail.version) || 0, examples: Number(detail.examples) || 0, frozen: detail.frozen === true, error: num(detail.error), table_error: num(detail.table_error), explore_rate: num(detail.explore_rate) };
+        }
+        return;
+    }
+    if (TOWN_STATES.includes(name)) { state.town.tick++; state.town.at = event.ts; state.town.last = name; return; }
     if (name.startsWith('model_')) {
         const gate = name.slice('model_'.length);
         if (gate === 'available' || gate === 'leaving' || gate === 'away') {
@@ -187,6 +202,11 @@ function foldAgentState(state: LiveState, agent: AgentView | null, event: Genesi
         // the agent's goals as it starts (decided: long-term goals are emitted as events)
         agent.long_term = goalList(detail.long_term);
         if (agent.short_change === null) agent.short_term = goalList(detail.short_term);
+        return;
+    }
+    if (name === 'learned_choice') {
+        // the learner chose this goal while the model was away: the goal's own decision event follows
+        if (typeof detail.option_id === 'string') agent.learned_choice = { option_id: detail.option_id, explore: detail.explore === true, at: event.ts };
         return;
     }
     if (name === 'routine') {
@@ -268,7 +288,9 @@ export function applyEvent(state: LiveState, event: GenesisEvent): void {
                     decision_id: decision.decision_id, goal_id: decision.goal_id, title: decision.summary, source: decision.trigger,
                     call_id: decision.call_id, skill: decision.command, steps: decision.steps, steps_from: decision.steps_from,
                     cursor: 0, done_through: -1, attempt: 0, running: null, started_at: event.ts,
+                    learned: agent.learned_choice && agent.learned_choice.option_id === decision.option_id && decision.trigger === 'routine' ? (agent.learned_choice.explore ? 'trying' : 'learned') : null,
                 };
+                agent.learned_choice = null;
                 agent.progress = null;
             }
             break;

@@ -310,7 +310,7 @@ test('planning server: no database configured keeps calls in memory; a configure
     assert.equal(pool.url, 'postgres://genesis@db:5432/genesis');
     assert.equal(extensions.length, 1);
     // the tables are made at start, from the files of genesis/store/migrations, in order
-    assert.deepEqual(second.database, { configured: true, connected: true, migrated: true, migrations: ['001_planner_calls.sql', '002_goals.sql', '003_checkpoints.sql'] });
+    assert.deepEqual(second.database, { configured: true, connected: true, migrated: true, migrations: ['001_planner_calls.sql', '002_goals.sql', '003_checkpoints.sql', '004_learning.sql'] });
     assert.deepEqual(pool.queries.slice(0, 3).map((query) => /CREATE TABLE IF NOT EXISTS ([a-z_]+)/.exec(query.text)[1]), ['planner_calls', 'agent_goals', 'agent_checkpoints']);
     assert.ok(pool.queries.slice(0, 3).every((query) => query.values.length === 0 && !/\bDROP\b|\bDELETE\b|\bTRUNCATE\b/i.test(query.text)));
     assert.equal(notes.find((note) => note.event === 'genesis_planning_database_ready').level, 'info');

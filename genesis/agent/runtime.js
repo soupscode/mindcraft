@@ -28,6 +28,12 @@
 //   emit, getSeq           the agent's event emitter (genesis/events/agent_emit.js)
 //   ledger                 the agent's copy of the shared chest ledger (a plain one when left out: the tests)
 //   onContestedClaim       (claim) -> void   see above
+//   learning               the agent's end of the socket to the learner (genesis/learning/client.js). Left out: nothing is
+//                          recorded and nothing is scored; the agent works exactly as it did before there was a learner.
+//   town, building         the agent's copy of the town (genesis/town/client.js: createTownClient) and what the building ladder
+//                          is asked from it (building()). The zones and the catalog handed in must then be the town's
+//                          (townZones, townBlueprints). Left out: the world file's plots as they are, and no ladder.
+//   learned_choice         false: the learner records and annotates, but the routine's own rule chooses while the model is away
 //   recovery_ops           what the watchdog's ladder moves the bot with (genesis/adapters/bot_recovery.js):
 //                          { interrupt(), moveAway(blocks), surfaceOrHome(home), restartProcess(reason) }
 //                          Left out (the older tests): no watchdog runs.
@@ -63,6 +69,11 @@ import { createDeathRecovery, DEATH_RULES } from '../recovery/death.js';
 import { createMessageDesk } from '../relay/desk.js';
 import { MESSAGE_STEP } from '../catalog/ops.js';
 import { PATROL_OPTION } from '../catalog/zones.js';
+import { createRecorder } from '../learning/recorder.js';
+import { PROMPT_VERSION } from '../planning/context.js';
+import { needOf, NEED } from '../learning/need.js';
+import { createBuildTracker } from '../town/tracker.js';
+import { createLongTerm } from './../planning/long_term.js';
 
 export function createAgentRuntime({
     agent, zones, catalog, view, ops, goal_storage, checkpoints, send, emit = () => null, getSeq = () => 0,
@@ -70,10 +81,11 @@ export function createAgentRuntime({
     routine: routine_definition = routineFor(agent), memory = () => '', ids = null,
     executor: executor_options = {}, planner: planner_options = {}, rules = {}, onContestedClaim = () => {},
     contested_quiet_ms = 60 * 1000, recovery_ops = null, watchdog: watchdog_options = {}, death: death_options = {},
-    messaging = false, desk: desk_options = {}, relay_limits = {},
+    messaging = false, desk: desk_options = {}, relay_limits = {}, learning = null, learned_choice = true,
+    town = null, building = null, tracker: tracker_options = {}, prefabs = null, long_term: long_term_options = {},
 } = {}) {
     const tracker = scaffold ?? createScaffoldTracker({ zones });
-    const stats = { deaths: 0, deaths_without_request: 0, operator_messages: 0, agent_requests: 0, ignored_messages: 0, ignored_chat: 0, contested_claims: 0, contested_repeats: 0 };
+    const stats = { deaths: 0, deaths_without_request: 0, operator_messages: 0, agent_requests: 0, ignored_messages: 0, ignored_chat: 0, contested_claims: 0, contested_repeats: 0, learned_choices: 0, learned_tries: 0 };
     const ignored_by = new Map();      // who was not listened to -> how often (the newest 50 names)
     const contested_seen = new Map();  // "chest|item|holder" -> when the claim was last reported
     let long_term = [];
@@ -89,6 +101,22 @@ export function createAgentRuntime({
     const death_rules = { ...DEATH_RULES, ...death_options };
     const signature_rules = { ...SIGNATURE_DEFAULTS };
     for (const key of Object.keys(SIGNATURE_DEFAULTS)) if (watchdog_options[key] !== undefined) signature_rules[key] = watchdog_options[key];
+
+    // learning (genesis/learning; only with a learning client): every goal is recorded, with the situation it started
+    // in and what became of it. `choices` remembers how a goal was chosen until it starts or ends.
+    let recorder = null;
+    let builds = null;          // genesis/town/tracker.js (only with a town)
+    let long_term_goals = null; // genesis/planning/long_term.js (only with a town and the prefabs)
+    let town_seen = -1;         // the version of the town the long-term goals were last brought up to
+    let town_timer = null;
+    const choices = new Map();  // option id -> { chooser, explore, decision_id, call_id }
+    let decision_counter = 0;
+    const choiceOf = (option_id, source) => {
+        const choice = choices.get(option_id) ?? null;
+        if (!choice) return null;
+        // (a routine goal the learner picked is the "network"'s choice; anybody else's goal with the same option is not)
+        return choice.chooser === 'network' ? (source === 'routine' ? choice : null) : (source === 'planner' ? choice : null);
+    };
 
     const say = (type, data, opts) => { try { return emit(type, data, opts); } catch { return null; } };
     const reporter = createIncidentReporter({ emit: say, source: { type: 'agent', name: agent }, clock, ids });
@@ -109,9 +137,13 @@ export function createAgentRuntime({
     // The world as it is now, for the catalog. duties: what the agent agreed to hand over (the
     // give_items option only exists for those). talk: the message desk's view of what may be sent
     // right now (ask_agent and offer_agent are only offered with it); null without a desk.
+    // building: the town's builds as the ladder is asked about them (genesis/town/client.js); without a town there is no ladder.
     const state = () => ({
         agent, view, ledger, avoid: routine?.avoid() ?? [], now: clock.now(),
         duties: desk?.duties() ?? [], talk: desk?.talk() ?? null, handedOver: (args, how) => desk?.handedOver(args, how),
+        ...(building ? { building } : {}),
+        // the agent put its bed in its home (the furnish_home goal): the town is told
+        furnished: (what) => { if (what === 'bed') town?.op({ kind: 'home', bed_placed: true }).catch(() => {}); },
     });
 
     // The agent wanted items another agent has reserved. One event per claim and minute (a
@@ -156,6 +188,26 @@ export function createAgentRuntime({
         // what the agent agreed with another agent is not the plan's to replace: an accepted hand-over stays queued
         keeps: (goal) => desk?.owes(goal) ?? false,
         held: () => executor?.isHeld() ?? false,
+        // the learner orders and annotates the options the model is shown; a learner that does not answer changes nothing
+        rank: learning ? async (options, now_state) => {
+            const situations = Object.fromEntries(options.map((option) => [option.id, recorder.situate(option)]));
+            // need is computed by code, never learned (genesis/learning/need.js): the agent's own work comes before a walk to
+            // the camp or a craft nothing asked for, however quick and sure those are
+            const inventory = now_state.view.inventory();
+            const holds = (suffix) => Object.keys(inventory).some((item) => item.endsWith(suffix) && inventory[item] > 0);
+            const need = Object.fromEntries(options.map((option) => [option.id, needOf(option, { role: routine_definition?.role ?? null, holds })]));
+            return learning.rank({ options: options.map(({ id, skill, args, title }) => ({ id, skill, args, title })), situations, need, chooser: 'planner' });
+        } : null,
+        onDecision(decision) {
+            if (!learning) return;
+            const decision_id = `${agent}-d-${clock.now()}-${++decision_counter}`;
+            learning.decision({
+                decision_id, chooser: 'planner', call_id: decision.call_id, offered: decision.offered, chosen: decision.chosen, default_choice: decision.default_choice,
+                situation: recorder.situate({ id: decision.chosen[0] ?? '', skill: '', args: {} }), prompt_version: PROMPT_VERSION,
+            });
+            for (const option_id of decision.added) choices.set(option_id, { chooser: 'planner', explore: false, decision_id, call_id: decision.call_id });
+            if (choices.size > 24) choices.delete(choices.keys().next().value);
+        },
         onGoals(queued, origin, { dropped = [], stale = [] } = {}) {
             if (queued.length > 0 || stale.length === 0) idle_since = null;
             executor.noteGoals(queued, origin);
@@ -185,6 +237,68 @@ export function createAgentRuntime({
         ...planner_options,
     });
 
+    // WHILE THE MODEL IS AWAY THE LEARNER CHOOSES (decided: free choice among ALL options the catalog offers, not only
+    // those of the routine's phase). The routine's own pick is still worked out: it is what the unlearned rule would
+    // have done (the decision row keeps it), it counts for more in the choice (genesis/learning/need.js), and it is
+    // what happens when the learner does not answer. Never chosen for: a hard safety rule of the routine (parked,
+    // the walk home after a death, the shelter when a bound is breached), which stays exactly as it was. Building:
+    // a build that was started may be continued, a new one is never started (the scorer sees to it).
+    // Returns the learner's choice in the shape of the routine's, or null (then the routine's own choice stands).
+    // What the learner does not choose although it is offered: an option that would use up what a build this agent
+    // has STARTED still wants (a craft from its planks, storing or offering its materials). Decided: a started build is
+    // continued while the model is away; a learner that turned the builder's planks into sticks between two build goals
+    // would end it. What leads to the build's own materials (a door from planks for a build that wants a door) is not held back.
+    function heldBack(options, world, started) {
+        const mine = started.filter((plot) => zones.plot(plot)?.owner === agent);
+        if (mine.length === 0) return [];
+        const wants = (item) => typeof item === 'string' && mine.some((plot) => catalog.needOf(`build_blueprint:${plot}`, item, world) > 0);
+        return options.filter((option) => {
+            if (option.for_build) return false;
+            if (option.skill === 'craft_item') { let used = {}; try { used = view.ingredients?.(option.args.item) ?? {}; } catch { used = {}; } return Object.keys(used).some(wants); }
+            if (option.skill === 'store_items' || option.skill === 'offer_agent' || option.skill === 'smelt_item') return wants(option.args.item);
+            return false;
+        }).map((option) => option.id);
+    }
+
+    async function learnedChoice(world, choice) {
+        if (!learning || !recorder || learned_choice === false || planner.modelAvailable() || choice?.reflex) return null;
+        try {
+            const pick_id = choice?.goal?.option_id ?? null;
+            // what failed this round is not offered again in it, as the routine has it
+            const failed_now = new Set(routine.skipped());
+            let options = catalog.offer(world, failed_now.size > 0 ? { exclude: failed_now } : {});
+            // the routine's pick is a catalog option whose preconditions were just checked: it is on the list
+            if (pick_id !== null && !options.some((option) => option.id === pick_id)) {
+                const checked = catalog.check(pick_id, world);
+                if (checked.ok) options = [checked.option, ...options];
+            }
+            if (options.length === 0) return null;
+            const inventory = view.inventory();
+            const holds = (suffix) => Object.keys(inventory).some((item) => item.endsWith(suffix) && inventory[item] > 0);
+            const role = routine_definition?.role ?? null;
+            const need = Object.fromEntries(options.map((option) => [option.id, needOf(option, { role, routine_pick: pick_id, holds })]));
+            const situations = Object.fromEntries(options.map((option) => [option.id, recorder.situate(option)]));
+            const started = world.building?.startedPlots?.() ?? [];
+            const answer = await learning.choose({
+                options: options.map(({ id, skill, args, title }) => ({ id, skill, args, title })), situations, need,
+                started_builds: started, held_back: heldBack(options, world, started), default_choice: pick_id,
+            });
+            const option = answer?.chosen ? options.find((it) => it.id === answer.chosen) ?? null : null;
+            if (!option) return null; // no answer, or nothing eligible: the routine's own choice stands. Never anything that was not offered.
+            // nothing worth doing: when the routine's own rule has nothing either and the best there is serves nothing by
+            // itself (a walk to the camp, taking things out of a chest), the agent waits as the routine would. A try is a try.
+            if (pick_id === null && !answer.explore && (need[option.id] ?? 1) < NEED.some) return null;
+            choices.set(option.id, { chooser: 'network', explore: answer.explore, decision_id: answer.decision_id, call_id: null });
+            if (choices.size > 24) choices.delete(choices.keys().next().value);
+            stats.learned_choices++;
+            if (answer.explore) stats.learned_tries++;
+            say('agent.state', { state: 'learned_choice', detail: { option_id: option.id, title: option.title, explore: answer.explore, decision_id: answer.decision_id, routine_pick: pick_id, differs: pick_id !== option.id } }, { corr: null });
+            return { goal: { title: option.title, option_id: option.id }, reason: answer.reason ?? 'learned estimate', routine: choice?.routine ?? routine.snapshot(), learned: true, explore: answer.explore };
+        } catch {
+            return null;
+        }
+    }
+
     // Asked by the executor whenever the queue is empty.
     async function chooseWork() {
         const now = clock.now();
@@ -192,7 +306,15 @@ export function createAgentRuntime({
         // a reply may be about to come: do not start something only to drop it
         if (planner.waitingForReply(now, idle_since)) return { idle_ms: 2000 };
         if (!routine) return null;
-        const choice = routine.next(state());
+        const world = state();
+        const own = routine.next(world);
+        const choice = (await learnedChoice(world, own)) ?? own;
+        // a safety rule's pick is a decision too: the one option it had
+        if (learning && recorder && choice === own && own?.reflex && own.goal) {
+            try {
+                learning.decision({ chooser: 'routine', offered: [{ id: own.goal.option_id }], chosen: own.goal.option_id, default_choice: own.goal.option_id, situation: recorder.situate({ id: own.goal.option_id, skill: '', args: {} }), prompt_version: null });
+            } catch { /* recording never stops the work */ }
+        }
         if (choice?.goal) idle_since = null;
         return choice;
     }
@@ -213,7 +335,16 @@ export function createAgentRuntime({
         agent, catalog, goals, checkpoints, ops: stepper, state, emit: say, getSeq, clock, scaffold: tracker, zones, ids,
         onTrigger: ({ kind, detail }) => planner.trigger(kind, detail),
         chooseWork,
+        onGoalStart(start) {
+            recorder?.started(start, choiceOf(start.option_id, start.source));
+            try { builds?.goalStarted(start); } catch { /* the town never stops a goal */ }
+        },
+        onStep() { recorder?.step(); },
         onGoalEnd(end) {
+            // the outcome goes to the learner first, with the world as the goal left it
+            recorder?.ended(end, choiceOf(end.option_id, end.origin ?? end.source));
+            choices.delete(end.option_id);
+            try { builds?.goalEnded(end); } catch { /* the town never stops a goal */ }
             catalog.release?.(end.option_id, state()); // whatever the goal had reserved in the chest ledger is free again
             desk?.goalEnded(end).catch(() => {});      // a hand-over that ended: the other agent is told
             if (end.origin === 'recovery') return; // a goal of a recovery detour is nobody's work
@@ -243,6 +374,16 @@ export function createAgentRuntime({
         ...executor_options,
     });
 
+    // the town (genesis/town; only with a town client): this agent's builds are told to it and verified, and plots it wants are proposed
+    if (town) builds = createBuildTracker({ agent, town, catalog, zones, state, view, scaffold: tracker, clock, emit: say, rules: tracker_options });
+    // long-term goals (genesis/planning/long_term.js; with a town and the prefabs): the model's own choice within the
+    // role, Arthur's next rung of the ladder pinned in front, the operator's override above both
+    if (town && prefabs) {
+        long_term_goals = createLongTerm({ agent, role: routine_definition?.role ?? null, goals, town, prefabs, send, modelAvailable: () => planner.modelAvailable(), clock, rules: long_term_options });
+    }
+    if (learning) {
+        recorder = createRecorder({ agent, client: learning, view, zones, catalog, state, clock, queueLength: () => queued, modelAvailable: () => planner.modelAvailable() });
+    }
     if (messaging) {
         desk = createMessageDesk({ agent, send, clock, catalog, state, goals, executor, planner, emit: say, rules: desk_options, limits: relay_limits });
     }
@@ -343,6 +484,7 @@ export function createAgentRuntime({
 
     return {
         agent, goals, executor, planner, routine, ledger, scaffold: tracker, state, reporter,
+        recorder: () => recorder,
         watchdog: () => watchdog,
         watchStatus,
         // Loads the checkpoint (the executor resumes the step it was on), then tells the broker
@@ -360,6 +502,8 @@ export function createAgentRuntime({
             }
             // the shared ledger as the MindServer has it (not connected: the copy starts empty and learns by looking)
             try { await ledger.sync?.(); } catch { /* the copy works on what it knows */ }
+            // the town as the MindServer has it (not connected: the world file's zones as they are)
+            try { await town?.sync(); } catch { /* without the town the agent works from the world file alone */ }
             const got = await goals.get(agent);
             if (got.ok) {
                 long_term = got.goals.long_term; queued = got.goals.short_term.length; short_term = got.goals.short_term;
@@ -367,14 +511,34 @@ export function createAgentRuntime({
                 // agent starts with it, so that a reader knows the goals of an agent that has changed none yet
                 say('agent.state', { state: 'goals', detail: { long_term: got.goals.long_term, short_term: got.goals.short_term } }, { corr: null });
             }
+            // every agent has a long-term goal from its first minute: the operator's, the model's earlier choice, or its role's defaults
+            if (long_term_goals) { town_seen = town.version(); await long_term_goals.review('start'); }
             routine?.awayStarted(); // until the broker says the model is there, it is away
             try {
                 send('genesis-hello', agent, (answer) => { if (answer?.gate) planner.onGate({ state: answer.gate, reason: answer.reason ?? null }); });
             } catch { /* not connected: the gate stays AWAY and the agent works from its queue and routine */ }
             return begun;
         },
-        run() { watchdog?.start(); return executor.run(); },
-        stop() { watchdog?.stop(); executor.stop(); },
+        run() {
+            watchdog?.start();
+            if (builds && town_timer === null) {
+                const work = async () => {
+                    await builds.tick().catch(() => {});
+                    // the long-term goals follow the town (a verified build moves the next rung; the operator's override arrives)
+                    if (long_term_goals && (town.version() !== town_seen || planner.modelAvailable())) { town_seen = town.version(); await long_term_goals.review('the town changed'); }
+                };
+                const again = () => { town_timer = clock.setTimeout(() => { work().catch(() => {}).then(() => { if (town_timer !== null) again(); }); }, builds.rules.tick_ms); town_timer?.unref?.(); };
+                again();
+            }
+            return executor.run();
+        },
+        stop() {
+            watchdog?.stop();
+            if (town_timer !== null) { clock.clearTimeout(town_timer); town_timer = null; }
+            executor.stop();
+        },
+        builds: () => builds,
+        longTerm: () => long_term_goals,
         // ---- what arrives over the socket ----
         onPlanContext: (request, ack) => planner.onContextRequest(request, ack),
         onPlanQueued: (message) => planner.onQueued(message),
@@ -400,7 +564,7 @@ export function createAgentRuntime({
             return planner.trigger('agent_request', { from: clipText(from, 40), text: clipText(text, 400) });
         },
         // The agent is dying (it has not respawned yet): nothing runs until died() has decided.
-        deathBegan() { executor.pause('died'); },
+        deathBegan() { recorder?.died(); executor.pause('died'); },
         // The agent died at `point` (it has already respawned). Decided: respawn, walk home,
         // re-equip from the kits chest, resume from the checkpoint, with no model call.
         //   - a goal the planner or the operator chose is KEPT: a detour walks home and re-equips,
@@ -414,6 +578,7 @@ export function createAgentRuntime({
         // Returns the routine's verdict: 'restart' or 'parked'.
         async died(point) {
             stats.deaths++;
+            recorder?.died();
             const verdict = routine ? routine.died(point) : 'restart';
             const kept = executor.mainPlan();
             const count = kept && died_on?.plan_id === kept.id ? died_on.count + 1 : 1;

@@ -20,6 +20,7 @@ import { runRetention } from './retention.js';
 import { createControls } from './controls.js';
 import { createMindLink } from './mindserver_link.js';
 import { buildApp } from './app.js';
+import { createTownLearning } from './town_learning.js';
 import type { Store } from './ports.js';
 import { goalList } from './seed.js';
 
@@ -86,7 +87,8 @@ async function main() {
     const skins = createSkins({ store, link, roster: config.roster });
     // (the skin service is told what is stored, so that it applies a skin again when its agent logs in)
     setTimeout(() => { skins.announce().catch(() => {}); }, 5000).unref();
-    const app = await buildApp({ live, store, controls, skins, roster: config.roster, public_dir: config.public_dir, allow: config.allow });
+    const town_learning = createTownLearning({ link });
+    const app = await buildApp({ live, store, controls, skins, town_learning, roster: config.roster, public_dir: config.public_dir, allow: config.allow });
 
     ingest.run().catch((err) => log('error', 'dashboard_ingest_ended', { message: String(err?.message ?? err) }));
 

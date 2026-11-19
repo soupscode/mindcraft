@@ -8,7 +8,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { checkZonesConfig, createZones } from '../catalog/zones.js';
 import { checkRoutineRanges } from '../routines/routines.js';
-import { fileBlueprints, BLUEPRINT_DIR } from '../catalog/blueprints.js';
+import { buildBlueprints } from '../catalog/blueprints.js';
 import { checkWorldConfig, describeProblem } from '../world/world_config.js';
 import { DEFAULT_MANIFEST_FILE, RESET_MARKER_FILE, manifestPaths, parseManifest, checkManifest } from '../world/manifest.js';
 import { WATCHDOG_DEFAULTS, SIGNATURE_DEFAULTS } from '../recovery/watchdog.js';
@@ -103,6 +103,25 @@ export function checkSettings(settings) {
     problems.push(...checkPlanningSettings(settings.genesis_planning));
     problems.push(...checkRecoverySettings(settings.genesis_recovery));
     problems.push(...checkRelaySettings(settings.genesis_relay));
+    problems.push(...checkLearningSettings(settings.genesis_learning));
+    return problems;
+}
+
+// Checks the genesis_learning setting (the learner of genesis/learning). Learning goes with planning: it is on
+// whenever planning is, unless this says "enabled": false. Nothing here can switch model-written code on: the
+// learner only orders what the catalog offers.
+//   explore_rate   the share of the learner's own choices that go to an option it is unsure about (decided: 0.25)
+export function checkLearningSettings(learning) {
+    if (learning === undefined) return [];
+    if (learning === null || typeof learning !== 'object' || Array.isArray(learning)) return ['settings: "genesis_learning" must be an object'];
+    const problems = [];
+    if (learning.enabled !== undefined && typeof learning.enabled !== 'boolean') problems.push('settings: "genesis_learning.enabled" must be true or false');
+    if (learning.explore_rate !== undefined && !(Number.isFinite(learning.explore_rate) && learning.explore_rate >= 0 && learning.explore_rate <= 1)) {
+        problems.push('settings: "genesis_learning.explore_rate" must be a number from 0 to 1');
+    }
+    for (const key of Object.keys(learning)) {
+        if (key !== 'enabled' && key !== 'explore_rate') problems.push(`settings: "genesis_learning.${key}" is not a setting (known: enabled, explore_rate)`);
+    }
     return problems;
 }
 
@@ -231,7 +250,7 @@ function checkPlanningSettings(planning) {
             }
         }
     }
-    for (const key of ['manifest_file', 'ledger_file']) {
+    for (const key of ['manifest_file', 'ledger_file', 'town_file']) {
         if (planning[key] !== undefined && (typeof planning[key] !== 'string' || planning[key].length === 0)) {
             problems.push(`settings: "genesis_planning.${key}" must be a path, or left out for the default`);
         }
@@ -291,7 +310,7 @@ export function checkBootstrap(settings, repo_root) {
     } catch {
         return []; // reported by checkWorld
     }
-    const world_problems = checkWorldConfig(config, { blueprints: fileBlueprints(path.resolve(repo_root, BLUEPRINT_DIR)) });
+    const world_problems = checkWorldConfig(config, { blueprints: buildBlueprints({ root: repo_root }) });
     if (world_problems.length > 0) return world_problems.map((problem) => `${file}: ${describeProblem(problem)}`);
 
     const manifest_file = planning.manifest_file || DEFAULT_MANIFEST_FILE;

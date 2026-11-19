@@ -229,7 +229,9 @@ export function checkWorldConfig(config, { blueprints = null } = {}) {
             const blueprint = blueprints.get(plot.blueprint);
             if (!blueprint) add('unknown_blueprint', `${where}: there is no blueprint named "${plot.blueprint}"`);
             else {
-                const needs = blueprintSize(blueprint);
+                // (a prefab's layers set into the ground lie under the plot: they do not count against its height)
+                const full = blueprintSize(blueprint);
+                const needs = { ...full, y: full.y - (Number.isInteger(blueprint.below) ? blueprint.below : 0) };
                 const has = { ...extent, y: plot.max[1] - plot.min[1] + 1 };
                 if (needs.x > has.x || needs.y > has.y || needs.z > has.z) {
                     add('plot_too_small_for_blueprint', `${where} is ${has.x} by ${has.z} and ${has.y} high, the blueprint "${plot.blueprint}" needs ${needs.x} by ${needs.z} and ${needs.y} high`);
