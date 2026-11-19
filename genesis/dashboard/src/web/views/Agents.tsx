@@ -63,6 +63,8 @@ function AgentCard({ live, agent, role, process, now }: { live: LiveState; agent
                     <span>Short-term</span>
                     <span class="row" style="gap:6px">
                         {routine && <span class="tag">Routine</span>}
+                        {plan?.learned === 'learned' && <span class="tag line" title="Chosen by the learner's estimate while the model is away">Learned</span>}
+                        {plan?.learned === 'trying' && <span class="tag line" title="An option the learner is unsure about">Trying</span>}
                         {plan?.source === 'operator' && <span class="tag">Operator</span>}
                         {plan?.source === 'planner' && <span class="tag line">Model</span>}
                         {fresh(agent.short_change) && <span class="tag">Changed</span>}

@@ -20,18 +20,19 @@ export const BLUEPRINTS = { get: (name) => (name === 'hut' ? HUT : null) };
 export function makeRig({
     agent = 'Arthur', clock, world = null, storage = fakeGoalStorage(), files = fakeFiles(), config = WORLD_CONFIG,
     position = { x: 0, y: 64, z: 0 }, inventory = {}, last_seq = 0, catalog_config = {}, executor: executor_options = {},
+    blueprints = BLUEPRINTS, zones = null, more_state = () => ({}),
 } = {}) {
     const rig = { agent, clock, storage, files, events: [], triggers: [], ended: [] };
     rig.world = world ?? campWorld(clock);
     if (!rig.world.body(agent)) rig.world.addAgent(agent, { position, inventory });
-    rig.zones = createZones(config);
-    rig.catalog = createCatalog({ zones: rig.zones, blueprints: BLUEPRINTS, config: catalog_config });
+    rig.zones = zones ?? createZones(config);
+    rig.catalog = createCatalog({ zones: rig.zones, blueprints, config: catalog_config });
     rig.ledger = createLedger();
     rig.avoid = [];
     rig.emitter = createEmitter({ agent, send: (event) => rig.events.push(event), last_seq, now: clock.now, warn: () => {}, progress_interval_ms: 0 });
     rig.scaffold = createScaffoldTracker({ zones: rig.zones });
     rig.ops = rig.world.ops(agent, { on_place: (pos, how) => { if (how !== 'skill') rig.scaffold.placed(pos, { reflex_torch: how === 'reflex_torch' }); } });
-    rig.state = () => ({ agent, view: rig.world.view(agent), ledger: rig.ledger, avoid: rig.avoid });
+    rig.state = () => ({ agent, view: rig.world.view(agent), ledger: rig.ledger, avoid: rig.avoid, ...more_state() });
     rig.checkpoints = createCheckpointStore({ files, dir: '/checkpoints', clock });
     rig.goals = createGoalStore({
         storage, clock,

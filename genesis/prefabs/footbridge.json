@@ -1,0 +1,38 @@
+{
+  "v": 1,
+  "name": "footbridge",
+  "title": "Footbridge",
+  "kind": "bridge",
+  "tier": 1,
+  "by": "Generated",
+  "size": {"x":3,"y":2,"z":9},
+  "below": 1,
+  "blocks": [
+    [
+      ["oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks"]
+    ],
+    [
+      ["oak_log","air","oak_log"],
+      ["oak_fence","air","oak_fence"],
+      ["oak_fence","air","oak_fence"],
+      ["oak_fence","air","oak_fence"],
+      ["oak_fence","air","oak_fence"],
+      ["oak_fence","air","oak_fence"],
+      ["oak_fence","air","oak_fence"],
+      ["oak_fence","air","oak_fence"],
+      ["oak_log","air","oak_log"]
+    ]
+  ],
+  "parts": {"oak_door":2},
+  "stages": [{"name":"Deck","y":[0,0]},{"name":"Rails","y":[1,1]}],
+  "materials": {"oak_fence":14,"oak_log":4,"oak_planks":27},
+  "keeps": []
+}

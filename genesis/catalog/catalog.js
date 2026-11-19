@@ -24,8 +24,10 @@
 //
 // Depends only on other files of genesis/catalog.
 
-import { TEMPLATES, HANDOFF_TEMPLATES, MESSAGE_TEMPLATES, buildNeeds, leadsTo, isMember } from './templates.js';
+import { TEMPLATES, HANDOFF_TEMPLATES, HOME_TEMPLATES, MESSAGE_TEMPLATES, buildNeeds, leadsTo, isMember } from './templates.js';
 import { STEP_NAMES, COMMON_FAILURES } from './ops.js';
+import { catalogObtainable } from '../build/prefab.js';
+import { surveyBuild, prefabOrigin } from '../build/verify.js';
 import {
     CATALOG_DEFAULTS, GATHER_TYPES, CROPS, CRAFT_ITEMS, NATURAL_BLOCKS, NATURAL_SUFFIXES, CLEARABLE_BLOCKS, KEEP_ITEMS, KEEP_SUFFIXES,
 } from './defaults.js';
@@ -60,12 +62,14 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, 
             try { contested_hook({ ...claim }); } catch { /* the listener's problem */ }
         },
     };
+    // can the catalog get this item at all: gathered, crafted, farmed, or smelted from one of those (the prefab ladder asks)
+    ctx.obtainable = catalogObtainable({ gather_types: ctx.gather_types, craft_items: ctx.craft_items, crops: ctx.crops });
     const known_items = new Set([
         ...Object.values(ctx.gather_types).flatMap((type) => type.drops),
         ...ctx.craft_items.map(([item]) => item),
         ...Object.values(ctx.crops).flatMap((crop) => [crop.seed, crop.produce].filter(Boolean)),
     ]);
-    const work_templates = [...TEMPLATES, ...HANDOFF_TEMPLATES]; // the nine, and the hand-over that only a commitment brings up
+    const work_templates = [...TEMPLATES, ...HANDOFF_TEMPLATES, ...HOME_TEMPLATES]; // the nine, the hand-over that only a commitment brings up, and the bed of a finished home
     const offered_templates = [...work_templates, ...MESSAGE_TEMPLATES]; // and the two messages the planner may choose to send
     const by_name = new Map(offered_templates.map((template) => [template.name, template]));
 
@@ -240,6 +244,31 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, 
                 return null;
             }
         },
+        // What an option is aimed at, for the learning step's situation snapshot: { pos, kind?, path?, cells?,
+        // materials_share?, recipient? }, or null when the skill is aimed at nothing (a craft). Never throws.
+        target(option_id, agent_state) {
+            const found = resolve(option_id);
+            if (!found || typeof found.template.target !== 'function') return null;
+            try { return found.template.target(found.args, full(agent_state), ctx) ?? null; } catch { return null; }
+        },
+        // Where the build on a plot stands and why it may not start (build_blueprint.survey), or null. Never throws.
+        buildSurvey(plot, agent_state) {
+            try { return by_name.get('build_blueprint').survey({ plot }, full(agent_state), ctx); } catch { return null; }
+        },
+        // The verification's own look at the build on a plot (genesis/build/verify.js: cell by cell, by block name;
+        // wrong, blocked and unloaded cells listed), or null when the plot holds no blueprint. Never throws.
+        verifySurvey(plot_id, agent_state) {
+            try {
+                const state = full(agent_state);
+                const plot = state.zones.plot(plot_id);
+                const prefab = plot?.blueprint ? blueprints.get(plot.blueprint) : null;
+                if (!plot || !prefab) return null;
+                return surveyBuild({ prefab, origin: prefabOrigin(plot.min, prefab), blockAt: (pos) => state.view.blockAt(pos) });
+            } catch { return null; }
+        },
+        obtainable: (item) => ctx.obtainable(item),
+        // an item the catalog knows (gathered, crafted, sown or harvested)
+        knows: (item) => ctx.known(item),
         // { done, total } for the whole goal (total may be null), or null when it cannot be measured now.
         progress(option_id, agent_state, baseline, plan) {
             const found = resolve(option_id);

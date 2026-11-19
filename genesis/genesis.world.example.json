@@ -29,7 +29,7 @@
     },
     "field": { "min": [16, -4], "max": [24, 4], "y": 63, "water": [[20, 0]], "crop": null, "owner": "Mira" },
     "plots": [
-        { "id": "arthur-1", "owner": "Arthur", "min": [-34, 64, 14], "max": [-19, 77, 29], "blueprint": "small_wood_house" },
+        { "id": "arthur-1", "owner": "Arthur", "min": [-34, 64, 14], "max": [-19, 77, 29], "blueprint": "lean_to" },
         { "id": "mira-1", "owner": "Mira", "min": [-4, 64, 14], "max": [11, 77, 29], "blueprint": null },
         { "id": "felix-1", "owner": "Felix", "min": [30, 64, 14], "max": [45, 77, 29], "blueprint": null },
         { "id": "nova-1", "owner": "Nova", "min": [-12, 64, -30], "max": [3, 77, -15], "blueprint": null },

@@ -154,6 +154,12 @@ export function genesisRelayOn(settings) {
     return genesisPlanningOn(settings) && settings.genesis_relay?.enabled !== false;
 }
 
+// Learning goes with planning as well: on whenever planning is, unless the genesis_learning setting says
+// "enabled": false (then nothing is recorded and the routines choose by their fixed order, as before).
+export function genesisLearningOn(settings) {
+    return genesisPlanningOn(settings) && settings.genesis_learning?.enabled !== false;
+}
+
 const intended_restart = new WeakSet(); // agents whose process is about to end because somebody asked for a restart
 
 // Called right before a restart somebody asked for (the operator's !restart, the panel's

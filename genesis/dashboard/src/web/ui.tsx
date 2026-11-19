@@ -13,6 +13,8 @@ export const PAGES: { path: string; label: string }[] = [
     { path: '/controls', label: 'Controls' },
     { path: '/digest', label: 'Digest' },
     { path: '/routines', label: 'Routines' },
+    { path: '/learning', label: 'Learning' },
+    { path: '/town', label: 'Town' },
     { path: '/memory', label: 'Memory' },
     { path: '/world', label: 'World' },
     { path: '/skins', label: 'Skins' },

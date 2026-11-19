@@ -118,9 +118,9 @@ test('ignore files: an .env file is never committed and never copied into the ag
 test('place_world: the example moved to another spot is a valid world file, with every coordinate moved alike', async () => {
     const { moveWorld, landUsed } = await import('../tools/place_world.js');
     const { checkWorldConfig } = await import('../world/world_config.js');
-    const { fileBlueprints } = await import('../catalog/blueprints.js');
+    const { buildBlueprints } = await import('../catalog/blueprints.js');
     const example = JSON.parse(read('genesis', 'genesis.world.example.json'));
-    const blueprints = fileBlueprints(path.join(REPO_ROOT, 'src', 'agent', 'npc', 'construction'));
+    const blueprints = buildBlueprints({ root: REPO_ROOT });
     assert.deepEqual(checkWorldConfig(example, { blueprints }), []);
 
     const d = { x: 1203, y: 7, z: -488 };

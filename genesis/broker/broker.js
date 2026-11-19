@@ -18,6 +18,7 @@
 //                          the gate shut or its budget spent it answers at once and the caller's
 //                          code rule decides; with the model busy on another call it waits a
 //                          short, bounded time for its turn (it goes before the next planning call)
+//       (addSmallKind adds further kinds: "long_term", the choice of an agent's long-term goals, genesis/town/goals.js)
 //     Each kind has its own budget per agent, its own token limit and its own time-out.
 //
 // Everything outside is injected:
@@ -490,6 +491,14 @@ export function createPlannerBroker({
         small,
         smallBudget: small_budget,
         decisionBudget: decision_budget,
+        // One more kind of small call, with its own limits and its own budget per agent (the long-term goal choice:
+        // genesis/town/goals.js). A kind that exists is left as it is. Returns true when it was added.
+        addSmallKind(kind_name, limits = {}) {
+            if (typeof kind_name !== 'string' || kind_name.length === 0 || small_kinds[kind_name]) return false;
+            const kind_config = { ...SMALL_CALL_DEFAULTS, ...limits };
+            small_kinds[kind_name] = { config: kind_config, budget: createBudget({ max_calls: kind_config.max_calls, window_ms: kind_config.window_ms, min_gap_ms: kind_config.min_gap_ms }) };
+            return true;
+        },
         // The limits of one kind of small call, e.g. from a setting: { max_calls, max_tokens, timeout_ms, wait_ms }.
         // Returns the limits in force, or null for a kind that does not exist.
         setSmallLimits(kind_name, limits = {}) {

@@ -182,20 +182,23 @@ export function createRoutine({ agent, definition, catalog, zones, clock, emit =
     }
 
     // What the routine does next (see the top of this file).
+    // A choice marked `reflex` is one of the hard safety rules (parked after a second death, the walk home after a
+    // death, the shelter when a bound is breached): the learner never chooses in its place (genesis/agent/runtime.js).
+    const reflex = (choice) => ({ ...choice, reflex: true });
     function pickNext(state) {
         const ctx = context(state);
         if (parked) {
             if (!atHome(state)) {
                 const option = ctx.option('travel', { place: 'home' });
-                if (option) return goal(option, 'parked after a second death');
+                if (option) return reflex(goal(option, 'parked after a second death'));
             }
-            return idle(rules.parked_idle_ms, 'parked at home after a second death');
+            return reflex(idle(rules.parked_idle_ms, 'parked at home after a second death'));
         }
         if (walk_home) {
             // after a death: home first, then the round starts again at its first phase (the kit)
             if (!atHome(state)) {
                 const option = ctx.option('travel', { place: 'home' });
-                if (option) return goal(option, 'walking home after a death');
+                if (option) return reflex(goal(option, 'walking home after a death'));
             }
             walk_home = false;
             enter(first);
@@ -204,7 +207,7 @@ export function createRoutine({ agent, definition, catalog, zones, clock, emit =
         if (reasons.length > 0) {
             if (phase !== SHELTER) stats.shelters++;
             enter(SHELTER);
-            return shelter(ctx, state, reasons) ?? idle(rules.idle_ms, `sheltering (${reasons.join(', ')})`);
+            return reflex(shelter(ctx, state, reasons) ?? idle(rules.idle_ms, `sheltering (${reasons.join(', ')})`));
         }
         // one look at every phase of the round, starting (and ending) with the one the routine is in
         for (let looked = 0; looked <= phases.length; looked++) {
@@ -284,6 +287,8 @@ export function createRoutine({ agent, definition, catalog, zones, clock, emit =
         // The checkpoint's "routine": { name, phase }.
         snapshot: () => ({ ...tag(), ...(unreachable.size > 0 ? { unreachable: [...unreachable].sort((a, b) => a - b) } : {}) }),
         unreachable: () => [...unreachable].sort((a, b) => a - b),
+        // option ids that failed this round (not tried again until the next round)
+        skipped: () => [...skip],
         restore(saved) {
             if (saved?.name === definition.name && phases.includes(saved.phase)) { phase = saved.phase; picked_in_phase = 0; }
             if (saved?.name === definition.name && Array.isArray(saved.unreachable)) unreachable = new Set(saved.unreachable.filter(Number.isInteger));

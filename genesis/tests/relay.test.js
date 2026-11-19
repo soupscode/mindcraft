@@ -938,11 +938,11 @@ test('ask_agent: the planner asks a named agent for what its build is short of, 
     // Arthur's plot wants oak planks, he holds none and no chest has any: asking for them is on offer
     // (two agents at a time; when his process started Felix was not in the world yet, so the world file's order decided)
     const offered = t.model.requests[0].format.properties.goals.items.properties.option_id.enum;
-    // (decided: an agent may ask for ANYTHING the catalog knows. After what its own work is short of comes one more ask, for something else it has none of) (which one depends on the hour and on how many items the catalog knows: three door recipes were added)
-    assert.deepEqual(offered.filter((id) => id.startsWith('ask_agent:')), ['ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:stick:4']);
+    // (decided: an agent may ask for ANYTHING the catalog knows. After what its own work is short of comes one more ask, for something else it has none of) (which one depends on the hour and on how many items the catalog knows: the door, slab, fence and ladder recipes were added)
+    assert.deepEqual(offered.filter((id) => id.startsWith('ask_agent:')), ['ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:carrot:4']);
     // with Felix in sight, he comes first
     assert.deepEqual(createCatalog({ zones: t.zones, blueprints: BLUEPRINTS }).offer(arthur.runtime.state()).map((option) => option.id).filter((id) => id.startsWith('ask_agent:')),
-        ['ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:stick:4']);
+        ['ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:carrot:4']);
     assert.ok(!offered.some((id) => id.startsWith('build_blueprint:')), 'the build was on offer although the planks are missing');
     assert.match(t.model.requests[0].messages.at(-1).content, /ask_agent:Felix:oak_planks:8: Ask Felix for 8 oak_planks \(for plot plot-1\): Felix may say no/);
     // Felix's own work is short of nothing: what he is offered to ask for is only the "anything else" kind (4 at a time), never the planks

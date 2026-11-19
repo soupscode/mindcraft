@@ -77,3 +77,9 @@ export function bodyLine(body: Record<string, any>): string {
     }
     return parts.join(' · ');
 }
+
+// The Learning screen's "Trying": "1 in 4" from the rate the scorer really uses (0.25). Never a number typed in the page.
+export function tryingText(rate: number | null | undefined): string {
+    if (typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0) return '–';
+    return rate === 0 ? 'Off' : `1 in ${Math.round(1 / rate)}`;
+}

@@ -5,6 +5,18 @@
 
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
+import { filePrefabs, PREFAB_DIR, OPERATOR_PREFAB_DIR } from '../build/prefab.js';
+
+// WHAT THE AGENTS BUILD FROM (decided): the prefab files, genesis/prefabs/*.json (the generated ladder)
+// and bots/genesis_prefabs/operator/*.json (what the operator uploaded on the Town screen). A prefab is
+// a blueprint with more in it (stages, parts, below), in exact Minecraft block names. Upstream's
+// construction files (fileBlueprints below) use family names ("planks") and are no longer what a plot
+// names; they stay readable for the tests that hold the family rule.
+//   root: the repository root when the process does not run from it
+export function buildBlueprints({ root = null, dirs = null } = {}) {
+    const folders = dirs ?? [PREFAB_DIR, OPERATOR_PREFAB_DIR].map((dir) => (root ? path.resolve(root, dir) : dir));
+    return filePrefabs(folders);
+}
 
 export const BLUEPRINT_DIR = './src/agent/npc/construction';
 

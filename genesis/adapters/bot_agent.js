@@ -17,21 +17,23 @@ import { emitEvent, agentEventStats } from '../events/agent_emit.js';
 import { loadZones } from '../catalog/zones.js';
 import { createCatalog } from '../catalog/catalog.js';
 import { createLedgerClient } from '../catalog/ledger_client.js';
-import { fileBlueprints } from '../catalog/blueprints.js';
+import { fileBlueprints, buildBlueprints } from '../catalog/blueprints.js';
 import { createScaffoldTracker, placementSink } from '../executor/scaffold.js';
 import { createCheckpointStore } from '../store/checkpoint.js';
 import { nodeFiles } from '../store/node_files.js';
 import { socketGoalStorage, socketCheckpointMirror } from '../planning/host.js';
 import { createAgentRuntime } from '../agent/runtime.js';
-import { DEFAULT_CHECKPOINT_DIR, DEFAULT_WORLD_FILE, genesisRecoveryOn, genesisRelayOn } from '../agent/hooks.js';
+import { DEFAULT_CHECKPOINT_DIR, DEFAULT_WORLD_FILE, genesisRecoveryOn, genesisRelayOn, genesisLearningOn } from '../agent/hooks.js';
+import { createLearningClient } from '../learning/client.js';
+import { createTownClient, townZones, townBlueprints, building } from '../town/client.js';
 import { installBotGuards } from '../lib/bot_guards.js';
 import { isNoDigPathing } from '../lib/no_dig_pathing.js';
 import { createBotView } from './bot_world.js';
 import { createBotOps } from './bot_ops.js';
 import { createBotRecovery } from './bot_recovery.js';
 
-// Blueprints in upstream's construction format (src/agent/npc/construction/<name>.json).
-export { fileBlueprints };
+// What a plot may name: the prefab files (genesis/catalog/blueprints.js). fileBlueprints reads upstream's construction format.
+export { fileBlueprints, buildBlueprints };
 
 const logLine = (record) => console.error(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', ...record }));
 
@@ -41,8 +43,18 @@ export async function buildBotRuntime(agent, settings) {
     if (!isNoDigPathing(bot)) throw new Error('pathfinding_no_dig is not on for this bot: the Genesis executor does not run without it');
     const loaded = await loadZones({ file: planning.world_file || DEFAULT_WORLD_FILE, read: nodeFiles().read });
     if (!loaded.ok) throw new Error(loaded.problems.join('; '));
-    const zones = loaded.zones;
-    if (!zones.home(agent.name)) throw new Error(`${agent.name} has no entry under "agents" in the world config`);
+    if (!loaded.zones.home(agent.name)) throw new Error(`${agent.name} has no entry under "agents" in the world config`);
+    const socket = serverProxy.getSocket();
+    const send = (event, ...args) => {
+        if (!socket.connected) throw new Error('not connected to MindServer');
+        socket.emit(event, ...args);
+    };
+    // the town (genesis/town): this agent's copy of the ONE town file the MindServer holds, layered over the zones of
+    // the world file. Plots the town added are plots like any other, and every plot holds the prefab the town assigned.
+    const town = createTownClient({ agent: agent.name, send });
+    socket.on('genesis-town-update', (message) => town.onUpdate(message));
+    const zones = townZones(loaded.zones, town, agent.name);
+    const prefabs = buildBlueprints();
 
     const scaffold = createScaffoldTracker({ zones });
     // every block the bot places is tracked as scaffolding, except a torch of upstream's idle torch reflex
@@ -50,18 +62,14 @@ export async function buildBotRuntime(agent, settings) {
     const guards = installBotGuards(bot, { zones, onPlace: placementSink(scaffold, () => agent.actions?.currentActionLabel ?? null) });
     // the camp is fenced: a gate the pathfinder opened is closed again behind the agent (genesis/lib/gate_keeper.js)
     installGateKeeper(bot, { inCamp: (pos) => zones.protectedAt({ x: pos.x, y: pos.y, z: pos.z }) === 'camp' });
-    const socket = serverProxy.getSocket();
-    const send = (event, ...args) => {
-        if (!socket.connected) throw new Error('not connected to MindServer');
-        socket.emit(event, ...args);
-    };
     // this agent's copy of the ONE chest ledger, which the MindServer holds
     const ledger = createLedgerClient({ agent: agent.name, send });
     socket.on('genesis-ledger-update', (message) => ledger.onUpdate(message));
     const runtime = createAgentRuntime({
         agent: agent.name,
         zones,
-        catalog: createCatalog({ zones, blueprints: fileBlueprints() }),
+        catalog: createCatalog({ zones, blueprints: townBlueprints(prefabs) }),
+        town, building: building(town, prefabs), prefabs,
         view: createBotView(bot, { world, mc, pf, Vec3 }),
         ops: createBotOps(agent, { skills, guards }),
         scaffold,
@@ -84,6 +92,9 @@ export async function buildBotRuntime(agent, settings) {
         messaging: genesisRelayOn(settings),
         // the relay's limits as the settings have them: the agent's desk knows beforehand what the relay would reject
         relay_limits: settings.genesis_relay?.limits ?? {},
+        // the learner in the MindServer (off only with "genesis_learning": { "enabled": false }): every goal is recorded,
+        // the options are ordered and annotated, and while the model is away the learner chooses among them
+        learning: genesisLearningOn(settings) ? createLearningClient({ agent: agent.name, send }) : null,
     });
 
     // hostile mobs: fled from while on a routine, handled as upstream does on a goal the planner or the operator chose

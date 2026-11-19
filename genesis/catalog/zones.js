@@ -153,6 +153,9 @@ export const PATROL_OPTION = /^travel:ring-(\d+)$/;
 // How many waypoints the default patrol ring has, and how far out it lies (part of the range).
 export const PATROL_RING = Object.freeze({ points: 16, radius_share: 0.75 });
 
+// How many layers under a plot's box belong to the plot: its floor, where a prefab's foundation lies (`below`).
+export const PLOT_FLOOR_DEPTH = 1;
+
 // Builds the zones from a checked config. Throws when the config has problems: call
 // checkZonesConfig first when the problems should be reported instead.
 export function createZones(config) {
@@ -172,7 +175,8 @@ export function createZones(config) {
     function protectedAt(pos) {
         if (boxContains(camp, pos)) return 'camp';
         if (boxContains(field, pos)) return 'field';
-        for (const plot of plots) if (boxContains(plot, pos)) return `plot:${plot.id}`;
+        // (with the layer under it: a prefab's stone floor is set into the ground there, and nobody mines it away)
+        for (const plot of plots) if (boxContains(plot, pos) || boxContains(plot, { x: pos.x, y: pos.y + PLOT_FLOOR_DEPTH, z: pos.z })) return `plot:${plot.id}`;
         return null;
     }
 

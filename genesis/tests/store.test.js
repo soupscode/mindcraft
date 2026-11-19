@@ -575,7 +575,7 @@ test('checkpoint: written at every step boundary and every 30 seconds', async ()
 function tableColumns(sql, table) {
     const body = sql.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\(([\\s\\S]*?)\\n\\);`))?.[1];
     assert.ok(body, `no CREATE TABLE for ${table}`);
-    return body.split('\n').map((line) => line.trim()).filter((line) => /^[a-z_]+\s+(text|jsonb|boolean|integer|bigint|timestamptz)\b/.test(line))
+    return body.split('\n').map((line) => line.trim()).filter((line) => /^[a-z_]+\s+(text|jsonb|boolean|integer|bigint|real|timestamptz)\b/.test(line))
         .map((line) => line.split(/\s+/)[0]);
 }
 
@@ -586,7 +586,12 @@ function placeholders(text) {
 test('postgres: the migrations hold the decided fields, and every statement fits them', async () => {
     const dir = path.join(REPO_ROOT, 'genesis', 'store', 'migrations');
     const names = readdirSync(dir).sort();
-    assert.deepEqual(names, ['001_planner_calls.sql', '002_goals.sql', '003_checkpoints.sql']);
+    assert.deepEqual(names, ['001_planner_calls.sql', '002_goals.sql', '003_checkpoints.sql', '004_learning.sql']);
+    // the learning tables: a number that is not whole (health) is `real`, and the column reader knows it
+    const learning = readFileSync(path.join(dir, '004_learning.sql'), 'utf8');
+    assert.ok(tableColumns(learning, 'experience').includes('health_min') && tableColumns(learning, 'experience').includes('health_lost'));
+    for (const table of ['experience', 'decisions', 'learning_versions', 'learning_state', 'lessons', 'plays', 'wishes', 'refusals', 'builds']) assert.ok(tableColumns(learning, table).length > 0, table);
+    assert.ok([...learning.matchAll(/CREATE (TABLE|INDEX) (?!IF NOT EXISTS)/g)].length === 0, 'every statement can be run again');
     const sql = names.map((name) => readFileSync(path.join(dir, name), 'utf8')).join('\n');
 
     const call_columns = tableColumns(sql, 'planner_calls');

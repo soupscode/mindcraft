@@ -40,7 +40,7 @@ export function Routines() {
                                     <h2 class="title">{name}</h2>
                                     <div class="small muted">{roleOf(roster, name)}{pos && <> · <span class="mono" style="font-size:12px">x {pos[0]}, z {pos[2]}</span></>}</div>
                                 </div>
-                                <span class={routine ? 'tag' : 'tag line'}>{routine ? 'Routine' : agent.mode === 'model' ? 'Model-led' : 'Unknown'}</span>
+                                <span class={routine ? 'tag' : 'tag line'}>{routine ? (plan?.learned ? `Routine · ${plan.learned}` : 'Routine') : agent.mode === 'model' ? 'Model-led' : 'Unknown'}</span>
                             </div>
                             <dl class="facts">
                                 <div><dt>Since</dt><dd>{agent.mode_since ? `${clockTime(agent.mode_since)} · ${duration(now - Date.parse(agent.mode_since))}` : 'unknown'}</dd></div>

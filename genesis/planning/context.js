@@ -20,7 +20,14 @@ export const PROMPT_LIMITS = Object.freeze({
     memory_tokens: 240,       // reserved for memory, used or not
     option_description: 80,   // characters of an option's description that reach the model
     operator_message: 240,    // characters of what the operator said
+    option_label: 24,         // characters of the learner's annotation after an option's description
 });
+
+// The wording of the prompt, as a name. It goes on every decision row (genesis/learning), so that what was learned
+// from decisions can be told apart by the prompt they were made with. Change it whenever the broker's
+// instructions, the lines below or the way options are shown change.
+//   2: the options are ordered by the learner's estimate and carry its annotation
+export const PROMPT_VERSION = 'genesis-plan-2';
 
 export const CHARS_PER_TOKEN = 3.5;
 export const estimateTokens = (text) => Math.ceil(String(text ?? '').length / CHARS_PER_TOKEN);
@@ -33,8 +40,17 @@ const clip = (text, max) => {
 };
 
 // What the model is shown of the options. The ids are untouched: the reply may only name these.
-export function planOptions(options) {
-    return options.map((option) => ({ id: option.id, description: clip(option.description, PROMPT_LIMITS.option_description) }));
+// An option the learner annotated (option.label, built by code: "[72% 2m]", "[new]", "!" for danger) carries
+// that after its description. The estimate is information for the model, never an order: it stays free
+// to choose anything offered.
+// fold: the annotation is taken out of the description's own 80 characters instead of following them (used when
+// the prompt would not fit otherwise: the annotations then cost nothing).
+export function planOptions(options, { fold = false } = {}) {
+    return options.map((option) => {
+        const label = typeof option.label === 'string' ? option.label.replace(/\s+/g, ' ').trim().slice(0, PROMPT_LIMITS.option_label) : '';
+        const description = clip(option.description, PROMPT_LIMITS.option_description - (fold && label ? label.length + 1 : 0));
+        return { id: option.id, description: label ? `${description} ${label}` : description };
+    });
 }
 
 // The estimated size of the whole prompt the broker will send.
@@ -73,7 +89,7 @@ export function buildPlanContext({
     agent, role = null, trigger = null, view, home_distance = null, long_term = [], last_outcome = null,
     recent_failures = [], routine = null, memory = '', options = [],
 } = {}) {
-    const listed = planOptions(options);
+    let listed = planOptions(options);
     const position = view.position();
     const inventory = Object.entries(view.inventory()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
     const light = view.dayTicksLeft();
@@ -118,6 +134,8 @@ export function buildPlanContext({
 
     let kept = lines;
     for (let drop = 5; drop >= 1 && sizeWithoutMemory(kept) > limit; drop--) kept = kept.filter(([importance]) => importance < drop);
+    // still too long with every line that may go gone: the learner's annotations give way before an option does
+    if (sizeWithoutMemory(kept) > limit && options.some((option) => typeof option.label === 'string' && option.label.length > 0)) listed = planOptions(options, { fold: true });
     const used = sizeWithoutMemory(kept);
     return {
         context: render(kept),

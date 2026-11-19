@@ -20,6 +20,8 @@ import { DEFAULT_LEDGER_FILE } from '../agent/hooks.js';
 
 // The name the broker's own events (the model gate opening and closing) are published under.
 export const BROKER_EVENT_AGENT = 'planner';
+// The name the learner's events are published under (experience, learning_update, learning_version).
+export const LEARNING_EVENT_AGENT = 'learner';
 
 // Keeps the newest call records in memory when no database is configured.
 export function memoryCallStore(max = 500) {
@@ -43,6 +45,7 @@ export function memoryCallStore(max = 500) {
 export async function startPlanning(planning, {
     event_sink = null, setSocketExtension, createModel = createOllamaPlanner, createPool, clock, files = null, warn = console.warn,
     extensions = [], onGate = null, host: host_options = {}, postgres_url = null, migrate = null, migrate_retry_ms = 30 * 1000,
+    learning = null,
 } = {}) {
     if (!setSocketExtension) ({ setSocketExtension } = await import('../../src/mindcraft/mindserver.js'));
     const log = (event, message) => warn(JSON.stringify({ ts: new Date().toISOString(), level: 'warn', event, message }));
@@ -55,6 +58,7 @@ export async function startPlanning(planning, {
     await ledger_file.load();
 
     let calls = memoryCallStore();
+    let learning_store = null;
     let durable = null;
     let checkpoint_mirror = null;
     let migrate_timer = null;
@@ -66,6 +70,7 @@ export async function startPlanning(planning, {
             calls = pg.pgCallStore(pool);
             durable = pg.pgGoalStorage(pool);
             checkpoint_mirror = pg.pgCheckpointMirror(pool);
+            if (learning) learning_store = (await import('../learning/store.js')).pgLearningStore(pool);
             database.connected = true;
             // the tables, made at start. A database that is not up yet is tried again: the stores above
             // keep what they can meanwhile (the goal storage waits, a call record that fails is counted)
@@ -89,6 +94,23 @@ export async function startPlanning(planning, {
         }
     }
     const emitter = event_sink ? createEmitter({ agent: BROKER_EVENT_AGENT, send: event_sink }) : null;
+    // the learner: its rows in the database when there is one; without one in memory, with the count table and the
+    // place memory kept in files. The network's weights are files either way.
+    let learning_settings = null;
+    if (learning) {
+        const { memoryLearningStore, withFileState, LEARNING_DIR } = await import('../learning/store.js');
+        const dir = learning.dir || LEARNING_DIR;
+        const learning_emitter = event_sink ? createEmitter({ agent: LEARNING_EVENT_AGENT, send: event_sink }) : null;
+        learning_settings = {
+            agents: learning.agents, files, weights_dir: `${dir}/weights`,
+            store: learning_store ?? withFileState(memoryLearningStore(), { files, dir }),
+            emit: learning_emitter ? learning_emitter.emit : () => {},
+            warn: (message) => log('genesis_learning', message),
+            ...(Number.isFinite(learning.seed) ? { seed: learning.seed } : {}),
+            ...(learning.scorer ? { scorer: learning.scorer } : {}), ...(learning.rules ? { rules: learning.rules } : {}), ...(learning.service ? { service: learning.service } : {}),
+            world_sha256: learning.world_sha256 ?? null, roles: learning.roles ?? {},
+        };
+    }
     const host = createPlanningHost({
         model: createModel({ url: planning.model.url, model: planning.model.model, options: planning.model.options ?? null }),
         calls,
@@ -97,9 +119,15 @@ export async function startPlanning(planning, {
         checkpoint_mirror,
         emit: emitter ? emitter.emit : () => {},
         onGate,
+        learning: learning_settings,
         ...(clock ? { clock } : {}),
         ...host_options,
     });
+    // what was learned before this process started: the count table, the places, the network version in use
+    if (host.learning) {
+        host.learning_restored = await host.learning.restore();
+        host.learning.update();
+    }
     setSocketExtension((socket, helpers) => {
         host.attach(socket, helpers);
         for (const extend of extensions) {

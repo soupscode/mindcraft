@@ -63,7 +63,7 @@ export function landUsed(world) {
 
 async function main(argv) {
     const { readFileSync, writeFileSync, existsSync } = await import('node:fs');
-    const { fileBlueprints } = await import('../catalog/blueprints.js');
+    const { buildBlueprints } = await import('../catalog/blueprints.js');
     const repo_root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
     process.chdir(repo_root);
     const option = (name, count = 1) => {
@@ -85,7 +85,7 @@ async function main(argv) {
     const example = JSON.parse(readFileSync(example_file, 'utf8'));
     const d = { x: at[0] - example.home[0], y: at[1] - example.home[1], z: at[2] - example.home[2] };
     const world = moveWorld(example, d, seed);
-    const problems = checkWorldConfig(world, { blueprints: fileBlueprints() });
+    const problems = checkWorldConfig(world, { blueprints: buildBlueprints() });
     if (problems.length > 0) {
         for (const problem of problems) console.error(`World file problem: ${describeProblem(problem)}`);
         console.error('Nothing was written.');

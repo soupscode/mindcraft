@@ -12,6 +12,7 @@ import type { Live } from './live.js';
 import { openStream, SID_PATTERN } from './sse.js';
 import { originOf, type Command } from './controls.js';
 import { DAY_MS, RETENTION_DAYS } from './retention.js';
+import { UPLOAD_LIMIT_BYTES, type TownLearning } from './town_learning.js';
 
 export interface Controls {
     execute(command: Command, origin?: string): Promise<{ ok: boolean; error?: string; record?: any }>;
@@ -22,6 +23,7 @@ export interface Controls {
 export interface AppDeps {
     allow?: string[];
     skins?: Skins | null;
+    town_learning?: TownLearning | null;
     live: Live;
     store: Store;
     controls: Controls | null;
@@ -58,6 +60,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     app.removeContentTypeParser('text/plain'); // only JSON bodies are read (a plain HTML form cannot send one)
     // ... and a PNG, for an agent's skin: taken as bytes, never parsed here (the same size cap applies)
     app.addContentTypeParser('image/png', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
+    // ... and a schematic the operator uploads on the Town screen: bytes, handed on unread (its own, larger cap is on its route)
+    app.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
 
     // Events, newest first: Postgres, or the ring in memory while Postgres is down.
     async function events(query: EventQuery): Promise<{ source: 'postgres' | 'memory'; entries: Entry[] }> {
@@ -230,6 +234,57 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
             const result = await skins.clear(String((request.params as any).agent));
             return result.ok ? result : reply.code(result.status).send({ ok: false, error: result.error });
         } catch (err: any) { return reply.code(503).send({ ok: false, error: String(err?.message ?? err) }); }
+    });
+
+    // ---- Learning and Town: asked of the learner and the town in the MindServer process (src/server/town_learning.ts) ----
+    const tl = deps.town_learning ?? null;
+    const none = { ok: false, error: 'the MindServer link is not configured' };
+    const send = (reply: any, answer: any) => (answer.ok ? answer : reply.code(answer.status ?? 502).send((({ status: _status, ...rest }) => rest)(answer)));
+    const body = (request: any) => (request.body && typeof request.body === 'object' && !Array.isArray(request.body) && !Buffer.isBuffer(request.body) ? request.body : null);
+
+    app.get('/api/learning', async (_request, reply) => (tl ? send(reply, await tl.learning()) : reply.code(503).send(none)));
+    app.get('/api/learning/versions', async (_request, reply) => {
+        if (!tl) return reply.code(503).send(none);
+        const got = await tl.learning();
+        return got.ok ? { ok: true, versions: got.view.versions ?? [] } : send(reply, got);
+    });
+    // one agent's part of the same view: curve | calibration | situations | changes
+    app.get('/api/learning/:agent/:part', async (request, reply) => {
+        if (!tl) return reply.code(503).send(none);
+        const { agent, part } = request.params as { agent: string; part: string };
+        const got = await tl.learning();
+        if (!got.ok) return send(reply, got);
+        const mine = (got.view.agents ?? []).find((entry: any) => entry.name === agent);
+        if (!mine) return reply.code(404).send({ ok: false, error: 'unknown agent' });
+        if (part === 'curve') return { ok: true, agent, curve: mine.error?.curve ?? [], network: mine.error?.network ?? null, table: mine.error?.table ?? null };
+        if (part === 'calibration') return { ok: true, agent, calibration: mine.calibration ?? [] };
+        if (part === 'situations') return { ok: true, agent, most_sure: mine.most_sure ?? [], least_sure: mine.least_sure ?? [] };
+        if (part === 'changes') return { ok: true, agent, changed: mine.changed ?? [], today: mine.today ?? [] };
+        return reply.code(404).send({ ok: false, error: 'unknown part' });
+    });
+    app.post('/api/learning/control', async (request, reply) => (tl ? send(reply, await tl.learningControl(body(request))) : reply.code(503).send(none)));
+
+    app.get('/api/town', async (_request, reply) => (tl ? send(reply, await tl.town()) : reply.code(503).send(none)));
+    app.get('/api/prefabs', async (_request, reply) => {
+        if (!tl) return reply.code(503).send(none);
+        const got = await tl.town();
+        return got.ok ? { ok: true, generated: got.view.ladder?.generated ?? null, operator: got.view.ladder?.operator ?? null } : send(reply, got);
+    });
+    app.get('/api/prefabs/:name', async (request, reply) => {
+        if (!tl) return reply.code(503).send(none);
+        const got = await tl.town();
+        if (!got.ok) return send(reply, got);
+        const name = String((request.params as any).name);
+        const found = [...(got.view.ladder?.generated?.list ?? []), ...(got.view.ladder?.operator?.list ?? [])].find((entry: any) => entry.name === name);
+        return found ? { ok: true, prefab: found } : reply.code(404).send({ ok: false, error: 'unknown prefab' });
+    });
+    app.post('/api/town/proposals/:id', async (request, reply) => (tl ? send(reply, await tl.proposal(String((request.params as any).id), body(request))) : reply.code(503).send(none)));
+    app.post('/api/town/goals/:agent', async (request, reply) => (tl ? send(reply, await tl.goals(String((request.params as any).agent), body(request))) : reply.code(503).send(none)));
+    // the schematic file as the body (application/octet-stream); name, title, kind, substitute and save in the query
+    app.post('/api/prefabs/import', { bodyLimit: UPLOAD_LIMIT_BYTES + 1024 }, async (request, reply) => {
+        if (!tl) return reply.code(503).send(none);
+        if (!String(request.headers['content-type'] ?? '').startsWith('application/octet-stream')) return reply.code(415).send({ ok: false, error: 'send the schematic file as the body, with content-type application/octet-stream' });
+        return send(reply, await tl.importPrefab(request.body, request.query as Record<string, unknown>));
     });
 
     if (deps.public_dir) {

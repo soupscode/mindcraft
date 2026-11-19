@@ -1,0 +1,32 @@
+{
+  "v": 1,
+  "name": "lean_to",
+  "title": "Lean-to",
+  "kind": "home",
+  "tier": 0,
+  "by": "Generated",
+  "size": {"x":5,"y":3,"z":3},
+  "below": 0,
+  "blocks": [
+    [
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","chest","air","air","oak_planks"],
+      ["oak_planks","air","air","air","oak_planks"]
+    ],
+    [
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","oak_planks"]
+    ],
+    [
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"]
+    ]
+  ],
+  "parts": {"oak_door":2},
+  "stages": [{"name":"Walls","y":[0,1]},{"name":"Roof","y":[2,2]},{"name":"Fittings","blocks":["chest"]}],
+  "materials": {"chest":1,"oak_planks":33},
+  "keeps": [{"block":"chest","at":[1,0,1]}],
+  "bed": {"head":[3,0,1],"foot":[2,0,1]}
+}

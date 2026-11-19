@@ -1,0 +1,106 @@
+{
+  "v": 1,
+  "name": "house",
+  "title": "House",
+  "kind": "home",
+  "tier": 4,
+  "by": "Generated",
+  "size": {"x":11,"y":8,"z":9},
+  "below": 1,
+  "blocks": [
+    [
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"],
+      ["cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone"]
+    ],
+    [
+      ["oak_log","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","cobblestone","oak_log"],
+      ["cobblestone","chest","air","air","air","torch","air","crafting_table","furnace","ladder","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","air","air","air","air","air","air","air","air","air","cobblestone"],
+      ["cobblestone","torch","air","air","air","air","air","air","air","torch","cobblestone"],
+      ["oak_log","cobblestone","cobblestone","cobblestone","cobblestone","oak_door","cobblestone","cobblestone","cobblestone","cobblestone","oak_log"]
+    ],
+    [
+      ["oak_log","oak_planks","oak_planks","glass","oak_planks","oak_planks","oak_planks","glass","oak_planks","oak_planks","oak_log"],
+      ["oak_planks","air","air","air","air","air","air","air","air","ladder","oak_planks"],
+      ["glass","air","air","air","air","air","air","air","air","air","glass"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["glass","air","air","air","air","air","air","air","air","air","glass"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_planks","oak_door","oak_planks","oak_planks","oak_planks","oak_planks","oak_log"]
+    ],
+    [
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_log"],
+      ["oak_planks","air","air","air","air","air","air","air","air","ladder","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_log"]
+    ],
+    [
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_log"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","ladder","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_log"]
+    ],
+    [
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_log"],
+      ["oak_planks","chest","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","torch","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","torch","air","air","air","air","air","air","air","torch","oak_planks"],
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_planks","oak_log"]
+    ],
+    [
+      ["oak_log","oak_planks","oak_planks","glass","oak_planks","oak_planks","oak_planks","glass","oak_planks","oak_planks","oak_log"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["glass","air","air","air","air","air","air","air","air","air","glass"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","air","air","air","air","air","air","oak_planks"],
+      ["oak_log","oak_planks","oak_planks","glass","oak_planks","oak_planks","oak_planks","glass","oak_planks","oak_planks","oak_log"]
+    ],
+    [
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"],
+      ["oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab","oak_slab"]
+    ]
+  ],
+  "parts": {"oak_door":2},
+  "stages": [{"name":"Foundation","y":[0,0]},{"name":"Walls","y":[1,6]},{"name":"Roof","y":[7,7]},{"name":"Fittings","blocks":["oak_door","glass","torch","chest","crafting_table","furnace"]}],
+  "materials": {"chest":2,"cobblestone":130,"crafting_table":1,"furnace":1,"glass":12,"ladder":4,"oak_door":1,"oak_log":24,"oak_planks":209,"oak_slab":99,"torch":6},
+  "keeps": [{"block":"chest","at":[1,1,1]}],
+  "bed": {"head":[1,1,2],"foot":[1,1,3]},
+  "upgrade_of": "cottage"
+}

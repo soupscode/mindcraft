@@ -1,0 +1,46 @@
+{
+  "v": 1,
+  "name": "shack",
+  "title": "Shack",
+  "kind": "home",
+  "tier": 1,
+  "by": "Generated",
+  "size": {"x":5,"y":4,"z":5},
+  "below": 0,
+  "blocks": [
+    [
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_log"],
+      ["oak_planks","chest","air","torch","oak_planks"],
+      ["oak_planks","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","oak_planks"],
+      ["oak_log","oak_planks","oak_door","oak_planks","oak_log"]
+    ],
+    [
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_log"],
+      ["oak_planks","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","oak_planks"],
+      ["oak_log","oak_planks","oak_door","oak_planks","oak_log"]
+    ],
+    [
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_log"],
+      ["oak_planks","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","oak_planks"],
+      ["oak_planks","air","air","air","oak_planks"],
+      ["oak_log","oak_planks","oak_planks","oak_planks","oak_log"]
+    ],
+    [
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"],
+      ["oak_planks","oak_planks","oak_planks","oak_planks","oak_planks"]
+    ]
+  ],
+  "parts": {"oak_door":2},
+  "stages": [{"name":"Walls","y":[0,2]},{"name":"Roof","y":[3,3]},{"name":"Fittings","blocks":["oak_door","torch","chest"]}],
+  "materials": {"chest":1,"oak_door":1,"oak_log":12,"oak_planks":59,"torch":1},
+  "keeps": [{"block":"chest","at":[1,0,1]}],
+  "bed": {"head":[1,0,2],"foot":[1,0,3]},
+  "upgrade_of": "lean_to"
+}

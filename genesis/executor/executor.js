@@ -44,6 +44,10 @@
 //                asked when the queue is empty (the role routine, step 9); a goal it returns is
 //                queued with source "routine"
 //   extras       () -> { routine, pending_request, places, recovery }   more for the checkpoint
+//   onGoalStart  ({ plan_id, goal_id, option_id, title, skill, args, source, call_id, steps }) -> void   a goal is about to be carried out
+//   onStep       ({ plan_id, step, command, ok }) -> void                 a step of it ended
+//   onGoalEnd    ({ option_id, title, outcome, reason, source, origin, goal_id, plan_id?, skill?, started_at?, steps?, done?, total?, parked? }) -> void
+//                plan_id and what follows it are missing for a goal that was dropped before it started
 //   ids          () -> string    ids of decisions (ULIDs by default)
 //
 // Depends only on other Genesis files.
@@ -77,7 +81,7 @@ const copy = (value) => JSON.parse(JSON.stringify(value));
 export function createExecutor({
     agent, catalog, goals, checkpoints, ops, state, emit = () => null, getSeq = () => 0,
     clock = { now: Date.now, setTimeout, clearTimeout }, scaffold = null, zones = null,
-    onTrigger = () => {}, chooseWork = null, extras = () => ({}), ids = null, onGoalEnd = () => {}, ...options
+    onTrigger = () => {}, chooseWork = null, extras = () => ({}), ids = null, onGoalEnd = () => {}, onGoalStart = () => {}, onStep = () => {}, ...options
 } = {}) {
     const config = { ...EXECUTOR_DEFAULTS };
     for (const key of Object.keys(EXECUTOR_DEFAULTS)) {
@@ -101,9 +105,42 @@ export function createExecutor({
     let hold = null;            // { by, reason, at } while the operator holds the agent (!stop), else null
     let paused = null;          // a reason while the bot is down (it died and has not respawned): nothing runs
     let detour = null;          // { reason, next, onEnd, main, goals_run } while a recovery detour runs; main is the goal kept for afterwards
+    let step_started = null;    // when the try of the step that is running began (for the step record)
     let expected_interrupt = null; // set by the watchdog right before it stops the running step on purpose
     let park_request = null;    // the reason the watchdog parks the current step with
     const after_turn = [];      // what waits until the thing the executor is doing right now is done
+
+    // What the learning step records of a goal (genesis/learning/recorder.js): when it started and what became of each
+    // of its steps. Kept beside the plan, not in it: the checkpoint's shape is not changed, and after a restart a goal
+    // that is resumed simply has no step record from before.
+    const records = new Map();  // plan id -> { started_at, steps: [{ i, command, ok, reason, ms, attempts }] }
+    function noteStep(for_plan, step, ok, reason, started_at) {
+        const record = records.get(for_plan.id);
+        if (!record) return;
+        let entry = record.steps.find((it) => it.i === step.i);
+        if (!entry) {
+            if (record.steps.length >= 80) return;
+            entry = { i: step.i, command: step.command, ok: false, reason: null, ms: 0, attempts: 0 };
+            record.steps.push(entry);
+        }
+        entry.ok = ok;
+        entry.reason = ok ? null : reason ?? null;
+        entry.ms += started_at === null ? 0 : Math.max(0, Math.round(clock.now() - started_at));
+        entry.attempts = step.attempts;
+        try { onStep({ plan_id: for_plan.id, step: step.i, command: step.command, ok }); } catch { /* the listener's problem */ }
+    }
+    // What a goal's end says beside its outcome: the plan, its steps, and how far it got.
+    function endInfo(ended) {
+        const record = records.get(ended.id);
+        records.delete(ended.id);
+        let measured = null;
+        try { measured = catalog.progress(ended.goal.option_id, world(), ended.goal.baseline, ended); } catch { measured = null; }
+        return {
+            plan_id: ended.id, skill: ended.goal.skill, started_at: record?.started_at ?? null,
+            steps: (record?.steps ?? []).map(({ command, ok, reason, ms, attempts }) => ({ command, ok, reason, ms, attempts })),
+            done: measured?.done ?? null, total: measured?.total ?? null,
+        };
+    }
 
     const say = (type, data, extra = {}) => {
         try { return emit(type, data, { corr: plan?.id ?? null, ...extra }); } catch { return null; }
@@ -161,13 +198,14 @@ export function createExecutor({
 
     async function endPlan(outcome, reason, meta, more = {}) {
         const ended = plan;
+        const info = endInfo(ended);
         last_outcome = { option_id: ended.goal.option_id, title: ended.goal.title, outcome, reason: reason ?? null, at: clock.now() };
         await removeGoal(ended.goal.id, meta);
         if (plan === ended) plan = null;
         interruptions = 0;
         reflex_reported = false;
         await boundary();
-        try { onGoalEnd({ ...last_outcome, ...more, source: ended.source, origin: ended.goal.origin ?? null, goal_id: ended.goal.id }); } catch { /* the listener's problem */ }
+        try { onGoalEnd({ ...last_outcome, ...more, ...info, source: ended.source, origin: ended.goal.origin ?? null, goal_id: ended.goal.id }); } catch { /* the listener's problem */ }
         return (await queueOf())?.length ?? 0;
     }
 
@@ -231,7 +269,7 @@ export function createExecutor({
             last_outcome = { option_id: goal.option_id, title: goal.title, outcome: 'dropped', reason, at: clock.now() };
             await removeGoal(goal.id, { reason: `dropped before starting: ${reason}`, source: 'executor', call_id: origin.call_id ?? null });
             say('agent.state', { state: 'goal_dropped', detail: { goal_id: goal.id, option_id: goal.option_id, reason } }, { severity: 'warn' });
-            try { onGoalEnd({ ...last_outcome, source: origin.source, origin: origin.source, goal_id: goal.id }); } catch { /* the listener's problem */ }
+            try { onGoalEnd({ ...last_outcome, source: origin.source, origin: origin.source, goal_id: goal.id, call_id: origin.call_id ?? null }); } catch { /* the listener's problem */ }
             const left = (await queueOf())?.length ?? 0;
             if (left === 0) trigger('goal_complete', { outcome: 'dropped', reason, option_id: goal.option_id });
             return { kind: 'goal_dropped', goal_id: goal.id, reason };
@@ -257,6 +295,12 @@ export function createExecutor({
             goal_id: goal.id, call_id: origin.call_id ?? null, steps: plan.steps.map((step) => step.command), steps_from: 'template',
         });
         say('agent.state', { state: 'goal_started', detail: { goal_id: goal.id, option_id: goal.option_id, steps: plan.steps.length, source: origin.source } });
+        records.set(plan.id, { started_at: clock.now(), steps: [] });
+        if (records.size > 8) records.delete(records.keys().next().value);
+        // the situation is taken now, before anything of the goal has been done (genesis/learning/recorder.js)
+        try {
+            onGoalStart({ plan_id: plan.id, goal_id: goal.id, option_id: goal.option_id, title: goal.title, skill: resolved.skill, args: copy(resolved.args), source: origin.source, call_id: origin.call_id ?? null, steps: plan.steps.length });
+        } catch { /* the listener's problem */ }
         await boundary();
         return { kind: 'goal_started', goal_id: goal.id, plan_id: plan.id };
     }
@@ -275,6 +319,8 @@ export function createExecutor({
     async function stepFailed(step, reason) {
         const failed = plan;
         stats.steps_failed++;
+        noteStep(failed, step, false, reason, step_started);
+        step_started = null;
         // decided: a walk to a patrol waypoint the routine chose is tried ONCE (the routine skips the waypoint)
         const once = failed.source === 'routine' && PATROL_OPTION.test(failed.goal.option_id ?? '');
         if (!once && step.attempts < config.max_attempts && !isFinal(reason)) {
@@ -325,9 +371,11 @@ export function createExecutor({
         }
         step.status = 'active';
         step.attempts++;
+        step_started = null;
         if (guard?.fail) return stepFailed(step, guard.fail); // refused before anything was done
 
         const started_at = clock.now();
+        step_started = started_at;
         say('skill.started', { skill: step.command, args: copy(step.args), goal_skill: mine.goal.skill, step: step.i, of: mine.steps.length, attempt: step.attempts, steps_from: 'template' });
         await boundary(); // the checkpoint now says: this step is being worked on
         if (plan !== mine) return { kind: 'plan_gone' };
@@ -408,6 +456,8 @@ export function createExecutor({
 
         step.status = 'done';
         stats.steps_done++;
+        noteStep(mine, step, true, null, started_at);
+        step_started = null;
         interruptions = 0;
         reportProgress(mine, step);
         mine.cursor++;
@@ -435,9 +485,10 @@ export function createExecutor({
                     const gone = plan;
                     say('agent.state', { state: 'goal_abandoned', detail: { goal_id: gone.goal.id, option_id: gone.goal.option_id, reason: 'replaced' } });
                     last_outcome = { option_id: gone.goal.option_id, title: gone.goal.title, outcome: 'abandoned', reason: 'replaced', at: clock.now() };
+                    const info = endInfo(gone);
                     plan = null;
                     await boundary();
-                    try { onGoalEnd({ ...last_outcome, source: gone.source, origin: gone.goal.origin ?? null, goal_id: gone.goal.id }); } catch { /* the listener's problem */ }
+                    try { onGoalEnd({ ...last_outcome, ...info, source: gone.source, origin: gone.goal.origin ?? null, goal_id: gone.goal.id }); } catch { /* the listener's problem */ }
                     return { kind: 'goal_abandoned', goal_id: gone.goal.id, reason: 'replaced', wait_ms: 0 };
                 }
                 return await stepOnce();
@@ -579,12 +630,13 @@ export function createExecutor({
             cutDetour(reason); // a detour that is cut short takes its own goal with it, then the goal it kept is given up below
             if (!plan) return false;
             const gone = plan;
+            const info = endInfo(gone);
             plan = null;
             say('agent.state', { state: 'goal_abandoned', detail: { goal_id: gone.goal.id, option_id: gone.goal.option_id, reason } }, { corr: gone.id, severity: 'warn' });
             last_outcome = { option_id: gone.goal.option_id, title: gone.goal.title, outcome: 'abandoned', reason, at: clock.now() };
             await removeGoal(gone.goal.id, { reason: `abandoned: ${reason}`, source, call_id: null });
             await boundary();
-            try { onGoalEnd({ ...last_outcome, source: gone.source, origin: gone.goal.origin ?? null, goal_id: gone.goal.id }); } catch { /* the listener's problem */ }
+            try { onGoalEnd({ ...last_outcome, ...info, source: gone.source, origin: gone.goal.origin ?? null, goal_id: gone.goal.id }); } catch { /* the listener's problem */ }
             return true;
         },
         // ---- recovery (genesis/recovery) ----

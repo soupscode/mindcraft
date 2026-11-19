@@ -19,6 +19,7 @@
 //   genesis-ledger-reserve  ({ agent, chest, item, count }, ack)           -> ack({ ok, count | code, claim, reservations })
 //   genesis-ledger-release  ({ agent, chest, item })
 //   genesis-ledger-update   -> every agent  { chests: { name: view }, reservations }   after every change
+//   genesis-learn-*         the learner's (genesis/learning/service.js): begin, end, rank, choose, decision
 // An agent's requests are only taken from that agent's own process connection.
 //
 // Injected:
@@ -26,6 +27,7 @@
 //   goal_storage              { load(agent), save(agent, goals, change) }   (createHostGoalStorage below)
 //   ledger                    the shared chest ledger (genesis/catalog/shared_ledger.js)
 //   checkpoint_mirror         { save(checkpoint), load(agent) } (Postgres), or null: there is no mirror
+//   learning                  the settings of the one learner ({ agents, store, files, ... }: createHostLearning), or null: no learner
 //   emit(type, data, opts)    where the gate's own events go (optional)
 //   onGate(state, detail)     told when the model gate changed (optional): genesis/recovery/server.js
 //                             turns it into the model.away and model.available incident events
@@ -33,6 +35,11 @@
 
 import { createPlannerBroker } from '../broker/broker.js';
 import { createSharedLedger } from '../catalog/shared_ledger.js';
+import { createLearner } from '../learning/learner.js';
+import { createScorer } from '../learning/scorer.js';
+import { memoryLearningStore } from '../learning/store.js';
+import { createVersionStore, WEIGHTS_DIR } from '../learning/versions.js';
+import { createLearningService } from '../learning/service.js';
 
 export const HOST_DEFAULTS = Object.freeze({ context_timeout_ms: 5000 });
 
@@ -101,11 +108,41 @@ export function createHostGoalStorage({ durable = null, max_waiting = 2000, retr
     };
 }
 
+// THE ONE LEARNER of all agents lives in this process, beside the broker and the chest ledger
+// (genesis/learning). It is made here, with where it keeps things:
+//   store      experience, decisions, versions and the kept state (genesis/learning/store.js): Postgres when the
+//              launcher has a database, else memory (with the kept state in files)
+//   files      the network's weights as versioned files (genesis/learning/versions.js); without files no version
+//              outlives the process
+// Nothing of it runs code or names an action: it estimates and orders what the catalog offers.
+//   agents (required), seed, rules (the learner's), scorer (the scorer's rules: explore_rate, ...), service (the
+//   service's: update_every, ...), weights_dir, world_sha256
+export function createHostLearning({
+    agents, store = memoryLearningStore(), files = null, weights_dir = WEIGHTS_DIR, clock = { now: Date.now }, emit = () => {}, warn = () => {},
+    seed = 1, rules = {}, scorer: scorer_rules = {}, service: service_options = {}, world_sha256 = null, roles = {},
+} = {}) {
+    let service = null;
+    const learner = createLearner({
+        agents, clock, seed, rules,
+        onVersion: (record) => service?.onVersion(record),
+        // the bench sent the network back to the table: one low-priority note, never an alert
+        report: (note) => { try { emit('agent.state', { state: 'learning_bench', detail: { ...note } }, { corr: null }); } catch { /* an event must never disturb the learner */ } },
+    });
+    const scorer = createScorer({ learner, clock, seed, rules: scorer_rules });
+    const versions = files ? createVersionStore({ files, dir: weights_dir, report: (problem) => warn(`learning: ${problem.kind} v${problem.v} (${problem.error})`) }) : null;
+    service = createLearningService({ learner, scorer, store, versions, clock, emit, warn, world_sha256, roles, ...service_options });
+    return service;
+}
+
 export function createPlanningHost({
     model, clock = { now: Date.now, setTimeout, clearTimeout }, calls = { record() {} },
-    goal_storage = createHostGoalStorage(), ledger = null, emit = () => {}, onGate = null, broker: broker_options = {}, checkpoint_mirror = null, ...options
+    goal_storage = createHostGoalStorage(), ledger = null, emit = () => {}, onGate = null, broker: broker_options = {}, checkpoint_mirror = null,
+    learning = null, ...options
 } = {}) {
     const chest_ledger = ledger ?? createSharedLedger({ clock });
+    // the learner (see createHostLearning above): given as its settings ({ agents, store, files, ... }) or ready made; null: none
+    const learning_service = learning === null ? null
+        : (typeof learning.attach === 'function' ? learning : createHostLearning({ clock, emit: (type, data, opts) => { try { emit(type, data, opts); } catch { /* never the learner's problem */ } }, ...learning }));
     const config = { ...HOST_DEFAULTS };
     for (const key of Object.keys(HOST_DEFAULTS)) {
         if (options[key] !== undefined) config[key] = options[key];
@@ -174,6 +211,7 @@ export function createPlanningHost({
         broker,
         goal_storage,
         ledger: chest_ledger,
+        learning: learning_service,
         // Called for every connection to the MindServer. `isAgentSocket(name)` says whether this
         // connection is the process of that agent (the MindServer knows; a test may just say yes).
         attach(socket, { isAgentSocket = () => true } = {}) {
@@ -182,6 +220,7 @@ export function createPlanningHost({
                 stats.refused_sender++;
                 return false;
             };
+            learning_service?.attach(socket, { isAgentSocket });
             socket.on('genesis-hello', (agent, ack) => {
                 if (!own(agent)) return;
                 stats.hellos++;
