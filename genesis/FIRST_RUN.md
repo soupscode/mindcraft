@@ -38,7 +38,9 @@ Optional keys (each has a default in the file): `GENESIS_MINECRAFT_MEMORY` (heap
 `GENESIS_MINECRAFT_VIEW_DISTANCE` and `GENESIS_MINECRAFT_SIMULATION_DISTANCE` (chunks, 10 each),
 `GENESIS_MINECRAFT_DATA`, `GENESIS_EMBEDDING_MODEL`, `GENESIS_DASHBOARD_BIND`,
 `GENESIS_DASHBOARD_ALLOW` (addresses that may open the dashboard, comma-separated),
-`GENESIS_WORLDEDIT_WORLD` (the world's name for WorldEdit, `world`).
+`GENESIS_WORLDEDIT_WORLD` (the world's name for WorldEdit, `world`), `GENESIS_MINESKIN_API_KEY`
+(only for custom skins, see Skins below; `genesis/up.sh --init` adds the line, empty, to an env file
+that does not have it yet, without changing anything else in it).
 Every agent's bot keeps the chunks the server sends it in memory: a larger view distance raises
 the memory of the server AND of all four agent processes. (The bots ask for mineflayer's own
 default view distance, "far"; the fork sets none.)
@@ -160,11 +162,22 @@ picked anew.
 
 ### Skins
 
-The agents' skins come through the SkinsRestorer plugin (the server is in offline mode). The
-dashboard stores a skin per agent (`PUT /api/skins/<Agent>` with a 64x64 or 64x32 PNG as the body,
-`GET /api/skins`, `DELETE /api/skins/<Agent>`); the upload screen is a mock-up awaiting review and
-is not built. APPLYING a skin needs an outside signing service (see the open decisions of the
-build report): until that is settled a skin is stored and reported as `failed: no_signer`.
+The agents' skins come through the SkinsRestorer plugin (the server is in offline mode). Upload a
+64x64 or 64x32 PNG per agent on the dashboard's **Skins** page (or `PUT /api/skins/<Agent>` with the
+PNG as the body; `GET /api/skins`, `DELETE /api/skins/<Agent>`).
+
+- **A custom skin leaves your network.** When you upload one, the Genesis side sends that image once
+  to MineSkin (`https://api.mineskin.org/v2/generate`), an outside service; nothing else is ever sent there.
+- **Where it goes:** MineSkin uploads it to a Mojang account of its own and answers with the signed
+  texture; SkinsRestorer is then told the texture's address over RCON (and may ask MineSkin itself).
+- **The texture's address is public.** It is on Mojang's texture server (`textures.minecraft.net`);
+  the dashboard shows it, labelled Public. MineSkin is asked for `private` listing
+  (`GENESIS_MINESKIN_VISIBILITY`: `private`, `unlisted` or `public`); that hides nothing of the address.
+- **The key:** make an API key at `account.mineskin.org/keys`, put it into the env file as
+  `GENESIS_MINESKIN_API_KEY=` and run `genesis/up.sh`. Without it uploads are refused and nothing is sent.
+
+A failed upload is shown with its reason (`mineskin_rate_limited`, `mineskin_timeout`,
+`mineskin_key_refused`, ...) and is never tried again by itself: upload the skin again.
 
 ---
 
@@ -331,10 +344,17 @@ Never run, most likely to fail first:
    the real model, real ntfy delivery: as before the first run.
 6. **The lit and fenced camp**: `minecraft:torch`, `minecraft:oak_fence`, `minecraft:oak_fence_gate[facing=...,open=false]`
    and `time set day` over RCON; that the pathfinder opens a gate on Paper, and that an agent closing
-   it behind itself (`genesis/lib/gate_keeper.js`) does not get in another agent's way. Mobs can still
-   step over the fence where the land outside is a block higher than the camp's floor.
+   it behind itself (`genesis/lib/gate_keeper.js`) does not get in another agent's way. The land one
+   block outside the fence is levelled to the camp's floor by the bootstrap (once; a run of it that
+   holds something built is left alone, with a warning); land further out can still be higher.
+   **Hostile mobs**: on its routine an agent flees them (upstream's `cowardice` mode, switched on and
+   off in `genesis/lib/threat_modes.js`); on a goal the planner or you chose, upstream's behaviour
+   stays. How far a flight takes an agent, and how it looks at night, is not known.
 7. **Skins**: SkinsRestorer's console commands and their answers; applying a skin makes the server
-   send that player's data again, which may disturb a mineflayer bot.
+   send that player's data again, which may disturb a mineflayer bot. MineSkin was never called from
+   here: its request and answer are as its documentation has them; what `private` and `unlisted`
+   hide, whether every key may ask for `private`, and whether SkinsRestorer asks MineSkin again for
+   an address on `textures.minecraft.net` are not known.
 8. **The dashboard's allow-list**: which address the container sees for a client behind Docker's
    published port.
 9. **Windows** (Part 2).

@@ -345,6 +345,30 @@ export async function loadChunks({ send, reader, box, sleep = (ms) => new Promis
 
 // ---- a whole box at a time ------------------------------------------------------------------
 
+// Does a box hold anything that is neither air nor one of the named blocks? Resolves to null when it does
+// not, else to the first such cell: { pos }. Air costs one command for a whole box; a box of one kind of
+// block is settled by one cell; mixed boxes are halved.
+export async function foreignIn(reader, box, names) {
+    const plain = names.map((name) => name.replace(/^minecraft:/, ''));
+    const known = async (pos) => { for (const name of plain) if (await reader.is(pos, name)) return true; return false; };
+    async function look(part, counted = null) {
+        const n = counted ?? await reader.count(part);
+        if (n === 0) return null;
+        const size = volume(part);
+        if (size === 1 || (n === size && await reader.uniform(part))) return (await known(part.min)) ? null : { pos: [...part.min] };
+        const spans = [0, 1, 2].map((axis) => part.max[axis] - part.min[axis] + 1);
+        const axis = spans[1] > 1 ? 1 : (spans[0] >= spans[2] ? 0 : 2);
+        const middle = part.min[axis] + Math.floor(spans[axis] / 2) - 1;
+        const first = { min: [...part.min], max: [...part.max] };
+        const second = { min: [...part.min], max: [...part.max] };
+        first.max[axis] = middle;
+        second.min[axis] = middle + 1;
+        const in_first = await reader.count(first);
+        return await look(first, in_first) ?? await look(second, n - in_first);
+    }
+    return look(box);
+}
+
 // Is every cell of a box one of the accepted blocks? Resolves to null when it is, else to the
 // first cell that is not: { pos, found } with found "air" or "another block". Needs no table of
 // names: whole boxes of one kind are settled by one cell.

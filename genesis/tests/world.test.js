@@ -23,7 +23,7 @@ import { fileBlueprints, blueprintSize } from '../catalog/blueprints.js';
 import {
     checkWorldConfig, worldHash, WORLD_PROBLEMS, DECIDED_RANGES, DECIDED_RULES, DECIDED_BORDER_SIZE, PLOT_SIZE, borderBox, seedText,
 } from '../world/world_config.js';
-import { buildBootstrapPlan, serverSettingsText, GAME_RULES_USED, CAMP_LEVELLING, FILL_LIMIT, COMMANDS_USED } from '../world/plan.js';
+import { buildBootstrapPlan, campStrip, serverSettingsText, GAME_RULES_USED, CAMP_LEVELLING, FILL_LIMIT, COMMANDS_USED } from '../world/plan.js';
 import { runBootstrap, reportLines, parseItems, parseItemCompound, readContainer, ANSWERS } from '../world/bootstrap.js';
 import { OPERATOR, MANIFEST_KIND, checkManifest, parseManifest, manifestPaths, RESET_MARKER_FILE, SERVER_SETTINGS_FILE } from '../world/manifest.js';
 import { planReset, runReset, resetFiles, resetLines, RESET_FLAG, RESET_TABLES } from '../world/reset.js';
@@ -215,7 +215,13 @@ test('plan: the starter camp is exactly what was decided, and the rules are the 
     assert.deepEqual({ ...CAMP_LEVELLING }, { floor_block: 'grass_block', floor_accepts: ['grass_block', 'dirt'], clear_height: 24 });
     assert.deepEqual(plan.zones.map((zone) => zone.id), ['camp', 'field', 'plot.arthur-1', 'plot.mira-1', 'plot.felix-1', 'plot.nova-1', 'plot.spare-1']);
     assert.ok(plan.zones.every((zone) => zone.y === 63));
-    assert.deepEqual(plan.areas.map((area) => area.id), plan.zones.flatMap((zone) => [`${zone.id}.clear`, `${zone.id}.floor`]));
+    // the zones first, then the strip one block outside the camp's fence (four runs; nothing of it lies in the field or a plot here)
+    const strip_ids = ['north', 'south', 'west', 'east'].flatMap((side) => [`camp.strip.${side}.clear`, `camp.strip.${side}.floor`]);
+    assert.deepEqual(plan.areas.map((area) => area.id), [...plan.zones.flatMap((zone) => [`${zone.id}.clear`, `${zone.id}.floor`]), ...strip_ids]);
+    assert.deepEqual(plan.strip, { y: 63, segments: [{ id: 'north', side: 'north', min: [-13, -13], max: [13, -13] }, { id: 'south', side: 'south', min: [-13, 13], max: [13, 13] },
+        { id: 'west', side: 'west', min: [-13, -12], max: [-13, 12] }, { id: 'east', side: 'east', min: [13, -12], max: [13, 12] }], left_out: [] });
+    assert.deepEqual(plan.areas.find((area) => area.id === 'camp.strip.west.floor'), { id: 'camp.strip.west.floor', zone: 'camp.strip.west', kind: 'floor', strip: true, min: [-13, 63, -12], max: [-13, 63, 12],
+        block: 'minecraft:grass_block', purpose: 'strip outside the fence (west) floor (layer 63)' });
     assert.deepEqual(plan.areas[0], { id: 'camp.clear', zone: 'camp', kind: 'clear', min: [-12, 64, -12], max: [12, 87, 12], block: 'minecraft:air', purpose: 'camp cleared (layers 64 to 87)' });
     assert.deepEqual(plan.areas[1], { id: 'camp.floor', zone: 'camp', kind: 'floor', min: [-12, 63, -12], max: [12, 63, 12], block: 'minecraft:grass_block', purpose: 'camp floor (layer 63)' });
     assert.deepEqual(plan.areas[3], { id: 'field.floor', zone: 'field', kind: 'floor', min: [16, 63, -4], max: [24, 63, 4], block: 'minecraft:grass_block', purpose: 'field floor (layer 63)' });
@@ -225,8 +231,8 @@ test('plan: the starter camp is exactly what was decided, and the rules are the 
     assert.deepEqual(plan.floors.map((floor) => [floor.id, floor.every_run]), [['camp.floor', true], ...config.plots.map((plot) => [`plot.${plot.id}.floor`, false])]);
     const volume = (area) => (area.max[0] - area.min[0] + 1) * (area.max[1] - area.min[1] + 1) * (area.max[2] - area.min[2] + 1);
     assert.ok(plan.areas.every((area) => volume(area) <= FILL_LIMIT));
-    assert.equal(plan.areas.filter((area) => area.kind === 'floor').reduce((n, area) => n + volume(area), 0), 625 + 81 + 5 * 256, 'the levelled site is 1,986 columns');
-    assert.equal(plan.areas.reduce((n, area) => n + volume(area), 0), 1986 * 25, '49,650 cells in all');
+    assert.equal(plan.areas.filter((area) => area.kind === 'floor').reduce((n, area) => n + volume(area), 0), 625 + 81 + 5 * 256 + 104, 'the levelled site is 1,986 columns, and the 104 of the strip outside the fence');
+    assert.equal(plan.areas.reduce((n, area) => n + volume(area), 0), (1986 + 104) * 25, '52,250 cells in all');
     assert.equal(FILL_LIMIT, 32768);
     // every block of the camp stands above the floor and inside what is cleared
     for (const block of plan.blocks.filter((b) => zones.protectedAt({ x: b.pos[0], y: b.pos[1], z: b.pos[2] }) === 'camp')) assert.equal(block.pos[1], 64);
@@ -279,7 +285,8 @@ function wildServer(seed = '20261116') {
     put(0, 90, 0, 'oak_leaves');                                                            // above what is cleared: stays
     for (let x = -12; x <= 12; x++) for (let z = -12; z <= 0; z++) put(x, 63, z, 'grass_block'); // 325 of the 625 floor cells are grass already
     put(5, 63, 5, 'stone');                                                                 // stone in the floor layer: replaced
-    put(-13, 64, 0, 'oak_log');                                                             // right outside the camp: stays
+    put(-13, 64, 0, 'oak_log');                                                             // in the strip one block outside the fence: cleared with it
+    put(-14, 64, 0, 'oak_log');                                                             // two blocks outside: stays
     return server;
 }
 
@@ -289,7 +296,8 @@ test('bootstrap: against the stand-in server it levels the camp, places it, sets
     assert.equal(result.stage, 'done');
     // cleared: 6 logs, 4 leaves, 9 stone. floored: the 300 cells of the camp that were not grass yet (one of them stone),
     // and (the stand-in's world is empty there) every cell of the field and of the five plots: 81 + 5 * 256
-    assert.deepEqual(result.placed, { blocks: 200, items: 8, rules: 8, cleared: 19, floored: 300 + 81 + 1280 });
+    // the strip one block outside the fence: its one log cleared, its 104 cells (27 + 27 + 25 + 25) floored
+    assert.deepEqual(result.placed, { blocks: 200, items: 8, rules: 8, cleared: 19 + 1, floored: 300 + 81 + 1280 + 104 });
 
     // decided: the site is cleared and floored BEFORE the camp is placed, with ONE fill per box, and a box
     // the survey found nothing to change in gets no fill at all (only the camp has anything above its floor)
@@ -298,6 +306,9 @@ test('bootstrap: against the stand-in server it levels the camp, places it, sets
         'fill -12 64 -12 12 87 12 minecraft:air', 'fill -12 63 -12 12 63 12 minecraft:grass_block', 'fill 16 63 -4 24 63 4 minecraft:grass_block',
         'fill -34 63 14 -19 63 29 minecraft:grass_block', 'fill -4 63 14 11 63 29 minecraft:grass_block', 'fill 30 63 14 45 63 29 minecraft:grass_block',
         'fill -12 63 -30 3 63 -15 minecraft:grass_block', 'fill -34 63 -30 -19 63 -15 minecraft:grass_block',
+        // the strip one block outside the fence, after the zones: north, south, west (with the log above it), east
+        'fill -13 63 -13 13 63 -13 minecraft:grass_block', 'fill -13 63 13 13 63 13 minecraft:grass_block',
+        'fill -13 64 -12 -13 87 12 minecraft:air', 'fill -13 63 -12 -13 63 12 minecraft:grass_block', 'fill 13 63 -12 13 63 12 minecraft:grass_block',
     ]);
     assert.ok(server.log.lastIndexOf(fills.at(-1)) < server.log.findIndex((command) => command.startsWith('setblock ')), 'the camp was placed before the ground was levelled');
     assert.ok(server.log.indexOf('setworldspawn 0 64 0') < server.log.indexOf(fills[0]), 'the spawn point (whose chunks stay loaded) is set before the camp is levelled');
@@ -319,7 +330,10 @@ test('bootstrap: against the stand-in server it levels the camp, places it, sets
     for (let x = -12; x <= 12; x++) for (let y = 64; y <= 87; y++) for (let z = -12; z <= 12; z++) if (server.blockAt(x, y, z).name !== 'air') above++;
     assert.equal(above, 13 + 105, 'above the floor only the camp stands: its 13 blocks, 9 torches, 92 fences and 4 gates');
     assert.equal(server.blockAt(0, 90, 0).name, 'oak_leaves', 'above the cleared layers nothing is touched');
-    assert.equal(server.blockAt(-13, 64, 0).name, 'oak_log', 'outside the camp nothing is touched');
+    assert.equal(server.blockAt(-13, 64, 0).name, 'air', 'the strip one block outside the fence is cleared');
+    assert.equal(server.blockAt(-14, 64, 0).name, 'oak_log', 'outside the strip nothing is touched');
+    for (const [x, z] of [[-13, -13], [13, 13], [-13, 5], [13, -5], [0, -13], [0, 13]]) assert.equal(server.blockAt(x, 63, z).name, 'grass_block', `the strip's floor at ${x}, ${z}`);
+    assert.equal(server.blockAt(-14, 63, 0).name, 'air', 'the strip is one block wide');
     // the floors are verified in the check step, after everything was placed: the camp's and every plot's, whole
     // boxes at a time (a floor that is one kind of block throughout is settled by a count, a comparison and one cell)
     const last_item = server.log.findLastIndex((command) => command.startsWith('item replace '));
@@ -347,7 +361,7 @@ test('bootstrap: against the stand-in server it levels the camp, places it, sets
     }
     // decided: the field is left bare. Tilled farmland with its water, and nothing on it
     assert.deepEqual([farmland, sown, at(20, 63, 0).name, at(20, 62, 0).name], [80, 0, 'water', 'dirt']);
-    assert.equal(server.blocks.size, 625 + 200 + 1280 + 2, 'something else was placed'); // the camp's floor, the camp and the field, the plots' floors, and the two blocks left outside
+    assert.equal(server.blocks.size, 625 + 200 + 1280 + 104 + 2, 'something else was placed'); // the camp's floor, the camp and the field, the plots' floors, the strip's floor, and the two blocks left outside
     assert.deepEqual([...server.containers.get('8,64,4')].map(([slot, stack]) => [slot, stack.item, stack.count]), [
         [0, 'minecraft:stone_axe', 1], [1, 'minecraft:stone_pickaxe', 1], [2, 'minecraft:stone_hoe', 1], [3, 'minecraft:stone_sword', 1],
         [4, 'minecraft:bread', 16], [5, 'minecraft:torch', 16], [6, 'minecraft:wheat_seeds', 64], [7, 'minecraft:wheat_seeds', 16],
@@ -391,7 +405,7 @@ test('bootstrap: against the stand-in server it levels the camp, places it, sets
     ]);
     const report = reportLines(result, { manifest_file: MANIFEST }).join('\n');
     assert.match(report, /Bootstrap PASSED/);
-    assert.match(report, /Levelled the site \(camp, field, plots\) with the game's fill command: 19 blocks cleared, 1661 floor blocks placed \(counts per area and by kind of block are in the manifest\)\./);
+    assert.match(report, /Levelled the site \(camp, field, plots, and the strip one block outside the fence\) with the game's fill command: 20 blocks cleared, 1765 floor blocks placed \(counts per area and by kind of block are in the manifest\)\./);
     assert.equal(report.split('\n').filter((line) => line.includes('operator must set: ')).length, 6);
 });
 
@@ -417,17 +431,23 @@ test('manifest: every placed block and item is listed as the Operator\'s, with e
     assert.equal(manifest.items.length, items.length);
     // the levelling: one record per box, and for every box that changed one fill command, with how many blocks the server changed
     const fills = server.log.filter((command) => command.startsWith('fill '));
-    assert.equal(manifest.areas.length, 14);
+    assert.equal(manifest.areas.length, 22);
     assert.deepEqual(manifest.areas.filter((record) => record.changed > 0).map((record) => `fill ${record.min.join(' ')} ${record.max.join(' ')} ${record.block}`), fills);
     assert.deepEqual(manifest.areas.filter((record) => record.changed > 0).map((record) => [record.id, record.kind, record.changed, record.placed, record.status]), [
         ['camp.clear', 'clear', 19, true, 'filled'],                                          // the tree and the hillock
         ['camp.floor', 'floor', 300, true, 'filled'],
         ['field.floor', 'floor', 81, true, 'filled'],
         ...['arthur-1', 'mira-1', 'felix-1', 'nova-1', 'spare-1'].map((id) => [`plot.${id}.floor`, 'floor', 256, true, 'filled']),
+        // the strip one block outside the fence: four runs, recorded like every other box
+        ['camp.strip.north.floor', 'floor', 27, true, 'filled'],
+        ['camp.strip.south.floor', 'floor', 27, true, 'filled'],
+        ['camp.strip.west.clear', 'clear', 1, true, 'filled'],                                // the log right outside the fence
+        ['camp.strip.west.floor', 'floor', 25, true, 'filled'],
+        ['camp.strip.east.floor', 'floor', 25, true, 'filled'],
     ]);
     assert.ok(manifest.areas.filter((record) => record.changed === 0).every((record) => record.placed === false && record.status === 'nothing to change'));
     assert.equal(manifest.areas.reduce((n, record) => n + record.changed, 0), result.placed.cleared + result.placed.floored);
-    assert.deepEqual([manifest.runs[0].blocks_cleared, manifest.runs[0].floor_blocks_placed], [19, 1661]);
+    assert.deepEqual([manifest.runs[0].blocks_cleared, manifest.runs[0].floor_blocks_placed], [20, 1765]);
     // decided: the record is COUNTS per area: what was not air before, what was laid, how many blocks changed, and how
     const area = (id) => manifest.areas.find((record) => record.id === id);
     assert.deepEqual([area('camp.clear').cells, area('camp.clear').before, area('camp.clear').laid, area('camp.clear').method],
@@ -519,7 +539,7 @@ test('bootstrap: a second run on a bootstrapped world issues no placing commands
     assert.deepEqual(manifest.blocks, manifest_before.blocks);
     assert.deepEqual(manifest.items, manifest_before.items);
     assert.deepEqual(manifest.rules.filter((rule) => rule.kind !== 'server_setting'), manifest_before.rules.filter((rule) => rule.kind !== 'server_setting'));
-    assert.deepEqual(manifest.runs.map((run) => [run.run, run.blocks_placed, run.items_placed, run.blocks_cleared, run.floor_blocks_placed, run.result]), [[1, 200, 8, 19, 1661, 'ok'], [2, 0, 0, 0, 0, 'ok']]);
+    assert.deepEqual(manifest.runs.map((run) => [run.run, run.blocks_placed, run.items_placed, run.blocks_cleared, run.floor_blocks_placed, run.result]), [[1, 200, 8, 20, 1765, 'ok'], [2, 0, 0, 0, 0, 'ok']]);
     assert.equal(manifest.verified, true);
     assert.notEqual(JSON.stringify([...first.server.blocks]), blocks_before); // only by what the test did as "the agents"
 
@@ -632,8 +652,10 @@ test('bootstrap: levelling never runs over a camp that stands, and a fill the se
     assert.equal(first.server.containers.get('8,64,4').size, 8, 'the kits chest was wiped');
     assert.match(again.result.warnings.join('\n'), /The site was NOT levelled: the manifest has no record of the levelling, but the shared chest \(half 1 of 2\) already stands at -2, 64, -6/);
     const areas = parseManifest(again.files.store.get(MANIFEST)).areas;
-    assert.equal(areas.length, 14);
-    assert.ok(areas.every((record) => record.changed === 0 && record.placed === false && record.status === 'not levelled: the camp was already standing' && record.by === 'Operator'));
+    assert.equal(areas.length, 22);
+    // the camp, the field and the plots are refused; the strip outside the fence holds nothing of the camp: it is looked at, and was level already
+    assert.ok(areas.every((record) => record.changed === 0 && record.placed === false && record.by === 'Operator'
+        && record.status === (record.zone.startsWith('camp.strip.') ? 'nothing to change' : 'not levelled: the camp was already standing')));
     // (the two rules that cannot be read back are set again when no manifest says they were)
     assert.deepEqual(again.result.placed, { blocks: 0, items: 0, rules: 2, cleared: 0, floored: 0 });
 
@@ -656,8 +678,9 @@ test('bootstrap: levelling never runs over a camp that stands, and a fill the se
     const resumed = await bootstrap(exampleWorld(), { server: unloaded, files: stopped.files, clock: stopped.clock });
     assert.equal(resumed.result.ok, true, resumed.result.problems.join('; '));
     assert.equal(unloaded.log.filter((command) => command.startsWith('fill ')).join('; ').startsWith('fill -12 63 -12 12 63 12 minecraft:grass_block; fill 16 63 -4 24 63 4 minecraft:grass_block'), true);
-    assert.equal(unloaded.log.some((command) => command.startsWith('fill ') && command.endsWith('minecraft:air')), false, 'what was cleared was cleared again');
-    assert.deepEqual(resumed.result.placed, { blocks: 200, items: 8, rules: 0, cleared: 0, floored: 1661 });
+    assert.equal(unloaded.log.some((command) => command.startsWith('fill -12 64 -12 ')), false, 'what was cleared was cleared again');
+    // (the strip outside the fence was not reached before the stop: its log and its floor are done now)
+    assert.deepEqual(resumed.result.placed, { blocks: 200, items: 8, rules: 0, cleared: 1, floored: 1765 });
 });
 
 test('bootstrap: a failed block check stops with the block\'s position, and the manifest does not let planning start', async () => {
@@ -842,7 +865,7 @@ test('reset: with the flag it removes only the listed Genesis data, writes the m
     const done = await runBootstrap({ config, rcon: fakeMinecraft({ seed: '20261116' }), files, clock, manifest_file });
     assert.equal(done.ok, true, done.problems.join('; '));
     assert.equal(done.placed.blocks, 200, 'after a reset nothing an older manifest says is carried over');
-    assert.equal(done.placed.floored, 625 + 81 + 1280, 'after a reset the site of the new world is levelled');
+    assert.equal(done.placed.floored, 625 + 81 + 1280 + 104, 'after a reset the site of the new world is levelled (with the strip outside the fence)');
     assert.equal(existsSync(marker), false, 'the marker is still there after a bootstrap that passed');
     assert.equal(readdirSync(path.dirname(manifest_file)).filter((name) => name.startsWith('bootstrap.manifest.before-reset-')).length, 1);
 
@@ -990,4 +1013,96 @@ test('bootstrap script: --validate and --plan need no server, and a run without 
     assert.equal(invalid.status, 1);
     assert.match(invalid.stderr, /World file problem: agents\.Mira\.range is 48.*\[wrong_range\]/);
     assert.match(invalid.stderr, /Nothing was sent to the server/);
+});
+
+// ---- the strip one block outside the fence (decided after the first run: mobs stepped over the fence from higher land) ----
+
+test('strip: land that is higher just outside the fence is brought down to the camp\'s floor, one block wide, recorded as the Operator\'s', async () => {
+    const server = wildServer();
+    const put = (x, y, z, name) => server.blocks.set(`${x},${y},${z}`, { name, states: {} });
+    // a bank three blocks high along the whole east side, right against the fence, and two blocks deep
+    for (let z = -12; z <= 12; z++) for (let y = 63; y <= 66; y++) { put(13, y, z, y === 66 ? 'grass_block' : 'dirt'); put(14, y, z, y === 66 ? 'grass_block' : 'dirt'); }
+    const { result, files } = await bootstrap(exampleWorld(), { server });
+    assert.equal(result.ok, true, result.problems.join('; '));
+    for (let z = -12; z <= 12; z++) {
+        assert.deepEqual([63, 64, 65, 66].map((y) => server.blockAt(13, y, z).name), ['grass_block', 'air', 'air', 'air'], `the strip at 13, ${z}`);
+        assert.deepEqual([63, 66].map((y) => server.blockAt(14, y, z).name), ['dirt', 'grass_block'], 'the land two blocks outside is left as it is');
+    }
+    const areas = parseManifest(files.store.get(MANIFEST)).areas;
+    const east = areas.filter((record) => record.zone === 'camp.strip.east').map((record) => [record.id, record.changed, record.status, record.by, record.method]);
+    assert.deepEqual(east, [['camp.strip.east.clear', 75, 'filled', 'Operator', 'vanilla'], ['camp.strip.east.floor', 25, 'filled', 'Operator', 'vanilla']]);
+    assert.deepEqual(result.warnings, []);
+
+    // once: a second run levels nothing, and does not look at the strip again (what the agents do there later is theirs)
+    server.log.length = 0;
+    put(13, 64, 0, 'cobblestone');
+    const again = await bootstrap(exampleWorld(), { server, files });
+    assert.equal(again.result.ok, true, again.result.problems.join('; '));
+    assert.equal(server.log.some((command) => command.startsWith('fill ')), false);
+    assert.equal(server.blockAt(13, 64, 0).name, 'cobblestone');
+});
+
+test('strip: it is never levelled over something built, and it never cuts into the field or a plot', async () => {
+    // something built stands in the west strip: that run of the strip is left alone, whole, and the report says so
+    const server = wildServer();
+    server.blocks.set('-13,64,3', { name: 'cobblestone', states: {} });
+    const { result, files } = await bootstrap(exampleWorld(), { server });
+    assert.equal(result.ok, true, result.problems.join('; '));
+    assert.equal(server.blockAt(-13, 64, 3).name, 'cobblestone');
+    assert.equal(server.blockAt(-13, 64, 0).name, 'oak_log', 'the natural log in the same run stays too: the run is not touched');
+    assert.equal(server.blockAt(-13, 63, 5).name, 'air', 'no floor was laid in a run that holds something built');
+    const west = parseManifest(files.store.get(MANIFEST)).areas.filter((record) => record.zone === 'camp.strip.west');
+    assert.deepEqual(west.map((record) => [record.id, record.changed, record.placed, record.status]), [
+        ['camp.strip.west.clear', 0, false, 'not levelled: something that is not natural land stands at -13, 64, 3'],
+        ['camp.strip.west.floor', 0, false, 'not levelled: something that is not natural land stands at -13, 64, 3'],
+    ]);
+    assert.deepEqual(result.warnings.filter((line) => /strip/.test(line)).length, 1);
+    assert.match(result.warnings.join('\n'), /The strip outside the fence \(west\) was NOT levelled: something that is not natural land stands at -13, 64, 3\. It was left as it is/);
+    assert.equal(server.blockAt(13, 63, 0).name, 'grass_block', 'the other sides are levelled');
+
+    // a plot that touches the fence: the cells of the ring that are the plot's are left out, the run is cut in two
+    const config = exampleWorld();
+    config.plots[3] = { ...config.plots[3], min: [-12, 64, -28], max: [3, 77, -13] };
+    const strip = campStrip(config);
+    assert.deepEqual(strip.segments.filter((part) => part.side === 'north'), [{ id: 'north.1', side: 'north', min: [-13, -13], max: [-13, -13] }, { id: 'north.2', side: 'north', min: [4, -13], max: [13, -13] }]);
+    assert.deepEqual(strip.left_out, [{ zone: 'plot.nova-1', cells: 16, floor_y: 63, higher: false }]);
+    const plan = buildBootstrapPlan(config);
+    const others = [{ min: config.field.min, max: config.field.max }, ...config.plots.map((plot) => ({ min: [plot.min[0], plot.min[2]], max: [plot.max[0], plot.max[2]] }))];
+    for (const area of plan.areas.filter((record) => record.strip)) {
+        for (const box of others) {
+            assert.equal(area.min[0] <= box.max[0] && box.min[0] <= area.max[0] && area.min[2] <= box.max[1] && box.min[1] <= area.max[2], false, `${area.id} cuts into a plot or the field`);
+        }
+    }
+    assert.deepEqual(plan.areas.filter((record) => record.strip && record.kind === 'floor').map((record) => record.id),
+        ['camp.strip.north.1.floor', 'camp.strip.north.2.floor', 'camp.strip.south.floor', 'camp.strip.west.floor', 'camp.strip.east.floor']);
+    // the field against the fence, on a higher floor: left out, and the bootstrap warns that something could step over there
+    const high = exampleWorld();
+    high.field = { ...high.field, min: [13, -4], max: [21, 4], y: 64, water: [[17, 0]] };
+    assert.deepEqual(campStrip(high).left_out, [{ zone: 'field', cells: 9, floor_y: 64, higher: true }]);
+    const warned = await bootstrap(high, { server: fakeMinecraft({ seed: '20261116' }) });
+    assert.match(warned.result.warnings.join('\n'), /The strip outside the fence leaves out 9 block\(s\) that belong to the field, whose floor \(layer 64\) is HIGHER than the camp's \(layer 63\): something could step over the fence there\./);
+});
+
+test('strip: a world bootstrapped before the strip was decided is asked to run the bootstrap again, which levels the strip and nothing else', async () => {
+    const first = await bootstrap(exampleWorld(), { server: wildServer() });
+    assert.equal(first.result.ok, true);
+    // the manifest as an older bootstrap wrote it: no record of the strip; and the land outside the fence as it was then
+    const old = parseManifest(first.files.store.get(MANIFEST));
+    old.areas = old.areas.filter((record) => !record.zone.startsWith('camp.strip.'));
+    first.files.store.set(MANIFEST, JSON.stringify(old));
+    for (let z = -12; z <= 12; z++) { first.server.blocks.set(`13,64,${z}`, { name: 'dirt', states: {} }); first.server.blocks.set(`13,65,${z}`, { name: 'grass_block', states: {} }); }
+    assert.match(checkManifest(old, first.config).join('\n'), /has no record of the strip outside the camp's fence .*run the bootstrap again/);
+    assert.equal(checkManifest(old, first.config).length, 1);
+
+    first.server.log.length = 0;
+    const again = await bootstrap(first.config, { server: first.server, files: first.files, clock: first.clock });
+    assert.equal(again.result.ok, true, again.result.problems.join('; '));
+    // only the east strip had anything to change; the camp, the field and the plots were not levelled again
+    assert.deepEqual(first.server.log.filter((command) => command.startsWith('fill ')), ['fill 13 64 -12 13 87 12 minecraft:air']);
+    assert.deepEqual(again.result.placed, { blocks: 0, items: 0, rules: 0, cleared: 50, floored: 0 });
+    const manifest = parseManifest(first.files.store.get(MANIFEST));
+    assert.deepEqual(checkManifest(manifest, first.config), []);
+    assert.equal(manifest.areas.length, 22);
+    assert.equal(manifest.rules.find((rule) => rule.id === 'time.first_morning').status, 'set, once', 'the morning of the first run was set again, or its record lost');
+    assert.equal(first.server.log.some((command) => command.startsWith('time set')), false);
 });

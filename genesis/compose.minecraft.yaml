@@ -69,7 +69,8 @@ services:
       # agent process as well as the server's.
       VIEW_DISTANCE: "${GENESIS_MINECRAFT_VIEW_DISTANCE:-10}"
       SIMULATION_DISTANCE: "${GENESIS_MINECRAFT_SIMULATION_DISTANCE:-10}"
-      # Plugins (decided: they ship with the server). The image installs them from Modrinth
+      # Plugins (decided: they ship with the server, and their versions stay PINNED as they are: every entry
+      # names its exact version, none comes from the env file). The image installs them from Modrinth
       # (its documentation, "mods-and-plugins/modrinth": a comma or newline separated list of
       # "project" or "project:version"; an entry that is removed here is removed from the server).
       #   worldedit      the bootstrap levels the site with it, from the console

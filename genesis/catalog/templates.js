@@ -305,6 +305,11 @@ const craft_item = {
     title: (args) => clip(`Craft ${args.item} x${args.count}`),
     describe: (args) => `Craft ${args.item} (recipe made ${args.count} time${args.count === 1 ? '' : 's'})`,
     steps: (args) => [{ command: 'craftRecipe', args: [args.item, args.count] }],
+    // what the goal uses up of what the agent carries: [{ want, count }] (asked by the message desk: genesis/relay/desk.js)
+    needs(args, state) {
+        const one = state.view.ingredients?.(args.item) ?? null;
+        return one ? Object.entries(one).map(([want, count]) => ({ want, count: count * args.count })) : [];
+    },
     baseline: (args, state) => ({ had: held(state, args.item) }),
     // craftRecipe would put down a crafting table of its own when none is near (skills.js 66-69)
     before(step, args, state) {
@@ -563,8 +568,63 @@ const sow_field = {
 
 // ---- build_blueprint ---------------------------------------------------------------------
 
+// A blueprint may name a FAMILY where the world only has its members: upstream's construction files say
+// "planks" and "log" (src/agent/npc/construction/small_wood_house.json: 55 and 8 cells), the world has
+// oak_planks, birch_log, ... Seen on the live run: with the names compared as text nothing an agent held
+// ever counted as building material, so no build was ever offered. Wherever an item is matched against
+// what a blueprint wants, a family matches its members.
+export const ITEM_FAMILIES = Object.freeze(Object.fromEntries(
+    ['log', 'planks', 'sign', 'boat', 'fence_gate', 'door', 'fence', 'slab', 'stairs', 'button', 'pressure_plate', 'trapdoor', 'bed'].map((name) => [name, `_${name}`])));
+// what a family is made from, one step back (doors from planks, planks from logs)
+export const FAMILY_SOURCES = Object.freeze({ planks: ['log'], door: ['planks'], fence: ['planks'], fence_gate: ['planks'], slab: ['planks'], stairs: ['planks'], trapdoor: ['planks'], sign: ['planks'] });
+// Is `name` what a blueprint means by `want`? The name itself, or a member of the family: "planks" is
+// oak_planks, birch_planks, ...; "log" is any *_log (upstream: blockSatisfied in src/agent/npc/utils.js
+// 73-84 with MATCHING_WOOD_BLOCKS of src/utils/mcdata.js 23-36, and "bed").
+export const isMember = (want, name) => name === want || (Object.hasOwn(ITEM_FAMILIES, want) && String(name).endsWith(ITEM_FAMILIES[want]));
+// The item of `stock` that can stand for `want`: the item itself, or the family's member held most.
+export function memberHeld(stock, want) {
+    if (!Object.hasOwn(ITEM_FAMILIES, want)) return stock[want] > 0 ? want : null;
+    return Object.keys(stock).filter((item) => item.endsWith(ITEM_FAMILIES[want]) && stock[item] > 0).sort((a, b) => stock[b] - stock[a] || a.localeCompare(b))[0] ?? null;
+}
+const heldOf = (state, want) => Object.entries(state.view.inventory()).reduce((n, [item, count]) => n + (isMember(want, item) ? count : 0), 0);
+// The members of what a blueprint wants that the catalog knows (to ask for, gather or craft): ["oak_planks", ...].
+const membersKnown = (want, ctx) => (Object.hasOwn(ITEM_FAMILIES, want) ? ctx.knownItems().filter((item) => item.endsWith(ITEM_FAMILIES[want])) : (ctx.known(want) ? [want] : []));
+
 // What upstream's blockSatisfied accepts for dirt (src/agent/npc/utils.js line 75), kept here.
-const satisfied = (want, name) => name === want || (want === 'dirt' && name === 'grass_block');
+const satisfied = (want, name) => isMember(want, name) || (want === 'dirt' && name === 'grass_block') || (want === 'torch' && String(name).includes('torch'));
+
+// What the agent's own build is short of, and what leads to it (decided: the way to a first build must be
+// reachable through offered options): { plot, items: Set of item names } or null when it has no build
+// or nothing is missing. `items` holds the missing materials (every known member of a family) and what
+// they are made from, one step back (logs for planks).
+export function buildNeeds(state, ctx) {
+    try {
+        for (const plot of state.zones.plots()) {
+            if (!plot.blueprint || plot.owner !== state.agent) continue;
+            const survey = surveyPlot({ plot: plot.id }, state, ctx);
+            if (!survey || !survey.fits) continue;
+            const wanted = new Map();
+            for (const cell of survey.work) if (cell.want !== 'air') wanted.set(cell.want, (wanted.get(cell.want) ?? 0) + 1);
+            const items = new Set();
+            for (const [want, count] of wanted) {
+                if (heldOf(state, want) >= count) continue;
+                // the material itself, and what it is made from, every step back (a door from planks, planks from logs)
+                const chain = [want];
+                for (const name of chain) for (const source of FAMILY_SOURCES[name] ?? []) if (!chain.includes(source)) chain.push(source);
+                for (const name of chain) for (const item of membersKnown(name, ctx)) items.add(item);
+            }
+            if (items.size > 0) return { plot: plot.id, items };
+        }
+    } catch { /* a view that cannot be read: nothing is known about the build */ }
+    return null;
+}
+// Does this option lead to one of those items? (what a gather yields, what is crafted, what is fetched)
+export function leadsTo(skill, args, needs, ctx) {
+    if (!needs) return false;
+    if (skill === 'gather_blocks') return (ctx.gather_types[args.type]?.drops ?? []).some((item) => needs.items.has(item));
+    if (skill === 'craft_item' || skill === 'fetch_items') return needs.items.has(args.item);
+    return false;
+}
 
 // Every cell of the blueprint, in the world, lowest layer first. The blueprint has upstream's
 // construction format (src/agent/npc/construction/*.json): blocks[y][z][x]. Its lowest
@@ -605,11 +665,14 @@ function buildBatch(survey, state, ctx) {
     const batch = [];
     for (const cell of survey.work) {
         if (batch.length >= ctx.config.build_batch) break;
+        let item = null;
         if (cell.want !== 'air') {
-            if (!(stock[cell.want] > 0)) continue;
-            stock[cell.want]--;
+            // the member of the family that is held ("planks" is built with the oak_planks in the inventory)
+            item = memberHeld(stock, cell.want);
+            if (!item) continue;
+            stock[item]--;
         }
-        batch.push(cell);
+        batch.push({ ...cell, item });
     }
     return batch;
 }
@@ -650,7 +713,7 @@ const build_blueprint = {
         const steps = [];
         for (const cell of buildBatch(surveyPlot(args, state, ctx), state, ctx)) {
             if (cell.clear) steps.push({ command: 'breakBlockAt', args: [cell.x, cell.y, cell.z] });
-            if (cell.want !== 'air') steps.push({ command: 'placeBlock', args: [cell.want, cell.x, cell.y, cell.z] });
+            if (cell.want !== 'air') steps.push({ command: 'placeBlock', args: [cell.item ?? cell.want, cell.x, cell.y, cell.z] });
         }
         return steps;
     },
@@ -669,13 +732,24 @@ const build_blueprint = {
             return ctx.natural(block.name) ? null : { fail: 'plot_not_natural' };
         }
         const want = step.args[0];
-        if (satisfied(want, block.name)) return { skip: 'already_matches' };
+        // what the BLUEPRINT wants in this cell (a family, perhaps), not only the item this step would place:
+        // a cell that already holds another member of the family matches
+        const blueprint = plot.blueprint ? state.blueprints.get(plot.blueprint) : null;
+        const cell = blueprint ? blueprintCells(plot, blueprint).find((c) => c.x === pos.x && c.y === pos.y && c.z === pos.z) : null;
+        if (satisfied(cell?.want ?? want, block.name) || satisfied(want, block.name)) return { skip: 'already_matches' };
         // upstream's placeBlock breaks whatever is in the cell (skills.js 709-715): never hand it an occupied one
         if (!isEmptyBlock(block.name)) return { fail: 'cell_occupied' };
         if (held(state, want) <= 0) return { fail: 'missing_materials' };
         return { intend: [pos] };
     },
     after: () => null,
+    // every cell that is still to build wants one of its material (a family name stands for all its members)
+    needs(args, state, ctx) {
+        const survey = surveyPlot(args, state, ctx);
+        const wanted = new Map();
+        for (const cell of survey?.work ?? []) if (cell.want !== 'air') wanted.set(cell.want, (wanted.get(cell.want) ?? 0) + 1);
+        return [...wanted].map(([want, count]) => ({ want, count }));
+    },
     progress(args, state, ctx) {
         const survey = surveyPlot(args, state, ctx);
         return survey ? { done: survey.matching, total: survey.total } : { done: 0, total: null };
@@ -869,7 +943,8 @@ function shortOf(state, ctx) {
         if (!survey || !survey.fits) continue;
         const wanted = new Map();
         for (const cell of survey.work) if (cell.want !== 'air') wanted.set(cell.want, (wanted.get(cell.want) ?? 0) + 1);
-        for (const [item, count] of [...wanted].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) add(item, count - held(state, item), `plot ${plot.id}`);
+        // (a family is asked for by a member the catalog knows: "planks" as oak_planks)
+        for (const [want, count] of [...wanted].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) add(membersKnown(want, ctx)[0] ?? want, count - heldOf(state, want), `plot ${plot.id}`);
     }
     // sowing: seeds, when the field (the agent's, or nobody's in particular) has bare cells and the agent holds none
     const field_owner = state.zones.fieldOwner?.() ?? null;

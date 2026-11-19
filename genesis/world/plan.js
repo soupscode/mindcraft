@@ -141,13 +141,49 @@ export function levelZones(config) {
     ];
 }
 
+// The strip outside the fence (decided): the ring of land ONE block outside the camp's fence is brought to
+// the camp's floor (cleared above it, floored at it) so that nothing steps over the fence from higher
+// ground. Same method and record as the camp's levelling, the Operator's, once.
+// A cell of the ring that lies in the field or in a plot is LEFT OUT: the strip never cuts into them
+// (that zone is levelled to its own floor; where that floor is higher than the camp's, `higher` says so
+// and the bootstrap warns). The bootstrap also leaves a run of the strip alone when anything stands in
+// it that is not natural land: it never levels over something built.
+// Returns { y, segments: [{ id, side, min: [x, z], max: [x, z] }], left_out: [{ zone, cells, floor_y, higher }] }.
+export function campStrip(config) {
+    const [x1, z1] = config.camp.min;
+    const [x2, z2] = config.camp.max;
+    const y = config.home[1] - 1;
+    const others = [{ id: 'field', y: config.field.y, min: config.field.min, max: config.field.max },
+        ...(config.plots ?? []).map((plot) => ({ id: `plot.${plot.id}`, y: plot.min[1] - 1, min: [plot.min[0], plot.min[2]], max: [plot.max[0], plot.max[2]] }))];
+    const owner = (x, z) => others.find((box) => x >= box.min[0] && x <= box.max[0] && z >= box.min[1] && z <= box.max[1]) ?? null;
+    const sides = [
+        ['north', x1 - 1, x2 + 1, (n) => [n, z1 - 1]], ['south', x1 - 1, x2 + 1, (n) => [n, z2 + 1]],
+        ['west', z1, z2, (n) => [x1 - 1, n]], ['east', z1, z2, (n) => [x2 + 1, n]],
+    ];
+    const segments = [];
+    const left = new Map();
+    for (const [side, from, to, cell] of sides) {
+        const runs = [];
+        let run = null;
+        for (let n = from; n <= to; n++) {
+            const taken = owner(...cell(n));
+            if (taken) { left.set(taken.id, { zone: taken.id, cells: (left.get(taken.id)?.cells ?? 0) + 1, floor_y: taken.y, higher: taken.y > y }); run = null; continue; }
+            if (!run) { run = { min: cell(n), max: cell(n) }; runs.push(run); } else run.max = cell(n);
+        }
+        runs.forEach((box, i) => segments.push({ id: runs.length > 1 ? `${side}.${i + 1}` : side, side, ...box }));
+    }
+    return { y, segments, left_out: [...left.values()] };
+}
+
 // The areas that level the site, zone by zone: everything above the floor (one fill command for
 // the whole box where the game allows it: nothing is left inside that could fall), then the
 // floor itself. A box larger than one fill command may change is cut into slabs along x, and
 // into runs of layers, the highest first.
 function levellingAreas(config) {
     const areas = [];
-    for (const zone of levelZones(config)) {
+    const strip = campStrip(config);
+    const strips = strip.segments.map((part) => ({ id: `camp.strip.${part.id}`, label: `strip outside the fence (${part.id.replace('.', ' ')})`, y: strip.y, min: part.min, max: part.max, strip: true }));
+    for (const zone of [...levelZones(config), ...strips]) {
         const floor_y = zone.y;
         const top = Math.min(BUILD_TOP, floor_y + CAMP_LEVELLING.clear_height);
         const [x1, z1] = zone.min;
@@ -162,11 +198,11 @@ function levellingAreas(config) {
             for (let y = top; y > floor_y; y -= layers) clears.push({ min: [from, Math.max(floor_y + 1, y - layers + 1), z1], max: [to, y, z2] });
         }
         clears.forEach((box, n) => areas.push({
-            id: clears.length > 1 ? `${zone.id}.clear.${n + 1}` : `${zone.id}.clear`, zone: zone.id, kind: 'clear', ...box, block: block('air'),
+            id: clears.length > 1 ? `${zone.id}.clear.${n + 1}` : `${zone.id}.clear`, zone: zone.id, kind: 'clear', ...(zone.strip ? { strip: true } : {}), ...box, block: block('air'),
             purpose: `${zone.label} cleared (layers ${box.min[1]} to ${box.max[1]})`,
         }));
         slabs.forEach(([from, to], n) => areas.push({
-            id: slabs.length > 1 ? `${zone.id}.floor.${n + 1}` : `${zone.id}.floor`, zone: zone.id, kind: 'floor', min: [from, floor_y, z1], max: [to, floor_y, z2],
+            id: slabs.length > 1 ? `${zone.id}.floor.${n + 1}` : `${zone.id}.floor`, zone: zone.id, kind: 'floor', ...(zone.strip ? { strip: true } : {}), min: [from, floor_y, z1], max: [to, floor_y, z2],
             block: block(CAMP_LEVELLING.floor_block), purpose: `${zone.label} floor (layer ${floor_y})`,
         }));
     }
@@ -185,6 +221,7 @@ export function buildBootstrapPlan(config) {
     // the floors that are checked: the camp's in EVERY run; a plot's only in the run that levelled it
     // (from then on the plot is its owner's). The field has no floor check: every cell of it is a
     // block of the camp plan (farmland or water) and is checked as one.
+    const strip = campStrip(config);
     const floors = levelZones(config).filter((zone) => zone.id !== 'field').map((zone) => ({
         id: `${zone.id}.floor`, zone: zone.id, label: zone.label, y: zone.y, min: zone.min, max: zone.max, accepts: floor.accepts, every_run: zone.id === 'camp',
     }));
@@ -292,13 +329,13 @@ export function buildBootstrapPlan(config) {
     const clear_layers = Math.min(BUILD_TOP, config.home[1] - 1 + CAMP_LEVELLING.clear_height) - (config.home[1] - 1);
     const favours = [
         { id: 'levelled_site', what: `The camp, the field and every plot were levelled by the operator before anything was placed: ${clear_layers} layers above the floor were cleared and the floor was laid with ${CAMP_LEVELLING.floor_block.replaceAll('_', ' ')}. What stood there before and what was laid is counted in this manifest, area by area. The agents levelled none of it.` },
-        { id: 'camp_defence', what: `The starter camp was lit and fenced by the operator: ${defence.torches.length} torches, so that no hostile mob can spawn inside it, and a fence with ${defence.gates.length} gates around it. The agents built none of it.` },
+        { id: 'camp_defence', what: `The starter camp was lit and fenced by the operator: ${defence.torches.length} torches, so that no hostile mob can spawn inside it, and a fence with ${defence.gates.length} gates around it; the land one block outside the fence was levelled to the camp's floor so that nothing steps over it. The agents built none of it.` },
         { id: 'starter_camp', what: 'The starter camp was built by the operator: one shared double chest, a kits chest, four beds, a crafting table, a furnace and a 9 by 9 field of tilled farmland with water. The agents built none of it.' },
         ...(items.length > 0 ? [{ id: 'kits', what: `The kits chest was filled once by the operator with ${config.kits.map((stack) => `${stack.count} ${stack.item}`).join(', ')}. The agents restock it themselves from then on.` }] : []),
         { id: 'field', what: 'The field is Operator-built and was left bare: the operator tilled and watered it and sowed nothing. Every crop on it is agent-planted, from the seeds in the kit.' },
     ];
 
-    return { seed: seedText(config.seed), rules, server_settings, zones: levelZones(config), areas, floor, floors, blocks, items, favours };
+    return { seed: seedText(config.seed), rules, server_settings, strip, zones: levelZones(config), areas, floor, floors, blocks, items, favours };
 }
 
 // The text of server-settings.required.txt.

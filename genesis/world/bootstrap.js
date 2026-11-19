@@ -74,7 +74,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { checkWorldConfig, describeProblem, worldHash, seedText } from './world_config.js';
 import { buildBootstrapPlan, serverSettingsText } from './plan.js';
 import { MANIFEST_KIND, MANIFEST_VERSION, OPERATOR, DEFAULT_MANIFEST_FILE, manifestPaths, parseManifest } from './manifest.js';
-import { createReader, probe, loadChunks, checkBox, ReadError, READ_ANSWERS, WORLD_BOTTOM } from './survey.js';
+import { createReader, probe, loadChunks, checkBox, foreignIn, ReadError, READ_ANSWERS, NATURAL_BLOCKS, WORLD_BOTTOM } from './survey.js';
 import { probeWorldEdit, worldEditBox } from './worldedit.js';
 
 const xyz = (pos) => pos.join(' ');
@@ -322,8 +322,9 @@ export async function runBootstrap({
         // ---- 4. the site is levelled, once: the camp, the field and every plot (decided) ----
         result.stage = 'level';
         // with no player online only the chunks at the spawn are loaded: the site's are force-loaded for this run
-        const land = { min: [Math.min(...plan.zones.map((zone) => zone.min[0])), Math.min(...plan.zones.map((zone) => zone.min[1]))],
-            max: [Math.max(...plan.zones.map((zone) => zone.max[0])), Math.max(...plan.zones.map((zone) => zone.max[1]))] };
+        const boxes = [...plan.zones, ...plan.strip.segments]; // the strip outside the fence is part of the site
+        const land = { min: [Math.min(...boxes.map((zone) => zone.min[0])), Math.min(...boxes.map((zone) => zone.min[1]))],
+            max: [Math.max(...boxes.map((zone) => zone.max[0])), Math.max(...boxes.map((zone) => zone.max[1]))] };
         chunks = await loadChunks({ send: (command) => send(command, false), reader, box: land, sleep, log, ...load });
         if (!chunks.ok) { stop('level', `the site's chunks could not be loaded: ${chunks.problem}`); return true; }
         // the probe: every reading command once, where the answer is known. Stops with the raw answer.
@@ -337,6 +338,7 @@ export async function runBootstrap({
             if (before) records.areas.push(before); else to_level.push(area);
         }
         const levelled_zones = new Set();
+        const strip_done = []; // the strip's areas levelled (or found level) in this run: checked below
         // the morning of the first run (decided): set ONCE, on the first bootstrap of a new world, never again
         const morning = plan.rules.find((rule) => rule.kind === 'time');
         const morning_before = morning ? carried('rules', morning.id, () => true) : null;
@@ -363,10 +365,19 @@ export async function runBootstrap({
             const volume = (area) => (area.max[0] - area.min[0] + 1) * (area.max[1] - area.min[1] + 1) * (area.max[2] - area.min[2] + 1);
             const blank = (area) => ({ id: area.id, zone: area.zone, kind: area.kind, min: area.min, max: area.max, block: area.block, purpose: area.purpose, by: OPERATOR,
                 method: null, cells: volume(area), before: null, laid: { block: area.block, count: 0 }, changed: 0, placed: false, status: null, at: now(), run });
-            if (standing) {
-                for (const area of to_level) records.areas.push({ ...blank(area), status: 'not levelled: the camp was already standing' });
+            // a camp that stands is never levelled again; the strip outside its fence still is, once (it holds nothing of the camp)
+            const refused = standing ? to_level.filter((area) => !area.strip) : [];
+            const doing = standing ? to_level.filter((area) => area.strip) : to_level;
+            for (const area of refused) records.areas.push({ ...blank(area), status: 'not levelled: the camp was already standing' });
+            if (doing.some((area) => area.strip)) {
+                for (const out of plan.strip.left_out) {
+                    if (out.higher) result.warnings.push(`The strip outside the fence leaves out ${out.cells} block(s) that belong to the ${out.zone.replace('.', ' ')}, whose floor (layer ${out.floor_y}) is HIGHER than the camp's (layer ${plan.strip.y}): something could step over the fence there.`);
+                }
+            }
+            if (refused.length > 0) {
                 result.warnings.push(`The site was NOT levelled: the manifest has no record of the levelling, but the ${standing.purpose} already stands at ${standing.pos.join(', ')}. Nothing was cleared or floored; the floor check below decides whether the camp is fit.`);
-            } else {
+            }
+            if (doing.length > 0) {
                 // ---- how: WorldEdit from the console (decided), or the game's own fill command when the plugin is absent ----
                 let edit = null;
                 if (worldedit !== false) {
@@ -385,8 +396,10 @@ export async function runBootstrap({
                     log('Levelling with the game\'s own fill command.');
                 }
                 const target = (area) => area.block.replace(/^minecraft:/, '');
-                for (const [index, area] of to_level.entries()) {
+                const built_in = new Map(); // a strip zone -> what stands in it that is not natural land
+                for (const [index, area] of doing.entries()) {
                     const record = { ...blank(area), method: result.levelling.method };
+                    if (built_in.has(area.zone)) { records.areas.push({ ...record, status: `not levelled: ${built_in.get(area.zone)}` }); continue; }
                     // what is there, read with the game's own commands (probed above): the blocks that are not air,
                     // and whether anything needs to change at all. A site that is already flat and floored is left as it is.
                     const not_air = await reader.count(area);
@@ -395,8 +408,20 @@ export async function runBootstrap({
                     if (!wrong) {
                         records.areas.push({ ...record, status: 'nothing to change' });
                         levelled_zones.add(area.zone);
-                        log(`Levelled ${index + 1} of ${to_level.length}: ${area.purpose}: already as it should be, nothing changed`);
+                        if (area.strip) strip_done.push(area);
+                        log(`Levelled ${index + 1} of ${doing.length}: ${area.purpose}: already as it should be, nothing changed`);
                         continue;
+                    }
+                    if (area.strip) {
+                        // the strip is levelled only where it holds natural land: anything else was built, and stays
+                        const foreign = await foreignIn(reader, area, [area.block, ...NATURAL_BLOCKS.map(([name]) => name)]);
+                        if (foreign) {
+                            const why = `something that is not natural land stands at ${foreign.pos.join(', ')}`;
+                            built_in.set(area.zone, why);
+                            records.areas.push({ ...record, status: `not levelled: ${why}` });
+                            result.warnings.push(`The ${area.purpose.replace(/ (cleared|floor) \(.*$/, '')} was NOT levelled: ${why}. It was left as it is; if the land there is higher than the camp's floor, something could step over the fence from it.`);
+                            continue;
+                        }
                     }
                     let changed = null;
                     if (edit) {
@@ -436,7 +461,8 @@ export async function runBootstrap({
                     result.placed[area.kind === 'floor' ? 'floored' : 'cleared'] += changed ?? 0;
                     records.areas.push({ ...record, laid: { block: area.block, count: changed }, changed: changed ?? 0, placed: true, status: 'filled' });
                     levelled_zones.add(area.zone);
-                    log(`Levelled ${index + 1} of ${to_level.length}: ${area.purpose}: ${changed ?? 'an unknown number of'} blocks changed`);
+                    log(`Levelled ${index + 1} of ${doing.length}: ${area.purpose}: ${changed ?? 'an unknown number of'} blocks changed`);
+                    if (area.strip) strip_done.push(area);
                 }
             }
         }
@@ -490,6 +516,15 @@ export async function runBootstrap({
             if (wrong) {
                 stop('check', `floor check failed at ${wrong.pos.join(', ')}: the ${floor.label} floor should be ${floor.accepts.join(' or ')}, the server says it is ${wrong.found}`,
                     { id: floor.id, pos: wrong.pos, expected: floor.accepts.join(' | '), answer: wrong.found });
+                return true;
+            }
+        }
+        // the strip outside the fence, in the run that levelled it: nothing above the camp's floor, and the floor is there
+        for (const area of strip_done) {
+            const wrong = area.kind === 'clear' ? ((await reader.count(area)) > 0 ? { pos: area.min, found: 'blocks that are not air' } : null) : await checkBox(reader, area, plan.floor.accepts);
+            if (wrong) {
+                stop('check', `strip check failed: the ${area.purpose} holds ${wrong.found} at or after ${wrong.pos.join(', ')}; something could step over the camp's fence from it`,
+                    { id: area.id, pos: wrong.pos, expected: area.kind === 'clear' ? 'minecraft:air' : plan.floor.accepts.join(' | '), answer: wrong.found });
                 return true;
             }
         }
@@ -589,7 +624,7 @@ export function reportLines(result, { manifest_file = DEFAULT_MANIFEST_FILE } = 
     const lines = [];
     const changing = result.commands.filter((entry) => entry.changes).length;
     lines.push(`Bootstrap ${result.ok ? 'PASSED' : `FAILED at stage "${result.stage}"`}: ${result.commands.length} commands sent, ${changing} of them changing the world.`);
-    lines.push(`Levelled the site (camp, field, plots)${result.levelling ? ` with ${result.levelling.method === 'worldedit' ? `WorldEdit ${result.levelling.version ?? ''}`.trim() : 'the game\'s fill command'}` : ''}: ${result.placed.cleared} blocks cleared, ${result.placed.floored} floor blocks placed (counts per area and by kind of block are in the manifest).`);
+    lines.push(`Levelled the site (camp, field, plots, and the strip one block outside the fence)${result.levelling ? ` with ${result.levelling.method === 'worldedit' ? `WorldEdit ${result.levelling.version ?? ''}`.trim() : 'the game\'s fill command'}` : ''}: ${result.placed.cleared} blocks cleared, ${result.placed.floored} floor blocks placed (counts per area and by kind of block are in the manifest).`);
     lines.push(`Placed: ${result.placed.blocks} blocks, ${result.placed.items} item stacks; rules set: ${result.placed.rules}.`);
     for (const problem of result.problems) lines.push(`PROBLEM: ${problem}`);
     if (result.failed?.pos) lines.push(`Failed position: ${result.failed.pos.join(', ')}`);

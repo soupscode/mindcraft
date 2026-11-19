@@ -15,14 +15,17 @@
 //   A custom image has to be SIGNED before a client shows it: SkinsRestorer has MineSkin (an
 //   outside service) generate the skin from the URL. So the image must be at an address that
 //   service can fetch. This file never sends anything anywhere itself: `signer` is injected
-//   and turns the PNG into such an address; without one, a skin is stored and NOT applied.
+//   and turns the PNG into such an address (decided: genesis/skins/mineskin.js, which uploads the
+//   image to MineSkin and returns the address of the texture, PUBLIC on Mojang's texture server).
+//   Without a signer, or without its API key, nothing is sent anywhere and the skin is NOT applied.
 // NOT RUN AGAINST A REAL SERVER, and the answers' wording is not in the documentation: an
 // answer that looks like a refusal (unknown command, an error word) is a failure with the raw
 // text; anything else counts as sent, and the event says "sent", not "seen in the game".
 // Unverified risk for the live test: applying a skin makes the server send that player's data
 // again, which may disturb a mineflayer bot.
 //
-// Injected: rcon { send(command) }, signer { sign({ agent, png, sha256, variant }) -> { url } } | null,
+// Injected: rcon { send(command) }, signer { sign({ agent, png, sha256, variant }) -> { url, texture_url? } } | null
+//           (it throws an Error whose `code` names the reason: that code is the reason of the skin_failed event),
 //           emit(type, data, opts), clock.
 // Depends only on Node built-ins.
 
@@ -89,15 +92,23 @@ export function createSkinService({ rcon = null, signer = null, emit = () => nul
             // the image has to be signed by an outside service before any client shows it: without a way to it, nothing is sent anywhere
             if (!signer) return failed(agent, 'no_signer', { sha256: checked.sha256 });
             let url;
+            let signed = null;
             try {
-                url = (await signer.sign({ agent, png, sha256: checked.sha256, variant }))?.url;
-            } catch (err) { return failed(agent, 'signer_failed', { sha256: checked.sha256, answer: clip(err?.message ?? err) }); }
+                signed = await signer.sign({ agent, png, sha256: checked.sha256, variant });
+                url = signed?.url;
+            } catch (err) {
+                // the signer names its own reasons (no_api_key, mineskin_timeout, mineskin_rate_limited, ...): nothing is tried again
+                const reason = typeof err?.code === 'string' && /^[a-z_]{3,40}$/.test(err.code) ? err.code : 'signer_failed';
+                return failed(agent, reason, { sha256: checked.sha256, answer: clip(err?.message ?? err) });
+            }
             if (typeof url !== 'string' || !/^https:\/\/[^\s"]+$/.test(url)) return failed(agent, 'signer_gave_no_address', { sha256: checked.sha256 });
+            // where the texture now lives, outside the operator's network: PUBLIC, and said so wherever it is shown
+            const outside = typeof signed?.texture_url === 'string' ? { texture_url: signed.texture_url, texture_public: true, ...(signed.visibility ? { visibility_asked: signed.visibility } : {}) } : {};
             const skin_name = `genesis_${agent.toLowerCase()}`;
             const stopped = await run(`sr createcustom ${skin_name} "${url}" ${variant}`) ?? await run(`skin set ${skin_name} ${agent}`);
-            if (stopped) return failed(agent, stopped.reason, { sha256: checked.sha256, command: stopped.command.replace(/"[^"]*"/, '"<address>"'), answer: stopped.answer });
+            if (stopped) return failed(agent, stopped.reason, { sha256: checked.sha256, command: stopped.command.replace(/"[^"]*"/, '"<address>"'), answer: stopped.answer, ...outside });
             stats.applied++;
-            const result = { ok: true, agent, skin_name, variant, sha256: checked.sha256, at: new Date(clock.now()).toISOString() };
+            const result = { ok: true, agent, skin_name, variant, sha256: checked.sha256, at: new Date(clock.now()).toISOString(), ...outside };
             applied.set(agent, result);
             tell('skin_applied', { ...result, by: 'Operator', sent: true });
             return result;

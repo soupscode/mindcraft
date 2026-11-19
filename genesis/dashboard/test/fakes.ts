@@ -119,7 +119,7 @@ export function memoryStore() {
         async skinPut(record: any) { self.check(); self.skin_rows.set(record.agent, { ...record }); },
         async skin(agent: string) { self.check(); const row = self.skin_rows.get(agent); return row ? { ...row } : null; },
         async skins() { self.check(); return [...self.skin_rows.values()].map((row) => ({ ...row })); },
-        async skinState(agent: string, state: any, at: string, detail: string | null) { self.check(); const row = self.skin_rows.get(agent); if (row) Object.assign(row, { state, state_at: at, detail }); },
+        async skinState(agent: string, state: any, at: string, detail: string | null, more: any = {}) { self.check(); const row = self.skin_rows.get(agent); if (row) Object.assign(row, { state, state_at: at, detail, message: more.message ?? null, texture_url: more.texture_url ?? null }); },
         async skinClear(agent: string) { self.check(); return self.skin_rows.delete(agent); },
         async alerts() { self.check(); return self.alert_rows; },
         async digests(limit) { self.check(); return self.digest_rows.slice(0, limit); },

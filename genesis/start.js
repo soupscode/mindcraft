@@ -69,6 +69,9 @@ delete process.env[DATABASE_ENV];
 // the same for the RCON password (the skin service uses it): this process only
 const rcon_password = process.env.GENESIS_RCON_PASSWORD || '';
 delete process.env.GENESIS_RCON_PASSWORD;
+// and for the MineSkin API key (custom skins are signed there: genesis/skins/mineskin.js): this process only, never printed
+const mineskin_env = { GENESIS_MINESKIN_API_KEY: process.env.GENESIS_MINESKIN_API_KEY || '', GENESIS_MINESKIN_VISIBILITY: process.env.GENESIS_MINESKIN_VISIBILITY || '' };
+delete process.env.GENESIS_MINESKIN_API_KEY;
 const world_problems = checkWorld(settings, repo_root);
 const problems = [...checkSettings(settings), ...checkDatabaseUrl(database_url), ...checkProfiles(settings, repo_root), ...world_problems,
     // the bootstrap is only looked at once the world file itself reads cleanly
@@ -125,9 +128,12 @@ if (settings.genesis_planning?.enabled === true) {
     // agent skins: the dashboard hands a skin over, this process tells SkinsRestorer over RCON (never an agent)
     {
         const { startSkins, rconOnDemand } = await import('./skins/server.js');
+        const { mineSkinFromEnv } = await import('./skins/mineskin.js');
         const names = settings.profiles.map((profile) => JSON.parse(readFileSync(path.resolve(repo_root, profile), 'utf8')).name);
         const skins = startSkins({
             event_sink, agents: names,
+            // the only place anything is sent outside: one upload to MineSkin per skin the operator uploads (refused without the key)
+            signer: mineSkinFromEnv(mineskin_env),
             rcon: rcon_password ? rconOnDemand({ host: process.env.GENESIS_RCON_HOST || settings.host, port: Number(process.env.GENESIS_RCON_PORT || 25575), password: rcon_password }) : null,
         });
         extensions.push((socket, helpers) => skins.attach(socket, helpers));

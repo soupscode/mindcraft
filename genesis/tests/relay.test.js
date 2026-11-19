@@ -15,8 +15,7 @@ import { validateEvent, MESSAGE_TYPES, MESSAGE_STATES, REPLY_EXPECTED } from '..
 import { createRelay, RELAY_LIMITS, REJECT_REASONS } from '../relay/relay.js';
 import { templateLine, validateLine, lineProblem, lineMessages, lineSchema, parseLineReply, LINE_LIMITS } from '../relay/lines.js';
 import {
-    DECISION_LIMITS, DECISION_REASON_MAX, DECISIONS, decisionSchema, decisionProblem, parseDecisionReply, decisionMessages, cleanFacts, brokerDecisionLimits,
-} from '../relay/decisions.js';
+    DECISION_LIMITS, DECISION_REASON_MAX, DECISIONS, decisionSchema, decisionProblem, parseDecisionReply, decisionMessages, cleanFacts, brokerDecisionLimits, RULE_MARGIN_MS, modelWaitMs } from '../relay/decisions.js';
 import { startRelay, RELAY_EVENT_AGENT } from '../relay/server.js';
 import { SMALL_CALL_DEFAULTS, DECISION_CALL_DEFAULTS } from '../broker/broker.js';
 import { DESK_RULES } from '../relay/desk.js';
@@ -591,7 +590,7 @@ test('receiving a request with the model there: the MODEL decides with a small c
     assert.deepEqual(accept.data.body, { item: 'oak_log', count: 4, decided_by: 'planner' });
     assert.equal(accept.data.conv, asked.message.conv);
     assert.deepEqual(stateOf(felix, 'request_accepted'), [{
-        from: 'Arthur', msg_id: asked.message.msg_id, type: 'request', source: 'planner', item: 'oak_log', count: 4, decided_by: 'planner',
+        from: 'Arthur', msg_id: asked.message.msg_id, type: 'request', source: 'planner', answered_by: 'model', item: 'oak_log', count: 4, decided_by: 'planner',
         reason: 'Arthur builds the hall for all of us.', call_id: record.call_id,
     }]);
     assert.ok(!JSON.stringify(t.messages).includes('builds the hall for all of us'), 'the model\'s reason travelled in a message');
@@ -699,19 +698,93 @@ test('when the reply fails validation, the limit is spent or the model does not 
     await t.stop();
 });
 
-test('a request that expires while the model is asked is not answered, and "model_decisions": false leaves every decision to the code rule', async () => {
+test('a model that stays busy for the whole wait: the code rule answers in the last 15 seconds (accept what is spare, else decline), and the event says so', async () => {
+    assert.equal(RULE_MARGIN_MS, 15 * SECOND);
+    assert.deepEqual([modelWaitMs(120 * SECOND), modelWaitMs(120 * SECOND, 60 * SECOND), modelWaitMs(10 * SECOND), modelWaitMs(-5)], [105 * SECOND, 60 * SECOND, 8750, 0]);
+    // (one planning call may take ten minutes here, so that one call keeps the model busy; on the real system it is the other agents' calls, one after the other)
+    const t = await relayTown({ agents: ['Arthur', 'Felix'], inventories: { Felix: { oak_log: 10, bread: 5 } }, host: { broker: { call_timeout_ms: 10 * MINUTE } } }, { available: true });
+    await t.clock.advance(5 * SECOND);
+    const { Arthur: arthur, Felix: felix } = t.agents;
+    await felix.runtime.goals.setShortTerm('Felix', [], { reason: 'the test empties the queue', source: 'operator' });
+    // the model is busy with a long planning call for the whole life of the request: the decision never gets its turn
+    t.model.delay_ms = 10 * MINUTE;
+    const calls_before = t.model.requests.length;
+    arthur.runtime.operatorMessage('Operator_1', 'think about the hall for a while');
+    await t.clock.advance(100 * SECOND);
+    assert.equal(t.model.requests.length, calls_before + 1, 'the long planning call did not start');
+    const sent_at = t.clock.now();
+    // (the asker's line waits for the busy model too, for its own short while: then the template line is used)
+    const asking = arthur.runtime.messages().request('Felix', { item: 'oak_log', count: 4, reason: 'the hall walls' });
+    await t.clock.advance(104 * SECOND);
+    await settle();
+    assert.equal((await asking).ok, true);
+    assert.deepEqual(t.exchange(), ['Arthur>Felix request pending'], 'answered before the wait was over');
+    assert.equal(t.model.decision_requests.length, 0, 'the model was asked although it was busy');
+    await t.clock.advance(2 * SECOND);
+    await t.settleMessages();
+    // answered inside the last 15 seconds, by the code rule: the logs are spare (no goal in hand needs them, they are no kit)
+    assert.deepEqual(t.exchange(), ['Arthur>Felix request pending', 'Felix>Arthur accept delivered', 'Arthur>Felix request accepted']);
+    const accept = t.messages.find((event) => event.data.type === 'accept');
+    const answered_after = Date.parse(accept.ts ?? new Date(t.clock.now()).toISOString()) - sent_at;
+    assert.ok(answered_after >= 105 * SECOND && answered_after < 120 * SECOND, `answered ${answered_after / SECOND} s after the request`);
+    assert.deepEqual(accept.data.body, { item: 'oak_log', count: 4, decided_by: 'routine' });
+    const [detail] = stateOf(felix, 'request_accepted');
+    assert.deepEqual([detail.source, detail.answered_by, detail.rule_because, detail.decided_by, detail.call_id ?? null, detail.reason ?? null], ['routine', 'code_rule', 'decision_timeout', 'routine', null, null]); // (no decision in time: the desk's own clock and the broker's "model_busy" end at the same moment)
+    assert.equal(decisionCalls(t).filter((call) => call.outcome === 'ok').length, 0, 'a decision of the model was recorded');
+    assert.deepEqual(felix.runtime.messages().stats().rule_because, { decision_timeout: 1 });
+    assert.ok(felix.changes().some((change) => change.after.some((goal) => goal.option_id === 'give_items:Arthur:oak_log:4') && /accepted by the code rule/.test(change.reason)));
+    await t.stop();
+
+    // what the goal in hand still needs is not spare: declined by the code rule, with the reason
+    const busy = await relayTown({ agents: ['Arthur', 'Felix'], inventories: { Felix: { oak_log: 5, bread: 5 } } }, { available: false });
+    const giver = busy.agents.Felix;
+    const desk = giver.runtime.messages();
+    assert.equal(desk.spareBeyondGoal('oak_log'), 5);
+    // Felix is in the middle of crafting planks from 4 of his 5 logs
+    busy.world.durations = () => 10 * MINUTE;
+    const pushed = await giver.runtime.goals.pushShortTerm('Felix', { title: 'Planks for the hall', option_id: 'craft_item:oak_planks:4' }, { reason: 'the operator asked', source: 'operator' });
+    giver.runtime.executor.noteGoals(pushed.goals.short_term, { source: 'operator' });
+    const crafting = giver.runtime.executor.runOnce();
+    await settle();
+    assert.equal(giver.runtime.executor.mainPlan()?.goal.option_id, 'craft_item:oak_planks:4');
+    assert.deepEqual([desk.spare('oak_log'), desk.spareBeyondGoal('oak_log'), desk.spareBeyondGoal('bread')], [5, 1, 5 - DESK_RULES.food_reserve]);
+    await busy.agents.Arthur.runtime.messages().request('Felix', { item: 'oak_log', count: 4 });
+    await busy.settleMessages();
+    assert.deepEqual(busy.messages.find((event) => event.data.type === 'decline').data.body, { item: 'oak_log', count: 4, decided_by: 'routine', why: 'needed_for_goal' });
+    assert.deepEqual(stateOf(giver, 'request_declined').map((d) => [d.source, d.answered_by, d.rule_because, d.why]), [['routine', 'code_rule', 'model_away', 'needed_for_goal']]);
+    // one log is spare: asked for one, it is given
+    await busy.agents.Arthur.runtime.messages().request('Felix', { item: 'oak_log', count: 1 });
+    await busy.settleMessages();
+    assert.deepEqual(busy.messages.filter((event) => event.data.type === 'accept').map((event) => event.data.body), [{ item: 'oak_log', count: 1, decided_by: 'routine' }]);
+    // what is promised is not spare a second time
+    assert.equal(desk.spareBeyondGoal('oak_log'), 0);
+    await busy.clock.advance(11 * MINUTE);
+    await crafting;
+    await busy.stop();
+});
+
+test('a decision the model is still writing when the wait ends: the code rule answers, the late reply is dropped; "model_decisions": false leaves every decision to the code rule', async () => {
     const t = await relayTown({ agents: ['Arthur', 'Felix'], inventories: { Felix: { oak_log: 10 } }, relay: { limits: { expiry_ms: 10 * SECOND } } }, { available: true });
     await t.clock.advance(5 * SECOND);
     const { Arthur: arthur, Felix: felix } = t.agents;
+    await felix.runtime.goals.setShortTerm('Felix', [], { reason: 'the test empties the queue', source: 'operator' });
     t.model.decision_delay_ms = 14 * SECOND; // slower than the request lives (and inside the call's own 15 seconds)
+    t.model.decisions.push({ decision: 'decline', reason: 'Too late to matter.' });
     const sent = await arthur.runtime.messages().request('Felix', { item: 'oak_log', count: 4 });
-    await t.clock.advance(11 * SECOND);
-    assert.deepEqual(t.exchange(), ['Arthur>Felix request pending', 'Arthur>Felix request expired']);
-    await t.clock.advance(10 * SECOND);
+    await t.clock.advance(8 * SECOND);
+    await settle();
+    assert.deepEqual(t.exchange(), ['Arthur>Felix request pending']);
+    // a request that lives 10 seconds: the code rule answers in its last eighth
+    await t.clock.advance(1 * SECOND);
     await t.settleMessages();
-    assert.deepEqual(t.exchange(), ['Arthur>Felix request pending', 'Arthur>Felix request expired'], 'an expired request was answered');
+    assert.deepEqual(t.exchange(), ['Arthur>Felix request pending', 'Felix>Arthur accept delivered', 'Arthur>Felix request accepted']);
+    assert.deepEqual(stateOf(felix, 'request_accepted').map((detail) => [detail.source, detail.answered_by, detail.rule_because]), [['routine', 'code_rule', 'decision_timeout']]);
+    // the model's reply arrives after the answer: nothing more is said, nothing is answered twice
+    await t.clock.advance(12 * SECOND);
+    await t.settleMessages();
+    assert.equal(t.exchange().length, 3, 'the late decision of the model was sent as well');
     assert.equal(t.messageEvents('rejected').length, 0, 'the late answer was sent and rejected');
-    assert.ok(!felix.changes().some((change) => change.after.some((goal) => String(goal.option_id).startsWith('give_items:'))), 'a commitment was made for a request that had expired');
+    assert.equal(stateOf(felix, 'request_declined').length, 0);
     assert.equal(felix.runtime.messages().stats().deciding, 0);
     assert.equal(sent.ok, true);
     await t.stop();
@@ -865,11 +938,11 @@ test('ask_agent: the planner asks a named agent for what its build is short of, 
     // Arthur's plot wants oak planks, he holds none and no chest has any: asking for them is on offer
     // (two agents at a time; when his process started Felix was not in the world yet, so the world file's order decided)
     const offered = t.model.requests[0].format.properties.goals.items.properties.option_id.enum;
-    // (decided: an agent may ask for ANYTHING the catalog knows. After what its own work is short of comes one more ask, for something else it has none of)
-    assert.deepEqual(offered.filter((id) => id.startsWith('ask_agent:')), ['ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:oak_log:4']);
+    // (decided: an agent may ask for ANYTHING the catalog knows. After what its own work is short of comes one more ask, for something else it has none of) (which one depends on the hour and on how many items the catalog knows: three door recipes were added)
+    assert.deepEqual(offered.filter((id) => id.startsWith('ask_agent:')), ['ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:stick:4']);
     // with Felix in sight, he comes first
     assert.deepEqual(createCatalog({ zones: t.zones, blueprints: BLUEPRINTS }).offer(arthur.runtime.state()).map((option) => option.id).filter((id) => id.startsWith('ask_agent:')),
-        ['ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:oak_log:4']);
+        ['ask_agent:Felix:oak_planks:8', 'ask_agent:Mira:oak_planks:8', 'ask_agent:Felix:stick:4']);
     assert.ok(!offered.some((id) => id.startsWith('build_blueprint:')), 'the build was on offer although the planks are missing');
     assert.match(t.model.requests[0].messages.at(-1).content, /ask_agent:Felix:oak_planks:8: Ask Felix for 8 oak_planks \(for plot plot-1\): Felix may say no/);
     // Felix's own work is short of nothing: what he is offered to ask for is only the "anything else" kind (4 at a time), never the planks
@@ -1105,7 +1178,7 @@ test('the relay in the MindServer decides only what waits for that agent\'s answ
     // Felix asks about the request that waits for his answer: decided
     assert.deepEqual(await felix.decide(about), { ok: true, decision: 'decline', reason: 'Not today.', call_id: 'call-9' });
     assert.equal(asked.length, 1);
-    assert.deepEqual([asked[0].agent, asked[0].kind, asked[0].trigger.kind, asked[0].max_tokens, asked[0].timeout_ms, asked[0].wait_ms], ['Felix', 'message_decision', 'message_decision', 50, 15 * SECOND, 120 * SECOND]); // the whole life of the message
+    assert.deepEqual([asked[0].agent, asked[0].kind, asked[0].trigger.kind, asked[0].max_tokens, asked[0].timeout_ms, asked[0].wait_ms], ['Felix', 'message_decision', 'message_decision', 50, 15 * SECOND, 105 * SECOND]); // the life of the message, less the 15 seconds kept for the code rule
     assert.deepEqual(asked[0].format, decisionSchema());
     // the prompt is built from the message as the relay holds it; of what the agent says about itself only the known facts get in
     const prompt = asked[0].messages.map((message) => message.content).join('\n');

@@ -2,7 +2,8 @@
 # Genesis: ONE command that brings the whole stack up on the Genesis VM, from a fresh clone
 # and the env file. No tracked file is edited, no question is asked.
 #
-#   genesis/up.sh --init            write a new env file (generated secrets, empty values for what only you can supply); never overwrites one
+#   genesis/up.sh --init            write a new env file (generated secrets, empty values for what only you can supply); never overwrites one:
+#                                   to a file that is there it only ADDS the keys it does not have yet, empty (no line of it is changed)
 #   genesis/up.sh                   bring everything up; run again on a healthy stack it changes nothing and says so
 #   genesis/up.sh --model on|off    switch the model on or off (off: routines only), without a rebuild
 #   genesis/up.sh --test-alert      send ONE harmless test push to the phone, through the alerter's own path
@@ -51,7 +52,16 @@ helper() {
 
 # ---- --init ----
 if [ "$MODE" = "init" ]; then
-    if [ -e "$ENV_FILE" ]; then echo "$ENV_FILE is already there. Nothing was written."; exit 1; fi
+    if [ -e "$ENV_FILE" ]; then
+        # a file that is there is never overwritten: only the keys a newer version knows and it lacks are added, empty
+        # (the helper reads the file's text and is given neither the run folder nor the file's values as its environment)
+        added="$(docker run --rm -i -u "$(id -u):$(id -g)" -v "$REPO:/repo:ro" "$NODE_IMAGE" node /repo/genesis/tools/stack.js missing-keys < "$ENV_FILE" 2> /dev/null)" \
+            || { echo "$ENV_FILE is already there, and what it lacks could not be worked out (is Docker running?). Nothing was written."; exit 1; }
+        if [ -z "$added" ]; then echo "$ENV_FILE is already there and has every key. Nothing was written."; exit 0; fi
+        printf '\n%s\n' "$added" >> "$ENV_FILE" || exit 1
+        echo "$ENV_FILE is already there: nothing in it was changed. Added, with empty or default values: $(printf '%s\n' "$added" | grep -o '^[A-Z0-9_]*=' | tr -d '=' | paste -sd' ' -)"
+        exit 0
+    fi
     mkdir -p "$(dirname "$ENV_FILE")" "$RUN_DIR" || exit 1
     ( umask 077; helper init > "$ENV_FILE" ) || { rm -f "$ENV_FILE"; echo "The env file could not be written (is Docker running?)."; exit 1; }
     chmod 600 "$ENV_FILE"
@@ -264,6 +274,11 @@ s_agents() {
         changed "agents restarted with new settings"
     fi
     rm -f "$RUN_DIR/settings.changed"
+    # every planner call is recorded: the agents' container must hold the database address (compose builds it
+    # from GENESIS_POSTGRES_PASSWORD by default). Only whether it is set is looked at; it is never printed.
+    dc agents run --rm --no-deps -T agents sh -c 'test -n "$GENESIS_DATABASE_URL"' > /dev/null 2>&1 \
+        || check_failed "the agents' container is given GENESIS_DATABASE_URL (without it no planner call is recorded): GENESIS_POSTGRES_PASSWORD must be set in the env file" || return 1
+    echo "planner calls are recorded in the database (genesis/status.sh shows the last hour's count)"
 }
 
 s_online() {

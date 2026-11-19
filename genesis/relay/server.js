@@ -26,7 +26,7 @@
 
 import { createRelay } from './relay.js';
 import { LINE_LIMITS, lineMessages, lineSchema, parseLineReply, validateLine } from './lines.js';
-import { DECISION_LIMITS, brokerDecisionLimits, decisionMessages, decisionSchema, parseDecisionReply, cleanFacts } from './decisions.js';
+import { DECISION_LIMITS, brokerDecisionLimits, decisionMessages, decisionSchema, parseDecisionReply, cleanFacts, modelWaitMs } from './decisions.js';
 import { createEmitter } from '../events/agent_emit.js';
 import { ROUTINES } from '../routines/routines.js';
 
@@ -74,9 +74,9 @@ export function createDecider({ broker, relay, roles = (agent) => ROUTINES[agent
             format: decisionSchema(),
             max_tokens: limits.max_tokens,
             timeout_ms: limits.timeout_ms,
-            // decided: behind a busy model the decision waits up to the message's expiry (it was 20 seconds, then the code rule).
-            // A message whose life ends while it waits expires unanswered, like any message nobody answered in time.
-            wait_ms: Math.max(0, Math.min(limits.wait_ms, (Date.parse(pending.expires_at) || 0) - clock.now())),
+            // decided: behind a busy model the decision waits until the last 15 seconds of the message's life; then the
+            // call is given up ("model_busy") and the agent's code rule answers in what is left.
+            wait_ms: modelWaitMs((Date.parse(pending.expires_at) || 0) - clock.now(), limits.wait_ms),
             validate: (raw) => parseDecisionReply(raw) !== null,
         });
         if (!result.ok) return { ok: false, reason: result.reason, call_id: result.call_id ?? null };

@@ -179,6 +179,8 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
             inventory: () => ({ ...body.inventory }),
             freeSlots: () => 36 - slotsUsed(body.inventory),
             dayTicksLeft: () => Math.max(0, 12000 - (world.ticks() % DAY_TICKS)),
+            timeOfDay: () => world.ticks() % DAY_TICKS,
+            daylightStopped: () => world.daylight_stopped === true,
             blockAt: (pos) => { refresh(); return seen(blocks.get(key(pos.x, pos.y, pos.z))) ?? { name: 'air' }; },
             findBlocks: (names, distance, count) => nearest(body, names, distance, count).map(seen),
             pathTo(pos) {
@@ -191,6 +193,7 @@ export function fakeWorld({ clock, start_tick = 1000 } = {}) {
                 }));
                 return { status: 'ok', nodes };
             },
+            ingredients: (item) => (RECIPES[item] ? { ...RECIPES[item].needs } : null),
             recipe(item) {
                 const recipe = RECIPES[item];
                 if (!recipe) return null;

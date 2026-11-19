@@ -408,6 +408,7 @@ test('bootstrap: with no world file it picks the site, writes the world file, le
     // decided: counts by kind of block per area. What was there before is WorldEdit's own distribution
     // of the selection, and it is what really stood there; what was laid is every cell that was not the block already
     let cleared = 0;
+    let strip_cleared = 0;
     for (const record of manifest.areas) {
         const was = before.get(record.id);
         const target = record.block.replace('minecraft:', '');
@@ -421,10 +422,13 @@ test('bootstrap: with no world file it picks the site, writes the world file, le
             assert.deepEqual(record.before.by_type, was, `${record.id}: the distribution before`);
             assert.equal(record.worldedit.affected, record.cells);
             if (record.kind === 'clear') cleared += to_change;
+            if (record.kind === 'clear' && record.zone.startsWith('camp.strip.')) strip_cleared += to_change;
         }
     }
     assert.equal(result.placed.cleared, cleared);
-    assert.equal(cleared, manifest.site.chosen.exact.to_clear, 'the selection counted what the levelling then cleared');
+    // (the strip one block outside the fence is levelled with the site, but is not part of what the selection scores)
+    assert.equal(cleared - strip_cleared, manifest.site.chosen.exact.to_clear, 'the selection counted what the levelling then cleared');
+    assert.ok(strip_cleared > 0, 'the strip outside the fence had something to clear on this land');
     // per box that changes: select (pos1, pos2), the distribution, the set; coordinates comma-separated with no spaces (seen in the game)
     const changed_boxes = manifest.areas.filter((record) => record.changed > 0);
     const sets = server.log.filter((command) => command.startsWith('//set '));
@@ -437,10 +441,10 @@ test('bootstrap: with no world file it picks the site, writes the world file, le
     assert.equal(server.log.filter((command) => /^\/\/(pos1|pos2|distr)/.test(command)).length, 1 + 3 * changed_boxes.length, 'the probe sets one position; each changed box three commands more');
     // the whole run: some hundreds of commands, not thousands
     assert.ok(result.commands.length < 1300, `${result.commands.length} commands`);
-    console.log(`    bootstrap on the stand-in's meadow with WorldEdit: ${site_commands} commands to pick the site; levelling ${result.placed.cleared + result.placed.floored} blocks in ${changed_boxes.length} of 14 boxes: ${server.log.filter((command) => command.startsWith('//')).length} WorldEdit commands, ${result.survey.commands} reading commands, ${result.commands.length} commands in all`);
+    console.log(`    bootstrap on the stand-in's meadow with WorldEdit: ${site_commands} commands to pick the site; levelling ${result.placed.cleared + result.placed.floored} blocks in ${changed_boxes.length} of 22 boxes: ${server.log.filter((command) => command.startsWith('//')).length} WorldEdit commands, ${result.survey.commands} reading commands, ${result.commands.length} commands in all`);
     assert.ok(lines.some((line) => /^Levelling with WorldEdit 7\.4\.6 from the console/.test(line)));
-    assert.ok(lines.some((line) => /^Levelled 1 of 14: camp cleared \(layers 65 to 88\): \d+ blocks changed/.test(line)), 'progress was not streamed');
-    assert.match(reportLines(result, { manifest_file: MANIFEST }).join('\n'), /Bootstrap PASSED[\s\S]*Levelled the site \(camp, field, plots\) with WorldEdit 7\.4\.6: \d+ blocks cleared/);
+    assert.ok(lines.some((line) => /^Levelled 1 of 22: camp cleared \(layers 65 to 88\): \d+ blocks changed/.test(line)), 'progress was not streamed');
+    assert.match(reportLines(result, { manifest_file: MANIFEST }).join('\n'), /Bootstrap PASSED[\s\S]*Levelled the site \(camp, field, plots, and the strip one block outside the fence\) with WorldEdit 7\.4\.6: \d+ blocks cleared/);
     assert.equal(server.forced.size, 0, 'the chunks were not given back');
 
     // a second run: nothing is levelled, nothing is changed, WorldEdit is not asked, the record is carried
@@ -502,7 +506,7 @@ test('bootstrap: a site the operator flattened himself passes untouched; chunks 
     const done = await runBootstrap({ config, rcon: flat, files: fakeFiles(), clock: fakeClock(), manifest_file: MANIFEST, blueprints: BLUEPRINTS, sleep: noSleep });
     assert.equal(done.ok, true, done.problems.join('; '));
     assert.deepEqual([done.placed.cleared, done.placed.floored], [0, 0]);
-    assert.ok(done.manifest.areas.length === 14 && done.manifest.areas.every((record) => record.status === 'nothing to change' && record.changed === 0));
+    assert.ok(done.manifest.areas.length === 22 && done.manifest.areas.every((record) => record.status === 'nothing to change' && record.changed === 0));
     assert.equal(flat.log.some((command) => /^\/\/set |^fill /.test(command)), false, 'a flat site was levelled again');
     assert.deepEqual(checkManifest(done.manifest, config), []);
 

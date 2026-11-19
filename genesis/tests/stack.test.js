@@ -150,7 +150,8 @@ test('--model on|off rewrites one line of the env file; the scripts parse, and r
     const env_file = path.join(dir, 'env');
     writeFileSync(env_file, 'GENESIS_MINECRAFT_EULA=\n');
     const init = spawnSync('bash', [script('up.sh'), '--init', '--env-file', env_file], { encoding: 'utf8', env: { ...process.env, GENESIS_RUN_DIR: path.join(dir, 'run') } });
-    assert.deepEqual([init.status, init.stdout.trim()], [1, `${env_file} is already there. Nothing was written.`]);
+    // (to a file that is there it only adds the keys it lacks, through the helper; here there is no Docker to run the helper)
+    assert.deepEqual([init.status, init.stdout.trim()], [1, `${env_file} is already there, and what it lacks could not be worked out (is Docker running?). Nothing was written.`]);
     assert.equal(readFileSync(env_file, 'utf8'), 'GENESIS_MINECRAFT_EULA=\n');
     // no env file: one plain line, nothing started
     const none = spawnSync('bash', [script('up.sh'), '--env-file', path.join(dir, 'missing')], { encoding: 'utf8', env: { ...process.env, GENESIS_RUN_DIR: path.join(dir, 'run') } });

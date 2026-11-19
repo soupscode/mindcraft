@@ -91,7 +91,7 @@ test('the world is announced as events: the zones of the world file and the summ
     assert.deepEqual(zones.agents.Felix, { home: [0, 64, 4], range: 128 });
     const summary = bootstrapSummary(done.manifest, config);
     assert.deepEqual([summary.verified, summary.attributed_to, summary.world_matches, summary.runs, summary.site.method, summary.blocks_placed, summary.items_placed], [true, 'Operator', true, 1, 'manual', 200, 8]);
-    assert.deepEqual([summary.levelling.boxes, summary.levelling.blocks_changed], [14, 1 + 625 + 81 + 1280]);
+    assert.deepEqual([summary.levelling.boxes, summary.levelling.blocks_changed], [22, 1 + 625 + 81 + 1280 + 104]); // 104: the strip one block outside the fence
     assert.deepEqual(summary.levelling.zones[0], { zone: 'camp', cleared: 1, floored: 625, status: 'filled' });
     assert.ok(summary.favours_agents.length >= 8 && summary.operator_must_set.length === 6);
     assert.equal(bootstrapSummary(done.manifest, { ...config, seed: '1' }).world_matches, false);

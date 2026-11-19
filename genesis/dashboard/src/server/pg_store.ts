@@ -180,12 +180,12 @@ export function createPgStore(pool: PgPool): Store {
 
         async skinPut(r) {
             await pool.query(
-                `INSERT INTO dashboard_skins (agent, png, width, height, bytes, sha256, variant, set_at, set_by, state, state_at, detail)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                `INSERT INTO dashboard_skins (agent, png, width, height, bytes, sha256, variant, set_at, set_by, state, state_at, detail, message, texture_url)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                  ON CONFLICT (agent) DO UPDATE SET png = EXCLUDED.png, width = EXCLUDED.width, height = EXCLUDED.height, bytes = EXCLUDED.bytes,
                     sha256 = EXCLUDED.sha256, variant = EXCLUDED.variant, set_at = EXCLUDED.set_at, set_by = EXCLUDED.set_by,
-                    state = EXCLUDED.state, state_at = EXCLUDED.state_at, detail = EXCLUDED.detail`,
-                [r.agent, r.png, r.width, r.height, r.bytes, r.sha256, r.variant, r.set_at, r.set_by, r.state, r.state_at, r.detail]);
+                    state = EXCLUDED.state, state_at = EXCLUDED.state_at, detail = EXCLUDED.detail, message = EXCLUDED.message, texture_url = EXCLUDED.texture_url`,
+                [r.agent, r.png, r.width, r.height, r.bytes, r.sha256, r.variant, r.set_at, r.set_by, r.state, r.state_at, r.detail, r.message ?? null, r.texture_url ?? null]);
         },
         async skin(agent) {
             const { rows } = await pool.query('SELECT * FROM dashboard_skins WHERE agent = $1', [agent]);
@@ -195,8 +195,9 @@ export function createPgStore(pool: PgPool): Store {
             const { rows } = await pool.query('SELECT * FROM dashboard_skins ORDER BY agent');
             return rows.map(skinRow);
         },
-        async skinState(agent, state, at, detail) {
-            await pool.query('UPDATE dashboard_skins SET state = $2, state_at = $3, detail = $4 WHERE agent = $1', [agent, state, at, detail]);
+        async skinState(agent, state, at, detail, more = {}) {
+            await pool.query('UPDATE dashboard_skins SET state = $2, state_at = $3, detail = $4, message = $5, texture_url = $6 WHERE agent = $1',
+                [agent, state, at, detail, more.message ?? null, more.texture_url ?? null]);
         },
         async skinClear(agent) {
             const { rows } = await pool.query('DELETE FROM dashboard_skins WHERE agent = $1 RETURNING agent', [agent]);
@@ -242,5 +243,6 @@ function skinRow(row: any): SkinRecord {
     return {
         agent: row.agent, png: Buffer.from(row.png), width: row.width, height: row.height, bytes: row.bytes, sha256: row.sha256, variant: row.variant,
         set_at: isoOf(row.set_at), set_by: row.set_by, state: row.state, state_at: isoOf(row.state_at), detail: row.detail ?? null,
+        message: row.message ?? null, texture_url: row.texture_url ?? null,
     };
 }

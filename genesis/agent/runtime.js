@@ -156,9 +156,13 @@ export function createAgentRuntime({
         // what the agent agreed with another agent is not the plan's to replace: an accepted hand-over stays queued
         keeps: (goal) => desk?.owes(goal) ?? false,
         held: () => executor?.isHeld() ?? false,
-        onGoals(queued, origin, { dropped = [] } = {}) {
-            idle_since = null;
+        onGoals(queued, origin, { dropped = [], stale = [] } = {}) {
+            if (queued.length > 0 || stale.length === 0) idle_since = null;
             executor.noteGoals(queued, origin);
+            // a goal of the reply that could no longer be started when the reply arrived: said, never queued, not a failure
+            for (const goal of stale) {
+                say('agent.state', { state: 'goal_not_started', detail: { option_id: goal.option_id, reason: goal.reason, source: 'planner', call_id: origin.call_id ?? null } }, { corr: null });
+            }
             for (const goal of dropped) {
                 say('agent.state', { state: 'goal_dropped', detail: { goal_id: goal.id, option_id: goal.option_id, reason: 'replaced_by_new_plan', source: 'planner', call_id: origin.call_id ?? null } },
                     { corr: null });
@@ -213,6 +217,8 @@ export function createAgentRuntime({
             catalog.release?.(end.option_id, state()); // whatever the goal had reserved in the chest ledger is free again
             desk?.goalEnded(end).catch(() => {});      // a hand-over that ended: the other agent is told
             if (end.origin === 'recovery') return; // a goal of a recovery detour is nobody's work
+            // what just failed is not offered again while nothing has changed (the planner asked for the same goal four times in a row)
+            if ((end.outcome === 'failed' || end.outcome === 'dropped') && end.source !== 'routine') planner.noteFailure?.(end.option_id, end.reason, end.title ?? null, end.outcome === 'dropped' ? 'not_started' : 'failed');
             last_worker = end.source === 'routine' ? 'routine' : 'planner';
             if (end.source === 'routine') routine?.goalEnded(end);
             // (decided: a patrol waypoint that could not be reached is skipped quietly: no incident)
@@ -460,6 +466,8 @@ export function createAgentRuntime({
             return true;
         },
         isHeld: () => executor.isHeld(),
+        // Is the agent on its routine right now? (a routine goal in hand, or nothing in hand while the model is away)
+        onRoutine: () => { const plan = executor.plan(); return plan ? plan.source === 'routine' : !planner.modelAvailable(); },
         lastThought: () => planner.lastThought(),
         stats: () => ({
             ...stats, ignored_by: Object.fromEntries(ignored_by), held: executor.isHeld(),

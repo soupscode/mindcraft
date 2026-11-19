@@ -6,6 +6,7 @@
 // parts it joins are tested with stand-ins (see genesis/tests).
 
 import { installGateKeeper } from '../lib/gate_keeper.js';
+import { installThreatModes } from '../lib/threat_modes.js';
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import * as skills from '../../src/agent/library/skills.js';
@@ -85,6 +86,8 @@ export async function buildBotRuntime(agent, settings) {
         relay_limits: settings.genesis_relay?.limits ?? {},
     });
 
+    // hostile mobs: fled from while on a routine, handled as upstream does on a goal the planner or the operator chose
+    if (bot.modes?.setOn) installThreatModes(bot, { onRoutine: () => runtime.onRoutine(), homeDistance: () => zones.distanceFromHome(agent.name, bot.entity.position), range: zones.range(agent.name) ?? Infinity });
     socket.on('genesis-plan-context', (request, ack) => runtime.onPlanContext(request, ack));
     socket.on('genesis-plan-queued', (message) => runtime.onPlanQueued(message));
     socket.on('genesis-plan-result', (result) => { runtime.onPlanResult(result).catch((err) => logLine({ event: 'genesis_plan_result_error', message: String(err?.message ?? err) })); });

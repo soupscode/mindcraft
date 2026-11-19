@@ -40,6 +40,11 @@ services:
       GENESIS_RCON_HOST: "${GENESIS_RCON_HOST:-minecraft}"
       GENESIS_RCON_PASSWORD: "${GENESIS_RCON_PASSWORD:-}"
       GENESIS_WORLDEDIT_WORLD: "${GENESIS_WORLDEDIT_WORLD:-world}"
+      # Custom skins: the API key of MineSkin (an outside service: an uploaded skin is sent there to be signed, and
+      # the texture's address is public). Empty: every upload is refused, nothing leaves the machine.
+      GENESIS_MINESKIN_API_KEY: "${GENESIS_MINESKIN_API_KEY:-}"
+      # what MineSkin is asked to do with the skin in its own listing: private (the default), unlisted or public
+      GENESIS_MINESKIN_VISIBILITY: "${GENESIS_MINESKIN_VISIBILITY:-private}"
     volumes:
       # genesis/up.sh points these at the run-time files it builds from the tracked templates and the
       # env file (no tracked file is edited); without it they are the tracked files themselves

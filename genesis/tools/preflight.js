@@ -148,6 +148,16 @@ async function checkUpstream() {
         has('upstream', await fromRoot('src/agent/commands/index.js'), ['addCommand'], 'commands');
         const { serverProxy } = await fromRoot('src/agent/mindserver_proxy.js');
         has('upstream', serverProxy, ['getSocket'], 'serverProxy');
+        // the two threat modes genesis/lib/threat_modes.js switches while an agent is on its routine: upstream's mode
+        // controller (it is put on bot.modes by initModes) and the modes themselves, with upstream's own defaults
+        try {
+            const modes_file = await fromRoot('src/agent/modes.js');
+            const fake_agent = { bot: {}, prompter: { getInitModes: () => null } };
+            modes_file.initModes(fake_agent);
+            const controller = fake_agent.bot.modes;
+            has('upstream', controller, ['setOn', 'isOn', 'exists'], 'bot.modes');
+            for (const name of ['cowardice', 'self_defense']) record('upstream', `mode ${name}`, controller?.exists?.(name) === true, controller?.exists?.(name) === true ? '' : 'upstream has no such mode');
+        } catch (err) { record('upstream', 'bot.modes (src/agent/modes.js, initModes)', false, brief(err)); }
         has('upstream', await fromRoot('src/mindcraft/mindserver.js'), ['setEventSink', 'setSocketExtension'], 'mindserver');
         has('upstream', await fromRoot('src/process/agent_process.js'), ['setRestartSupervisor'], 'agent_process');
         const pf = (await import('mineflayer-pathfinder')).default;
@@ -245,6 +255,10 @@ async function checkBot() {
             freeSlots: () => Number.isInteger(view.freeSlots()),
             inventory: () => typeof view.inventory() === 'object',
             dayTicksLeft: () => Number.isFinite(view.dayTicksLeft()),
+            // the planner is told the time of day from these (mineflayer's lib/plugins/time.js puts them on bot.time)
+            'timeOfDay, and bot.time has timeOfDay and doDaylightCycle': () => Number.isFinite(view.timeOfDay()) && typeof view.daylightStopped() === 'boolean' && 'timeOfDay' in bot.time && 'doDaylightCycle' in bot.time,
+            // (upstream loads its game data at login: before that its recipe helper has nothing, and the view answers null)
+            'ingredients never throws (null before login)': () => { const got = view.ingredients('oak_planks'); return got === null || typeof got === 'object'; },
             dimension: () => typeof view.dimension() === 'string',
             'canHarvest(stone) is false with empty hands': () => view.canHarvest('stone') === false,
             'canHarvest(dirt) is true with empty hands': () => view.canHarvest('dirt') === true,

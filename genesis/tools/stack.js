@@ -43,6 +43,7 @@ export const ENV_KEYS = Object.freeze([
     ['GENESIS_MINECRAFT_SIMULATION_DISTANCE', 'optional', 'chunks', '10'],
     ['GENESIS_DASHBOARD_BIND', 'optional', 'the address the dashboard is published on (0.0.0.0: every interface)', '0.0.0.0'],
     ['GENESIS_DASHBOARD_ALLOW', 'optional', 'addresses that may open the dashboard, comma-separated (empty: whoever reaches the port)', ''],
+    ['GENESIS_MINESKIN_API_KEY', 'operator-optional', 'optional: the API key of MineSkin (account.mineskin.org/keys). Only for custom skins: an uploaded skin is sent to MineSkin to be signed. Empty: uploads are refused.'],
     ['GENESIS_RCON_PASSWORD', 'secret', 'generated'],
     ['GENESIS_POSTGRES_PASSWORD', 'secret', 'generated'],
     ['GENESIS_NTFY_TOPIC', 'secret', 'generated: subscribe to it in the ntfy app; the name is the only protection'],
@@ -57,6 +58,22 @@ export function initEnvText({ random = (bytes) => randomBytes(bytes).toString('h
         else lines.push(`${key}=${fallback ?? ''}`);
     }
     return `${lines.join('\n')}\n`;
+}
+
+// What an env file that is already there lacks: the lines to append for every key it does not name yet (a key
+// added by a newer version, such as GENESIS_MINESKIN_API_KEY), each with its comment and its default or an empty
+// value. Secrets are never generated into a file that exists, and no line of it is changed.
+// Returns { keys: [...], text } (text is '' when nothing is missing).
+export function missingEnvText(existing = '') {
+    const have = new Set(String(existing).split(/\r?\n/).map((line) => /^\s*([A-Z0-9_]+)=/.exec(line)?.[1]).filter(Boolean));
+    const lines = [];
+    const keys = [];
+    for (const [key, kind, what, fallback] of ENV_KEYS) {
+        if (have.has(key) || kind === 'secret') continue;
+        keys.push(key);
+        lines.push(`# ${what}`, `${key}=${fallback ?? ''}`);
+    }
+    return { keys, text: lines.length > 0 ? `${lines.join('\n')}\n` : '' };
 }
 
 const filled = (value) => typeof value === 'string' && value.trim().length > 0;
@@ -90,6 +107,7 @@ export function checkEnv(env = {}) {
     need('GENESIS_RCON_PASSWORD', 'run genesis/up.sh --init for a new env file, or put any long random text here');
     need('GENESIS_POSTGRES_PASSWORD', 'run genesis/up.sh --init for a new env file, or put any long random text here');
     need('GENESIS_NTFY_TOPIC', 'the ntfy topic the alerter pushes to');
+    if (filled(env.GENESIS_MINESKIN_VISIBILITY) && !['private', 'unlisted', 'public'].includes(env.GENESIS_MINESKIN_VISIBILITY.trim())) problems.push('GENESIS_MINESKIN_VISIBILITY must be private, unlisted or public (empty: private)');
     for (const key of ['GENESIS_MINECRAFT_VIEW_DISTANCE', 'GENESIS_MINECRAFT_SIMULATION_DISTANCE']) {
         if (filled(env[key]) && !(Number.isInteger(Number(env[key])) && Number(env[key]) >= 2 && Number(env[key]) <= 32)) problems.push(`${key} must be a whole number from 2 to 32`);
     }
@@ -169,6 +187,13 @@ async function main(argv) {
     const env = process.env;
     switch (argv[0]) {
     case 'init': process.stdout.write(initEnvText()); return 0;
+    // the lines an existing env file (on stdin) lacks; the keys' names go to stderr
+    case 'missing-keys': {
+        const missing = missingEnvText(readFileSync(0, 'utf8'));
+        process.stdout.write(missing.text);
+        if (missing.keys.length > 0) console.error(missing.keys.join(' '));
+        return 0;
+    }
     case 'check-env': {
         const problems = checkEnv(env);
         for (const problem of problems) console.log(problem);

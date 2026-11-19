@@ -35,6 +35,7 @@ export const CROPS = Object.freeze({
 // What craft_item may be asked for: [item, how many times the recipe is made].
 export const CRAFT_ITEMS = Object.freeze([
     ['oak_planks', 4], ['birch_planks', 4], ['spruce_planks', 4], ['stick', 2], ['crafting_table', 1],
+    ['oak_door', 1], ['birch_door', 1], ['spruce_door', 1], // the shipped houses have a door (6 planks make 3)
     ['wooden_pickaxe', 1], ['wooden_axe', 1], ['wooden_hoe', 1], ['wooden_sword', 1],
     ['stone_pickaxe', 1], ['stone_axe', 1], ['stone_hoe', 1], ['stone_sword', 1],
     ['torch', 2], ['chest', 1], ['furnace', 1], ['bread', 1],

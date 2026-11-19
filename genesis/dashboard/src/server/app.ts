@@ -207,7 +207,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     // ---- the agents' skins (the operator uploads them; the skin service applies them) ----
     app.get('/api/skins', async (_request, reply) => {
         if (!skins) return reply.code(503).send({ error: 'skins are not configured' });
-        try { return { limits: SKIN_LIMITS, skins: await skins.list() }; } catch (err: any) { return reply.code(503).send({ error: String(err?.message ?? err) }); }
+        // signing: whether the MineSkin API key is set (never the key), and what a custom skin's texture address is: public
+        try { return { limits: SKIN_LIMITS, skins: await skins.list(), signing: await skins.signing() }; } catch (err: any) { return reply.code(503).send({ error: String(err?.message ?? err) }); }
     });
     app.get('/api/skins/:agent/image', async (request, reply) => {
         if (!skins) return reply.code(503).send({ error: 'skins are not configured' });
