@@ -281,16 +281,18 @@ async function main(argv) {
             return 1;
         }
     }
-    const world_file = planning.world_file || DEFAULT_WORLD_FILE;
+    const world_file = process.env.GENESIS_WORLD_FILE || planning.world_file || DEFAULT_WORLD_FILE;
     let seed = null;
     try { seed = String(JSON.parse(readFileSync(world_file, 'utf8')).seed ?? '') || null; } catch { /* the marker then names the file instead */ }
     const confirmed = argv.includes(RESET_FLAG);
-    const database = typeof planning.postgres_url === 'string' && planning.postgres_url.length > 0;
+    // the database address comes from the environment (decided), never from the settings file
+    const database_url = process.env.GENESIS_DATABASE_URL || '';
+    const database = database_url.length > 0;
     let pool = null;
     if (confirmed && database) {
         try {
             const pg = await import('../adapters/pg_stores.js');
-            pool = await pg.createPgPool({ url: planning.postgres_url });
+            pool = await pg.createPgPool({ url: database_url });
         } catch { /* reported by runReset as a failed statement */ }
     }
     const outcome = await runReset({

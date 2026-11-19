@@ -113,20 +113,22 @@ test('"the model is unreachable" chat failures do not alert while the gate is aw
     await alerter.tick();
     assert.equal(ntfy.pushes.length, 0);
     assert.equal(alerter.openAlerts().length, 0);
-    assert.equal(alerter.stats().suppressed.gate_away, 42);
+    // (decided: a model call that failed is in the history only, whatever the gate says: nobody is told)
+    assert.equal(alerter.queuedWarnings().length, 0);
 });
 
-test('with the gate open, a model failure is a warning; so is any other model error while it is away', async () => {
-    const { ntfy, make, alerter } = rig();
+test('decided: a model failure is never a warning, with the gate open or closed (warnings are only what an agent gave up on)', async () => {
+    const { ntfy, make, alerter, clock } = rig();
     await alerter.onEvent(make('planner', 'agent.state', { state: 'model_available', detail: {} }));
     await alerter.onEvent(modelDown(make));
     await alerter.onEvent(modelDown(make));
-    assert.equal(alerter.queuedWarnings().length, 1);
-    assert.equal(alerter.queuedWarnings()[0].occurrences, 2);
     await alerter.onEvent(make('planner', 'agent.state', { state: 'model_away', detail: {} }));
     await alerter.onEvent(make('Mira', 'agent.failure', { kind: 'model', error: 'ModelInvalidResponseError', message: 'not JSON' }, { severity: 'error' }));
-    assert.equal(alerter.queuedWarnings().length, 2);
-    assert.equal(ntfy.pushes.length, 0, 'a warning never pings by itself');
+    clock.advance(2 * HOUR_MS);
+    await alerter.tick();
+    assert.equal(alerter.queuedWarnings().length, 0);
+    assert.equal(alerter.openAlerts().length, 0);
+    assert.equal(ntfy.pushes.length, 0);
 });
 
 test('an agent the operator holds never alerts, until the hold is released', async () => {
@@ -161,44 +163,43 @@ test('warnings wait for the top of the hour and go out as ONE quiet push', async
     await alerter.tick();
     assert.equal(ntfy.pushes.length, 1);
     assert.equal(ntfy.pushes[0].priority, 'low');
-    assert.equal(ntfy.pushes[0].title, 'Genesis · 3 warnings');
-    assert.match(ntfy.pushes[0].body, /Arthur · Step parked · gave up\nMira · Step parked · gave up\nFelix · Model call failed · ModelUnavailableError ×2/);
+    assert.equal(ntfy.pushes[0].title, 'Genesis · 2 warnings');
+    assert.match(ntfy.pushes[0].body, /Arthur · Step parked · gave up\nMira · Step parked · gave up/);
+    assert.ok(!/Model call failed/.test(ntfy.pushes[0].body), 'a model failure is not a warning (decided)');
     assert.equal(pg.batches.length, 1);
 
     for (let i = 0; i < 180; i++) { clock.advance(60 * 1000); await alerter.tick(); }
     assert.equal(ntfy.pushes.length, 1, 'an hour with no new warning sends nothing, and nothing is sent twice');
 });
 
-test('an incident that recovers by itself is log only; one still open after 10 minutes, or recurring 5 times, is a warning', async () => {
+test('decided: warnings are ONLY what an agent gave up on: an incident still open, or recovering again and again, is log only', async () => {
     const { ntfy, make, alerter, clock } = rig();
     await alerter.onEvent(make('Felix', 'agent.failure', incident('i1', 'Felix', 'nav.stuck', 'detected'), { severity: 'warn' }));
     clock.advance(40 * 1000);
     await alerter.onEvent(make('Felix', 'agent.recovery', incident('i1', 'Felix', 'nav.stuck', 'resolved', { outcome: 'auto_recovered' })));
+    // still open after 10 minutes: was a warning, is not one any more
+    await alerter.onEvent(make('Mira', 'agent.failure', incident('i2', 'Mira', 'server.down', 'detected'), { severity: 'warn' }));
     clock.advance(20 * 60 * 1000);
     await alerter.tick();
-    assert.equal(alerter.queuedWarnings().length, 0);
-
-    await alerter.onEvent(make('Mira', 'agent.failure', incident('i2', 'Mira', 'server.down', 'detected'), { severity: 'warn' }));
-    clock.advance(10 * 60 * 1000);
-    await alerter.tick();
-    assert.deepEqual(alerter.queuedWarnings().map((alert) => alert.title), ['Mira · Server disconnect · still recovering']);
-
-    for (let i = 0; i < 4; i++) {
+    // the same thing recovering by itself 5 times in an hour: was a warning, is not one any more
+    for (let i = 0; i < 6; i++) {
         await alerter.onEvent(make('Felix', 'agent.failure', incident(`s${i}`, 'Felix', 'nav.stuck', 'detected'), { severity: 'warn' }));
         await alerter.onEvent(make('Felix', 'agent.recovery', incident(`s${i}`, 'Felix', 'nav.stuck', 'resolved', { outcome: 'auto_recovered' })));
     }
-    assert.match(alerter.queuedWarnings()[1].title, /Felix · Navigation stuck · 5 times in an hour/);
-    assert.equal(ntfy.pushes.length, 0);
+    clock.advance(HOUR_MS);
+    await alerter.tick();
+    assert.deepEqual([alerter.queuedWarnings().length, alerter.openAlerts().length, ntfy.pushes.length], [0, 0, 0]);
+    // what an agent gave up on IS a warning, and the only kind
+    await alerter.onEvent(make('Arthur', 'agent.failure', incident('g1', 'Arthur', 'step.parked', 'detected', { outcome: 'gave_up' }), { severity: 'warn' }));
+    assert.deepEqual(alerter.queuedWarnings().map((alert) => alert.title), ['Arthur · Step parked · gave up']);
 });
 
 test('a warning that turns critical stays one alert and pings once', async () => {
     const { ntfy, make, alerter, clock } = rig();
-    await alerter.onEvent(make('Mira', 'agent.failure', incident('i1', 'Mira', 'server.down', 'detected'), { severity: 'warn' }));
-    clock.advance(11 * 60 * 1000);
-    await alerter.tick();
+    await alerter.onEvent(make('Mira', 'agent.failure', incident('i1', 'Mira', 'step.parked', 'detected', { outcome: 'gave_up' }), { severity: 'warn' }));
     assert.equal(alerter.queuedWarnings().length, 1);
-    await alerter.onEvent(make('supervisor', 'agent.failure', escalated('i1', 'Mira', 'server.down'), { severity: 'error' }));
-    await alerter.onEvent(make('supervisor', 'agent.failure', escalated('i1', 'Mira', 'server.down'), { severity: 'error' }));
+    await alerter.onEvent(make('supervisor', 'agent.failure', escalated('i1', 'Mira', 'step.parked'), { severity: 'error' }));
+    await alerter.onEvent(make('supervisor', 'agent.failure', escalated('i1', 'Mira', 'step.parked'), { severity: 'error' }));
     assert.equal(alerter.openAlerts().length, 1);
     assert.equal(alerter.openAlerts()[0].severity, 'critical');
     assert.equal(ntfy.urgent().length, 1);
@@ -254,7 +255,7 @@ test('a push carries no address, token or free text of the event', async () => {
     clock.advance(HOUR_MS);
     await alerter.tick();
     const text = ntfy.text();
-    assert.equal(ntfy.pushes.length, 3);
+    assert.equal(ntfy.pushes.length, 2); // the two critical ones; the model failure is no alert at all (decided)
     for (const secret of ['192.168', '10.0.0.7', 'soups.lol', 'http', 'sk-abc', 'hunter2', 'example', 'Bearer', '11434', 'kicked']) {
         assert.ok(!text.includes(secret), `"${secret}" must not be in a push`);
     }
@@ -328,4 +329,22 @@ test('retention deletes only what is past its window: alerts 90 days, digests a 
     assert.deepEqual([...pg.digests.keys()], ['d364', 'd1']);
     assert.deepEqual([...pg.facts.keys()], ['f-kept']);
     assert.deepEqual(await runRetention(pg.store, clock), { alerts: 0, facts: 0, digests: 0 });
+});
+
+test('the test push goes through the alerter\'s own notifier once, says nothing is wrong, and leaves a closed record of how it went', async () => {
+    const { sendTestPush } = await import('../src/test_push.js');
+    const sent: any[] = [];
+    const saved: any[] = [];
+    let n = 0;
+    const rig2 = (result: string, enabled = true) => sendTestPush({
+        notifier: { enabled: () => enabled, send: async (push: any) => { sent.push(push); return result; } }, store: { saveAlert: async (alert: any) => { saved.push(alert); } },
+        ids: () => `id-${++n}`, clock: { now: () => Date.parse('2026-11-17T08:00:00.000Z') },
+    });
+    assert.deepEqual(await rig2('delivered'), { ok: true, line: 'Test push accepted by ntfy. If the phone stays silent, it is not subscribed to the topic.' });
+    assert.deepEqual([sent.length, sent[0].title, /Nothing is wrong/.test(sent[0].body)], [1, 'Genesis · test alert', true]);
+    assert.deepEqual([saved[0].kind, saved[0].severity, saved[0].push_state, saved[0].closed_at, saved[0].pushed_at], ['test', 'warning', 'sent', '2026-11-17T08:00:00.000Z', '2026-11-17T08:00:00.000Z']);
+    assert.equal((await rig2('refused')).ok, false);
+    assert.deepEqual([saved[1].push_state, saved[1].pushed_at], ['failed', null]);
+    assert.deepEqual(await rig2('delivered', false), { ok: false, line: 'Test push NOT sent: no ntfy topic is set (GENESIS_NTFY_TOPIC).' });
+    assert.equal(sent.length, 2, 'a push went out although no topic is set');
 });

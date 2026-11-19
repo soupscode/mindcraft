@@ -729,7 +729,7 @@ const YES = JSON.stringify({ decision: 'accept', reason: 'It can be spared.' });
 
 test('small calls: the decision is a kind of its own, with its own named hourly limit and token limit', async () => {
     assert.deepEqual([...SMALL_KINDS], ['chat_line', 'message_decision']);
-    assert.deepEqual({ ...DECISION_CALL_DEFAULTS }, { max_calls: 20, window_ms: 3600000, min_gap_ms: 0, timeout_ms: 15000, max_tokens: 80, wait_ms: 20000 });
+    assert.deepEqual({ ...DECISION_CALL_DEFAULTS }, { max_calls: 20, window_ms: 3600000, min_gap_ms: 0, timeout_ms: 15000, max_tokens: 80, wait_ms: 120000 });
     const h = await setupAvailable({ decision: { max_calls: 2 } });
     assert.deepEqual(h.broker.smallLimits('message_decision'), { ...DECISION_CALL_DEFAULTS, max_calls: 2 });
     assert.equal(h.broker.smallLimits('chat_line').max_calls, SMALL_CALL_DEFAULTS.max_calls);
@@ -812,6 +812,8 @@ test('small calls: a decision waits its turn behind a busy model, goes before th
     await h.clock.advance(91 * SECOND); // (past the 90 seconds between Arthur's calls: his call is out now)
     const calls = h.model.requests.length;
     let late = null;
+    // (decided: the wait is up to the message's expiry, 120 seconds; here a shorter one is set, as the relay does for a message with less life left)
+    h.broker.setSmallLimits('message_decision', { wait_ms: 20 * SECOND });
     decide(h.broker, 'Felix').then((result) => { late = result; });
     await h.clock.advance(19 * SECOND);
     assert.equal(late, null);

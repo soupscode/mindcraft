@@ -23,8 +23,11 @@
 //             with accept or decline and a short reason. That decision is recorded with source
 //             "planner". When the model is away, the agent's decision limit is spent, the call
 //             fails or the reply does not validate, the CODE RULE decides and is recorded with
-//             source "routine":
-//               request for items the agent carries   accept (the items are held beyond its reserve)
+//             source "routine" (answered_by "code_rule"). Decided: the same when the model stays busy until
+//             the last 15 seconds of the message's life: the code rule answers in what is left.
+//               request for items the agent carries   accept when they are SPARE: held beyond its kit, beyond
+//                                                     what its goal in hand still needs, and beyond what it
+//                                                     has promised; otherwise decline (why: needed_for_goal)
 //               offer                                 accept (there is room to carry the items)
 //               contested claim on a reservation      accept (the agent is not on its way to them)
 //             What cannot or must not be done is declined by code whoever would have decided,
@@ -48,14 +51,13 @@ import { KIT_FOOD } from '../routines/routines.js';
 import { clipText } from '../shared/events.js';
 import { GOAL_LIMITS } from '../store/goal_store.js';
 import { RELAY_LIMITS } from './relay.js';
-import { DECISIONS, DECISION_REASON_MAX } from './decisions.js';
+import { DECISIONS, DECISION_REASON_MAX, modelWaitMs } from './decisions.js';
 
 export const DESK_RULES = Object.freeze({
     food_reserve: KIT_FOOD.take,   // proposed: of its food an agent keeps this many (what a kit holds)
     send_timeout_ms: 5000,
-    decide_timeout_ms: 60 * 1000,  // proposed: how long the desk waits for the model's decision before the code rule decides
-                                   // (the asker's line, the wait for a busy model and the call itself come to 50 seconds
-                                   // at most; a request expires after 120)
+    decide_timeout_ms: 120 * 1000, // decided: the desk waits for the model's decision until the last 15 seconds of the message's
+                                   // life (genesis/relay/decisions.js, modelWaitMs): then the code rule answers. This is the longest it waits
 });
 
 // The messages a goal of the planner may send (ask_agent, offer_agent), and nothing else.
@@ -123,6 +125,16 @@ export function createMessageDesk({
         return catalog.keeps(item) ? 0 : held;
     }
 
+    // What the agent can part with beyond what it needs itself (decided, the code rule's test): what it holds, less
+    // its kit (spare), less what the goal in hand still uses of it (a craft's ingredients, a build's materials), less
+    // what it has already promised to others.
+    function spareBeyondGoal(item) {
+        const in_hand = executor.mainPlan()?.goal.option_id ?? null;
+        const for_goal = in_hand && !in_hand.startsWith('give_items:') ? catalog.needOf?.(in_hand, item, state()) ?? 0 : 0;
+        const promised = duties.reduce((n, duty) => n + (duty.item === item ? duty.count : 0), 0);
+        return Math.max(0, spare(item) - for_goal - promised);
+    }
+
     const giveId = (to, item, count) => `give_items:${to}:${item}:${count}`;
     const hasBody = (body) => typeof body?.item === 'string' && Number.isInteger(body.count) && body.count >= 1 && body.count <= 64;
 
@@ -161,7 +173,8 @@ export function createMessageDesk({
         const body = { ...(hasBody(message.body) ? { item: message.body.item, count: message.body.count } : {}), decided_by, ...more };
         stats[accepted ? 'accepted' : 'declined']++;
         say(accepted ? 'request_accepted' : 'request_declined', {
-            from: message.from, msg_id: message.msg_id, type: message.type, source: decided_by, ...body,
+            from: message.from, msg_id: message.msg_id, type: message.type, source: decided_by,
+            answered_by: decided_by === 'planner' ? 'model' : 'code_rule', ...body,
             ...(verdict?.reason ? { reason: clipText(verdict.reason, DECISION_REASON_MAX) } : {}),
             ...(verdict?.call_id ? { call_id: verdict.call_id } : {}),
             ...(verdict?.rule_because ? { rule_because: verdict.rule_because } : {}),
@@ -222,7 +235,10 @@ export function createMessageDesk({
                 resolve(decided ? { decision: got.decision, reason: got.reason, call_id: got.call_id ?? null }
                     : { rule_because: got?.ok === true ? 'invalid_reply' : String(got?.reason ?? 'no_answer'), call_id: got?.call_id ?? null });
             };
-            timer = clock.setTimeout(() => finish({ ok: false, reason: 'decision_timeout' }), rules.decide_timeout_ms);
+            // the model is waited for until the last 15 seconds of the message's life: then the code rule answers
+            const expires = Date.parse(message.expires_at);
+            const wait = Number.isFinite(expires) ? modelWaitMs(expires - clock.now(), rules.decide_timeout_ms) : rules.decide_timeout_ms;
+            timer = clock.setTimeout(() => finish({ ok: false, reason: 'decision_timeout' }), wait);
             try {
                 send('genesis-msg-decide', { agent, msg_id: message.msg_id, conv: message.conv, facts: factsFor(message) }, finish);
             } catch {
@@ -259,9 +275,12 @@ export function createMessageDesk({
         const decided_by = by_model ? 'planner' : 'routine';
         if (by_model) stats.decided_by_model++;
         else { stats.decided_by_rule++; stats.rule_because[verdict.rule_because] = (stats.rule_because[verdict.rule_because] ?? 0) + 1; }
-        // the code rule: what can be done is done (the items are beyond the reserve, there is room, the claim is not in use)
-        const accept = by_model ? verdict.decision === 'accept' : true;
-        if (!accept) return answer(message, false, decided_by, more, verdict);
+        // the code rule (decided): a request for carried items is accepted when they are SPARE: held beyond the agent's
+        // kit and beyond what its goal in hand still needs; otherwise it is declined. An offer is accepted when there
+        // is room, a claim when the stock is not in use (both were settled above).
+        const needed = !by_model && message.type === 'request' && !claim && spareBeyondGoal(body.item) < body.count;
+        const accept = by_model ? verdict.decision === 'accept' : !needed;
+        if (!accept) return answer(message, false, decided_by, needed ? { ...more, why: 'needed_for_goal' } : more, verdict);
         if (message.type === 'request' && !claim) {
             // accepting a request for carried items is a commitment: the hand-over is queued for the executor
             const duty = await commit(message.from, body, message, decided_by, true, verdict);
@@ -394,6 +413,7 @@ export function createMessageDesk({
         duties: () => duties.map((duty) => ({ to: duty.to, item: duty.item, count: duty.count })),
         waiting: () => [...mine.values()].map((message) => ({ ...message })),
         spare,
+        spareBeyondGoal,
         stats: () => ({ ...stats, rule_because: { ...stats.rule_because }, duties: duties.length, waiting: mine.size, deciding: inbox.size }),
     };
 }

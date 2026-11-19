@@ -8,6 +8,7 @@ WORKDIR /app/genesis/dashboard
 COPY genesis/dashboard/package.json genesis/dashboard/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY genesis/shared /app/genesis/shared
+COPY genesis/skins /app/genesis/skins
 COPY genesis/dashboard/tsconfig.json ./
 COPY genesis/dashboard/scripts/build.mjs ./scripts/build.mjs
 COPY genesis/dashboard/src ./src

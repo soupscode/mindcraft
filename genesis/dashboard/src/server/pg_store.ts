@@ -7,6 +7,7 @@
 // `pool` is a pg.Pool, or anything with query(text, values) -> Promise<{ rows, rowCount }>
 // and connect() -> client with query() and release().
 
+import type { SkinRecord } from './ports.js';
 import type { Entry, GenesisEvent } from '../shared/types.js';
 import { isIncidentEvent } from '../shared/fold.js';
 import type { ControlRecord, EventQuery, Store } from './ports.js';
@@ -177,6 +178,31 @@ export function createPgStore(pool: PgPool): Store {
 
         // ---- tables of other services (read only) ----
 
+        async skinPut(r) {
+            await pool.query(
+                `INSERT INTO dashboard_skins (agent, png, width, height, bytes, sha256, variant, set_at, set_by, state, state_at, detail, message, texture_url)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                 ON CONFLICT (agent) DO UPDATE SET png = EXCLUDED.png, width = EXCLUDED.width, height = EXCLUDED.height, bytes = EXCLUDED.bytes,
+                    sha256 = EXCLUDED.sha256, variant = EXCLUDED.variant, set_at = EXCLUDED.set_at, set_by = EXCLUDED.set_by,
+                    state = EXCLUDED.state, state_at = EXCLUDED.state_at, detail = EXCLUDED.detail, message = EXCLUDED.message, texture_url = EXCLUDED.texture_url`,
+                [r.agent, r.png, r.width, r.height, r.bytes, r.sha256, r.variant, r.set_at, r.set_by, r.state, r.state_at, r.detail, r.message ?? null, r.texture_url ?? null]);
+        },
+        async skin(agent) {
+            const { rows } = await pool.query('SELECT * FROM dashboard_skins WHERE agent = $1', [agent]);
+            return rows.length > 0 ? skinRow(rows[0]) : null;
+        },
+        async skins() {
+            const { rows } = await pool.query('SELECT * FROM dashboard_skins ORDER BY agent');
+            return rows.map(skinRow);
+        },
+        async skinState(agent, state, at, detail, more = {}) {
+            await pool.query('UPDATE dashboard_skins SET state = $2, state_at = $3, detail = $4, message = $5, texture_url = $6 WHERE agent = $1',
+                [agent, state, at, detail, more.message ?? null, more.texture_url ?? null]);
+        },
+        async skinClear(agent) {
+            const { rows } = await pool.query('DELETE FROM dashboard_skins WHERE agent = $1 RETURNING agent', [agent]);
+            return rows.length > 0;
+        },
         plannerCall: (call_id) => optional(null, async () => {
             const { rows } = await pool.query(
                 `SELECT call_id, request_id, agent, call_trigger, context, options_offered, raw_output, chosen_ids, valid, attempt,
@@ -209,5 +235,14 @@ export function createPgStore(pool: PgPool): Store {
         deleteEventsBefore: (cutoff) => remove('DELETE FROM dashboard_events WHERE ts < $1', cutoff),
         deleteIncidentEventsBefore: (cutoff) => remove('DELETE FROM dashboard_incident_events WHERE ts < $1', cutoff),
         deleteControlsBefore: (cutoff) => remove('DELETE FROM dashboard_controls WHERE at < $1', cutoff),
+    };
+}
+
+const isoOf = (value: unknown) => (value instanceof Date ? value.toISOString() : String(value));
+function skinRow(row: any): SkinRecord {
+    return {
+        agent: row.agent, png: Buffer.from(row.png), width: row.width, height: row.height, bytes: row.bytes, sha256: row.sha256, variant: row.variant,
+        set_at: isoOf(row.set_at), set_by: row.set_by, state: row.state, state_at: isoOf(row.state_at), detail: row.detail ?? null,
+        message: row.message ?? null, texture_url: row.texture_url ?? null,
     };
 }

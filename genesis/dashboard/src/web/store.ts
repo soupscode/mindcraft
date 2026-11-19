@@ -15,10 +15,12 @@ export interface ClientState {
     connected: boolean;
     loaded: boolean;
     last_control: Record<string, any> | null;
+    page_pills: PagePill[];          // what the page in view adds to the header's pills (the Skins page: its counts)
 }
+export interface PagePill { text: string; kind?: 'fail' | 'gold' | 'quiet' }
 
 export const client: ClientState = {
-    live: emptyState(), health: null, processes: null, roster: [], connected: false, loaded: false, last_control: null,
+    live: emptyState(), health: null, processes: null, roster: [], connected: false, loaded: false, last_control: null, page_pills: [],
 };
 
 const listeners = new Set<() => void>();
@@ -28,6 +30,13 @@ function changed() {
     scheduled = true;
     // many events in one moment redraw once
     requestAnimationFrame(() => { scheduled = false; for (const listener of [...listeners]) listener(); });
+}
+
+// The page in view says what it adds to the header's pills (an empty list when it leaves).
+export function setPagePills(pills: PagePill[]) {
+    if (JSON.stringify(pills) === JSON.stringify(client.page_pills)) return;
+    client.page_pills = pills;
+    changed();
 }
 
 export function useClient(): ClientState {

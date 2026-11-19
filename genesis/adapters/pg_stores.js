@@ -1,13 +1,28 @@
 // Genesis: the Postgres side of the call store, the goal storage and the checkpoint mirror.
 //
-// NOT RUN AGAINST A REAL POSTGRES: the test suite runs without node_modules and without a
-// database. The tests only check, with a recording stand-in for the pool, that every
+// The test suite runs without node_modules and without a database: it only checks, with a recording stand-in for the pool, that every
 // statement names the columns of genesis/store/migrations/*.sql and passes as many values
 // as it has placeholders. Needs the "pg" package, listed in genesis/package.json (the
 // Genesis image installs it; the root package.json does not have it).
 //
 // Every store takes a `pool` with query(text, values) -> Promise<{ rows }> (a pg.Pool).
-// The tables come from genesis/store/migrations/*.sql, which nothing here runs.
+// The tables come from genesis/store/migrations/*.sql, which runStoreMigrations() applies at
+// start: every statement in them is "IF NOT EXISTS", so running them again changes nothing.
+
+import { readdirSync, readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+export const MIGRATIONS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'store', 'migrations');
+
+// Applies every file of genesis/store/migrations in the order of the names. Idempotent.
+// Resolves to the names applied; rejects when the database refuses one (a file that failed is
+// simply run again next time).
+export async function runStoreMigrations(pool, { dir = MIGRATIONS_DIR, list = (folder) => readdirSync(folder), read = (file) => readFileSync(file, 'utf8') } = {}) {
+    const names = list(dir).filter((name) => name.endsWith('.sql')).sort();
+    for (const name of names) await pool.query(read(path.join(dir, name)));
+    return names;
+}
 
 // A pg.Pool for the address. Throws when the "pg" package is not installed.
 export async function createPgPool({ url, max = 4, connect_timeout_ms = 5000 } = {}) {

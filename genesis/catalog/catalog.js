@@ -24,7 +24,7 @@
 //
 // Depends only on other files of genesis/catalog.
 
-import { TEMPLATES, HANDOFF_TEMPLATES, MESSAGE_TEMPLATES } from './templates.js';
+import { TEMPLATES, HANDOFF_TEMPLATES, MESSAGE_TEMPLATES, buildNeeds, leadsTo, isMember } from './templates.js';
 import { STEP_NAMES, COMMON_FAILURES } from './ops.js';
 import {
     CATALOG_DEFAULTS, GATHER_TYPES, CROPS, CRAFT_ITEMS, NATURAL_BLOCKS, NATURAL_SUFFIXES, CLEARABLE_BLOCKS, KEEP_ITEMS, KEEP_SUFFIXES,
@@ -52,6 +52,8 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, 
         keep: (item) => keep_items.has(item) || KEEP_SUFFIXES.some((suffix) => item.endsWith(suffix)),
         // an item the catalog knows: something it gathers, crafts, sows or harvests
         known: (item) => known_items.has(item),
+        // every item the catalog knows, in the order of its tables
+        knownItems: () => [...known_items],
         // An agent wanted items another agent has reserved. Never throws.
         contested(claim) {
             if (quiet > 0 || !contested_hook) return;
@@ -69,13 +71,17 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, 
 
     const full = (state) => ({ avoid: [], now: null, ...state, zones, blueprints });
 
-    function makeOption(template, args, state) {
+    function makeOption(template, args, state, needs = null) {
+        // (what leads to the materials of the agent's own build says so: the model can choose it for that)
+        const for_build = leadsTo(template.name, args, needs, ctx);
         return {
             id: template.id(args),
             skill: template.name,
             args,
             title: template.title(args),
-            description: template.describe(args, state, ctx),
+            // (said first: a long description is cut at its end)
+            description: `${for_build ? "For your build: " : ""}${template.describe(args, state, ctx)}`,
+            ...(for_build ? { for_build: needs.plot } : {}),
         };
     }
 
@@ -99,19 +105,24 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, 
         }
     }
 
-    function collectFrom(templates, state, options, room) {
+    function collectFrom(templates, state, options, room, exclude = null) {
+        // decided: when the agent's build lacks materials, what leads to them (gathering, fetching, crafting) is
+        // offered first within its skill, so the way to a first build is always among the options
+        const needs = buildNeeds(state, ctx);
         for (const template of templates) {
             let taken = 0;
             let candidates;
             try { candidates = template.candidates(state, ctx); } catch { candidates = []; }
+            if (needs) candidates = [...candidates.filter((args) => leadsTo(template.name, args, needs, ctx)), ...candidates.filter((args) => !leadsTo(template.name, args, needs, ctx))];
             const seen = new Set();
             for (const args of candidates) {
                 if (taken >= (settings.per_skill[template.name] ?? 1) || options.length >= room) break;
                 const id = template.id(args);
                 if (seen.has(id)) continue;
                 seen.add(id);
+                if (exclude?.has(id)) continue; // just failed for a reason that has not changed: the next candidate takes its place
                 if (refusal(template, args, state) !== null) continue;
-                options.push(makeOption(template, args, state));
+                options.push(makeOption(template, args, state, needs));
                 taken++;
             }
         }
@@ -119,10 +130,10 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, 
 
     // The work first, then the messages the planner may send. The messages are few and their
     // places are kept free: a long list of work never pushes them off the offer.
-    function collect(state, options) {
+    function collect(state, options, exclude = null) {
         const messages = [];
-        collectFrom(MESSAGE_TEMPLATES, state, messages, settings.max_options);
-        collectFrom(work_templates, state, options, settings.max_options - messages.length);
+        collectFrom(MESSAGE_TEMPLATES, state, messages, settings.max_options, exclude);
+        collectFrom(work_templates, state, options, settings.max_options - messages.length, exclude);
         options.push(...messages);
     }
 
@@ -138,12 +149,13 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, 
         },
         // Only what can run now. At most max_options, at most per_skill[name] of one skill,
         // in a fixed order, so the same world gives the same list.
-        offer(agent_state) {
+        // exclude: option ids that are left out (what just failed: genesis/planning/agent_planner.js).
+        offer(agent_state, { exclude = null } = {}) {
             const state = full(agent_state);
             const options = [];
             quiet++;
             try {
-                collect(state, options);
+                collect(state, options, exclude instanceof Set && exclude.size > 0 ? exclude : null);
             } finally {
                 quiet--;
             }
@@ -158,6 +170,18 @@ export function createCatalog({ zones, blueprints = NO_BLUEPRINTS, config = {}, 
             const found = resolve(option_id);
             if (!found || typeof found.template.release !== 'function') return false;
             try { found.template.release(found.args, full(agent_state), ctx); return true; } catch { return false; }
+        },
+        // How many of `item` the goal with this option id still needs of what the agent carries (0 when it needs none,
+        // or when the skill does not say): a craft's ingredients, a build's materials, what is smelted, what is promised.
+        // Never throws.
+        needOf(option_id, item, agent_state) {
+            const found = resolve(option_id);
+            if (!found) return 0;
+            try {
+                if (found.template.name === 'smelt_item' || found.template.name === 'give_items') return found.args.item === item ? found.args.count : 0;
+                if (typeof found.template.needs !== 'function') return 0;
+                return found.template.needs(found.args, full(agent_state), ctx).reduce((n, need) => n + (isMember(need.want, item) ? need.count : 0), 0);
+            } catch { return 0; }
         },
         // { ok: true, option } when the preconditions hold now, else { ok: false, reason }.
         check(option_id, agent_state) {

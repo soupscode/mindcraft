@@ -19,7 +19,9 @@ import { Trace } from './views/Trace';
 import { Controls } from './views/Controls';
 import { Digest } from './views/Digest';
 import { Routines } from './views/Routines';
-import { Memory, Repair, World } from './views/Pending';
+import { Memory, Repair } from './views/Pending';
+import { World } from './views/World';
+import { Skins } from './views/Skins';
 
 function currentPath(): { path: string; arg: string | null } {
     const hash = location.hash.replace(/^#/, '') || '/';
@@ -47,6 +49,7 @@ function App() {
             {path === '/routines' && <Routines />}
             {path === '/memory' && <Memory />}
             {path === '/world' && <World />}
+            {path === '/skins' && <Skins />}
             {path === '/repair' && <Repair />}
         </Shell>
     );

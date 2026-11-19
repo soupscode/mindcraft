@@ -544,8 +544,11 @@ test('server down for 10 minutes: every agent waits, reconnects unaided and resu
     await t.start({ available: false });
     await t.host.signal('desktop_leaving');
     t.world.durations = (command) => (command === 'breakBlockAt' ? 20 * SECOND : 2 * SECOND);
-    const events = [];
-    const supervisor = createRestartSupervisor({ clock, emit: (type, data, opts) => events.push({ type, data, ...opts }) });
+    const all_events = [];
+    const console_lines = [];
+    const supervisor = createRestartSupervisor({ clock, emit: (type, data, opts) => all_events.push({ type, data, ...opts }), say: (line) => console_lines.push(line) });
+    // the incident events, as before; the plain lines of the wait are agent.state events of their own (below)
+    const events = { filter: (fn) => all_events.filter((event) => event.type !== 'agent.state').filter(fn), [Symbol.iterator]: () => all_events.filter((event) => event.type !== 'agent.state')[Symbol.iterator]() };
     let server_up = true;
     const attempts = Object.fromEntries(NAMES.map((name) => [name, 0]));
     const logins = [];
@@ -598,9 +601,21 @@ test('server down for 10 minutes: every agent waits, reconnects unaided and resu
     const pauses = events.filter((event) => event.data.source.name === 'Felix' && event.data.phase === 'recovery_step').map((event) => event.data.delay_ms);
     assert.deepEqual(pauses.slice(0, 6), [5 * SECOND, 10 * SECOND, 20 * SECOND, 40 * SECOND, 60 * SECOND, 60 * SECOND]);
 
+    // decided: the wait is said in plain words, on the console and as an event, not left as an exit code
+    const waits = all_events.filter((event) => event.type === 'agent.state' && event.data.state === 'server_down_wait');
+    assert.ok(waits.length >= 4 * 8 && waits.every((event) => event.severity === 'info'));
+    assert.deepEqual([waits[0].data.detail.attempt, waits[0].data.detail.delay_ms, waits[0].data.detail.code], [1, 5 * SECOND, 65]);
+    assert.match(waits[0].data.detail.message, /^(Arthur|Mira|Felix|Nova) cannot reach the Minecraft server \(exit code 65\): this is a wait, not a crash\. Trying again in 5 s \(attempt 1, waiting 0 s so far, with no limit\)\.$/);
+    assert.equal(console_lines.length, waits.length);
+    assert.equal(console_lines[0], `Genesis: ${waits[0].data.detail.message}`);
+    assert.match(console_lines.at(-1), /Trying again in 60 s \(attempt \d+, waiting \d+ min so far, with no limit\)/);
+
     // ---- the server is back ----
     server_up = true;
     await clock.advance(90 * SECOND);
+    const back = all_events.filter((event) => event.type === 'agent.state' && event.data.state === 'server_back');
+    assert.deepEqual(back.map((event) => event.data.detail.agent).sort(), [...NAMES].sort());
+    assert.match(console_lines.at(-1), /is back in the game: the Minecraft server answered after \d+ min and \d+ attempt\(s\)\./);
     assert.deepEqual(logins.map((login) => login.name).sort(), [...NAMES].sort(), 'not every agent reconnected on its own');
     for (const login of logins) {
         assert.equal(login.resumed, true, `${login.name} did not resume from its checkpoint`);

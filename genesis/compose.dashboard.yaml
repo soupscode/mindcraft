@@ -41,12 +41,18 @@ services:
       GENESIS_DATABASE_URL: "postgres://genesis:${GENESIS_POSTGRES_PASSWORD:?set GENESIS_POSTGRES_PASSWORD}@postgres:5432/genesis"
       GENESIS_EVENT_STREAM: "genesis:events"
       GENESIS_MINDSERVER_URL: "${GENESIS_MINDSERVER_URL:-http://agents:8081}"
+      # addresses that may open the dashboard, comma-separated; empty: whoever reaches the port
+      DASHBOARD_ALLOW: "${GENESIS_DASHBOARD_ALLOW:-}"
       GENESIS_AGENTS: "${GENESIS_AGENTS:-Arthur:Builder,Mira:Farmer,Felix:Explorer,Nova:Merchant}"
     ports:
       - "${GENESIS_DASHBOARD_BIND:-0.0.0.0}:8080:8080"
+    # started only once both stores answer their health checks (seen on the first run: a refused
+    # connection was logged before the retry)
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     networks:
       - genesis
 
@@ -67,9 +73,13 @@ services:
       DIGEST_TZ: "${GENESIS_DIGEST_TZ:-America/Chicago}"
       DIGEST_HOUR: "18"
       GENESIS_AGENTS: "${GENESIS_AGENTS:-Arthur:Builder,Mira:Farmer,Felix:Explorer,Nova:Merchant}"
+    # started only once both stores answer their health checks (seen on the first run: a refused
+    # connection was logged before the retry)
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     networks:
       - genesis
 

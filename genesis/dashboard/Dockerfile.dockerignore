@@ -3,6 +3,7 @@
 !genesis
 genesis/*
 !genesis/shared
+!genesis/skins
 !genesis/dashboard
 genesis/dashboard/node_modules
 genesis/dashboard/dist

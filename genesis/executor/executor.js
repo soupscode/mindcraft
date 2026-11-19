@@ -48,6 +48,7 @@
 //
 // Depends only on other Genesis files.
 
+import { PATROL_OPTION } from '../catalog/zones.js';
 import { classifyFailure } from '../catalog/ops.js';
 import { createCheckpointer, CHECKPOINT_INTERVAL_MS } from '../store/checkpoint.js';
 import { createUlidFactory, clipText } from '../shared/events.js';
@@ -274,7 +275,9 @@ export function createExecutor({
     async function stepFailed(step, reason) {
         const failed = plan;
         stats.steps_failed++;
-        if (step.attempts < config.max_attempts && !isFinal(reason)) {
+        // decided: a walk to a patrol waypoint the routine chose is tried ONCE (the routine skips the waypoint)
+        const once = failed.source === 'routine' && PATROL_OPTION.test(failed.goal.option_id ?? '');
+        if (!once && step.attempts < config.max_attempts && !isFinal(reason)) {
             await boundary();
             return { kind: 'step_retry', step: step.i, reason, attempts: step.attempts, wait_ms: config.retry_gap_ms };
         }

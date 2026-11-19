@@ -26,7 +26,7 @@
 
 import { createRelay } from './relay.js';
 import { LINE_LIMITS, lineMessages, lineSchema, parseLineReply, validateLine } from './lines.js';
-import { DECISION_LIMITS, brokerDecisionLimits, decisionMessages, decisionSchema, parseDecisionReply, cleanFacts } from './decisions.js';
+import { DECISION_LIMITS, brokerDecisionLimits, decisionMessages, decisionSchema, parseDecisionReply, cleanFacts, modelWaitMs } from './decisions.js';
 import { createEmitter } from '../events/agent_emit.js';
 import { ROUTINES } from '../routines/routines.js';
 
@@ -59,7 +59,7 @@ export function createLineWriter({ broker, roles = (agent) => ROUTINES[agent]?.r
 //   { ok: false, reason, call_id? }                                the code rule of the agent decides:
 //       nothing_to_decide | model_away | model_busy | budget_exhausted | invalid_reply | timeout | model_error | cancelled
 // It only ever decides a request or offer the relay itself holds as waiting for that agent's answer.
-export function createDecider({ broker, relay, roles = (agent) => ROUTINES[agent]?.role ?? null, limits = DECISION_LIMITS } = {}) {
+export function createDecider({ broker, relay, roles = (agent) => ROUTINES[agent]?.role ?? null, limits = DECISION_LIMITS, clock = { now: Date.now } } = {}) {
     return async function decide({ agent, msg_id, conv, facts } = {}) {
         const pending = typeof conv === 'string' ? relay.conversation(conv)?.pending ?? null : null;
         if (!pending || pending.msg_id !== msg_id || pending.to !== agent) return { ok: false, reason: 'nothing_to_decide' };
@@ -74,7 +74,9 @@ export function createDecider({ broker, relay, roles = (agent) => ROUTINES[agent
             format: decisionSchema(),
             max_tokens: limits.max_tokens,
             timeout_ms: limits.timeout_ms,
-            wait_ms: limits.wait_ms,
+            // decided: behind a busy model the decision waits until the last 15 seconds of the message's life; then the
+            // call is given up ("model_busy") and the agent's code rule answers in what is left.
+            wait_ms: modelWaitMs((Date.parse(pending.expires_at) || 0) - clock.now(), limits.wait_ms),
             validate: (raw) => parseDecisionReply(raw) !== null,
         });
         if (!result.ok) return { ok: false, reason: result.reason, call_id: result.call_id ?? null };
@@ -147,7 +149,7 @@ export function startRelay(relay_settings = {}, { agents = null, event_sink = nu
             if (broker && relay_settings?.model_decisions !== false) {
                 // the decision call's own hourly limit and token limit, as the genesis_relay.decision setting has them
                 broker.setSmallLimits?.('message_decision', brokerDecisionLimits(decision_limits));
-                decider = createDecider({ broker, relay, limits: decision_limits });
+                decider = createDecider({ broker, relay, limits: decision_limits, ...(clock ? { clock } : {}) });
             }
             if (ledger) {
                 relay.setOnRelayed((message, answered) => {

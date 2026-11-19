@@ -73,7 +73,12 @@ if (process.env.SETTINGS_JSON) {
 
 Mindcraft.init(false, settings.mindserver_port, settings.auto_open_ui, settings.mindserver_host);
 
+let genesis_first_agent = true;
 for (let profile of settings.profiles) {
+    // Genesis: with genesis_start_gap_ms set, the agents are started that far apart (a Paper server
+    // refuses several logins from one address within a few seconds). Unset: as before, all at once.
+    if (!genesis_first_agent && settings.genesis_start_gap_ms > 0) await new Promise((resolve) => setTimeout(resolve, settings.genesis_start_gap_ms));
+    genesis_first_agent = false;
     const profile_json = JSON.parse(readFileSync(profile, 'utf8'));
     settings.profile = profile_json;
     Mindcraft.createAgent(settings);

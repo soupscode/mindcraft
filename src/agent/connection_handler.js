@@ -46,6 +46,17 @@ export const log = (agentName, msg) => {
     try { sendOutputToServer(agentName || 'system', msg); } catch (_) {}
 };
 
+// Genesis: the text of a kick reason. It arrives as text, as a chat component ({ text, translate,
+// with, extra }) or as that component in NBT form ({ type, value }), which printed as "[object Object]".
+export function kickText(part, depth = 0) {
+    if (part === null || part === undefined || depth > 8) return '';
+    if (typeof part === 'string') return part;
+    if (typeof part !== 'object') return String(part);
+    if (Array.isArray(part)) return part.map((piece) => kickText(piece, depth + 1)).filter(Boolean).join(' ');
+    if ('value' in part && 'type' in part && Object.keys(part).length === 2) return kickText(part.value, depth + 1);
+    return [part.text, part.translate, part.with, part.extra].map((piece) => kickText(piece, depth + 1)).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+
 // Analyzes the kick reason and returns a full, human-readable sentence.
 export function parseKickReason(reason) {
     if (!reason) return { type: 'unknown', msg: 'Unknown reason (Empty)', isFatal: true };
@@ -64,7 +75,7 @@ export function parseKickReason(reason) {
     let fallback = raw;
     try {
         const obj = typeof reason === 'string' ? JSON.parse(reason) : reason;
-        fallback = obj.translate || obj.text || (obj.value?.translate) || raw;
+        fallback = kickText(obj) || raw;
     } catch (_) {}
     
     return { type: 'other', msg: `Disconnected: ${fallback}`, isFatal: true };

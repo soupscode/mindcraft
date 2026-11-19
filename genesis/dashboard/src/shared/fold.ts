@@ -11,13 +11,15 @@ import type {
 export const CAPS = Object.freeze({ goal_changes: 40, incidents: 150, messages: 240, decisions: 80, incident_steps: 24, agents: 32 });
 
 // Names that publish events but are not agents (genesis/planning/server.js, genesis/recovery/server.js).
-export const SERVICE_NAMES: readonly string[] = Object.freeze(['planner', 'supervisor']);
+export const SERVICE_NAMES: readonly string[] = Object.freeze(['planner', 'supervisor', 'world', 'skins', 'relay']);
 
 export function emptyState(roster: readonly string[] = []): LiveState {
     const state: LiveState = {
         cursor: null, last_event_at: null, agents: {},
         model: { state: 'unknown', since: null, reason: null },
         goal_changes: [], incidents: [], messages: [], decisions: [],
+        world: { zones: null, zones_at: null, bootstrap: null, bootstrap_at: null },
+        server: { waiting: {}, last_back: null },
     };
     for (const name of roster) state.agents[name] = emptyAgent(name);
     return state;
@@ -27,7 +29,7 @@ export function emptyAgent(name: string): AgentView {
     return {
         name, thought: null, short_term: [], long_term: [], short_change: null, long_change: null,
         plan: null, progress: null, mode: null, mode_since: null, held: null, parked: false, detour: false,
-        last_state: null, last_seen: null,
+        last_state: null, last_seen: null, routine: null, skin: null,
     };
 }
 
@@ -45,13 +47,12 @@ const goalList = (goals: unknown): Goal[] => (Array.isArray(goals)
     ? goals.slice(0, 3).map((g) => ({ id: text(g?.id) || undefined, title: text(g?.title, text(g?.option_id, '?')), option_id: text(g?.option_id) || undefined }))
     : []);
 
-// The planner's reply puts the model's own sentence into the reason of the goal change
-// (genesis/planning/agent_planner.js). A dropped goal carries it after a fixed prefix.
-const REPLACED_PREFIX = /^replaced by a new plan \(asked because: [^)]*\): /;
-const NO_THOUGHT = 'the planner chose';
-export function thoughtOf(reason: string): string | null {
-    const sentence = reason.replace(REPLACED_PREFIX, '').trim();
-    return sentence.length > 0 && sentence !== NO_THOUGHT ? sentence : null;
+// The model's own sentence is a field of its own on the goal change that carries the planner's
+// decision (decided: `thought`). Nothing is parsed out of a reason any more: an event without the
+// field (one written before it existed) simply has no thought.
+export function thoughtOf(data: Record<string, any> | null | undefined): string | null {
+    const sentence = typeof data?.thought === 'string' ? data.thought.trim() : '';
+    return sentence.length > 0 ? sentence : null;
 }
 
 function agentOf(state: LiveState, name: string): AgentView | null {
@@ -158,6 +159,20 @@ function foldMessage(state: LiveState, event: GenesisEvent): void {
 function foldAgentState(state: LiveState, agent: AgentView | null, event: GenesisEvent): void {
     const name = String(event.data.state);
     const detail = (event.data.detail ?? {}) as Record<string, any>;
+    // ---- what the services say (no agent of their own) ----
+    if (name === 'world_zones') { state.world.zones = detail; state.world.zones_at = event.ts; return; }
+    if (name === 'world_bootstrap') { state.world.bootstrap = detail; state.world.bootstrap_at = event.ts; return; }
+    if (name === 'server_down_wait' && typeof detail.agent === 'string') {
+        const before = state.server.waiting[detail.agent];
+        state.server.waiting[detail.agent] = { since: before?.since ?? event.ts, attempt: Number(detail.attempt) || 1, message: text(detail.message) };
+        return;
+    }
+    if (name === 'server_back' && typeof detail.agent === 'string') { delete state.server.waiting[detail.agent]; state.server.last_back = event.ts; return; }
+    if ((name === 'skin_applied' || name === 'skin_failed' || name === 'skin_cleared') && typeof detail.agent === 'string') {
+        const whose = state.agents[detail.agent];
+        if (whose) whose.skin = { state: name === 'skin_applied' ? 'applied' : name === 'skin_failed' ? 'failed' : 'cleared', at: event.ts, reason: text(detail.reason) || null };
+        return;
+    }
     if (name.startsWith('model_')) {
         const gate = name.slice('model_'.length);
         if (gate === 'available' || gate === 'leaving' || gate === 'away') {
@@ -168,6 +183,20 @@ function foldAgentState(state: LiveState, agent: AgentView | null, event: Genesi
         return;
     }
     if (!agent) return;
+    if (name === 'goals') {
+        // the agent's goals as it starts (decided: long-term goals are emitted as events)
+        agent.long_term = goalList(detail.long_term);
+        if (agent.short_change === null) agent.short_term = goalList(detail.short_term);
+        return;
+    }
+    if (name === 'routine') {
+        agent.routine = {
+            name: text(detail.name), phase: text(detail.phase), phases: Array.isArray(detail.phases) ? detail.phases.map(String).slice(0, 12) : [],
+            away: detail.away === true, parked: detail.parked === true, deaths: Number(detail.deaths) || 0,
+            bounds: detail.bounds && typeof detail.bounds === 'object' ? detail.bounds : null, at: event.ts,
+        };
+        return;
+    }
     agent.last_state = name;
     const plan = agent.plan;
     const mine = plan !== null && (detail.goal_id === undefined || detail.goal_id === null || detail.goal_id === plan.goal_id);
@@ -280,7 +309,7 @@ export function applyEvent(state: LiveState, event: GenesisEvent): void {
             agent[scope] = goalList(d.after);
             agent[scope === 'long_term' ? 'long_change' : 'short_change'] = { at: event.ts, reason, source };
             if (source === 'planner') {
-                const sentence = thoughtOf(reason);
+                const sentence = thoughtOf(d);
                 if (sentence) agent.thought = { text: sentence, at: event.ts, call_id: text(d.call_id) || null };
             }
             state.goal_changes.unshift({

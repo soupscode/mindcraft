@@ -43,6 +43,10 @@ export function createBotView(bot, { world, mc, pf, Vec3, now = Date.now, ...opt
         freeSlots: () => bot.inventory.emptySlotCount(),
         // daylight left, in game ticks: the day runs from tick 0 to tick 12000 (src/agent/agent.js lines 434-441)
         dayTicksLeft: () => Math.max(0, 12000 - (Number(bot.time?.timeOfDay ?? 0) % 24000)),
+        // the time of day in ticks (0 sunrise, 6000 noon, 12000 dusk), and whether the server has stopped the
+        // daylight cycle (mineflayer's bot.time.doDaylightCycle: false with "gamerule doDaylightCycle false")
+        timeOfDay: () => Number(bot.time?.timeOfDay ?? 0) % 24000,
+        daylightStopped: () => bot.time?.doDaylightCycle === false,
         blockAt(pos) {
             return seen(bot.blockAt(new Vec3(Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z))));
         },
@@ -83,6 +87,11 @@ export function createBotView(bot, { world, mc, pf, Vec3, now = Date.now, ...opt
             if ((bot.recipesFor(id, null, 1, null) ?? []).length > 0) return { craftable: true, needs_table: false };
             if ((bot.recipesFor(id, null, 1, true) ?? []).length > 0) return { craftable: true, needs_table: true };
             return { craftable: false, needs_table: false };
+        },
+        // What one making of the item uses up: { ingredient: count }, or null (the first recipe upstream lists:
+        // src/utils/mcdata.js getItemCraftingRecipes). Used to know what a craft goal in hand still needs.
+        ingredients(item) {
+            try { return mc.getItemCraftingRecipes(item)?.[0]?.[0] ?? null; } catch { return null; }
         },
         // What prismarine-block's canHarvest checks: no harvest tools listed, or one of them held.
         canHarvest(block_name) {

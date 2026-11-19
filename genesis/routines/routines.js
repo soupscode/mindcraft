@@ -196,6 +196,8 @@ export const ROUTINES = Object.freeze({
                     for (let tried = 0; tried < points.length; tried++) {
                         const index = ctx.patrol.index();
                         ctx.patrol.advance();
+                        // decided: a waypoint that could not be reached is not tried again in this away period
+                        if (ctx.patrol.blocked(index)) continue;
                         const option = ctx.option('travel', { place: `ring-${index}` });
                         if (option) return { option, why: `patrolling to waypoint ${index + 1} of ${points.length}` };
                     }

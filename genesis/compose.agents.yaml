@@ -4,9 +4,8 @@
 #   docker compose -f genesis/compose.agents.yaml up -d --build
 #
 # The world bootstrap runs from this image too, inside the Docker network, where RCON is:
-#   docker compose -f genesis/compose.agents.yaml run --rm -e GENESIS_RCON_PASSWORD \
-#       -e GENESIS_RCON_HOST=minecraft agents node genesis/world/bootstrap.js
-# (GENESIS_RCON_PASSWORD is taken from the shell that runs the command and is not kept anywhere.)
+#   docker compose --env-file /opt/genesis/.env -f genesis/compose.agents.yaml run --rm agents node genesis/world/bootstrap.js
+# (GENESIS_RCON_PASSWORD comes from the .env file, as below.)
 #
 # Settings live in genesis/settings.json and the profiles in genesis/profiles/.
 # Both are mounted read-only, so editing them needs a restart, not a rebuild.
@@ -28,21 +27,35 @@ services:
       # Saved memory loads on start. For a full reset start, run once with
       #   GENESIS_LOAD_MEMORY=false docker compose -f genesis/compose.agents.yaml up -d
       GENESIS_LOAD_MEMORY: "${GENESIS_LOAD_MEMORY:-true}"
+      # The world file lives in the mounted ./bots folder, next to the bootstrap manifest: the
+      # bootstrap writes it there when it picks the site (or genesis/tools/place_world.js does).
+      GENESIS_WORLD_FILE: "${GENESIS_WORLD_FILE:-./bots/genesis_world/genesis.world.json}"
+      # The agents' database: the dashboard's Postgres (genesis/compose.dashboard.yaml), so the
+      # dashboard's Decision trace shows every planner call. The address holds the password and is
+      # built here from the same GENESIS_POSTGRES_PASSWORD of the .env file; it is never written
+      # into genesis/settings.json. Without that variable this is empty and the agents keep
+      # planner calls, goals and checkpoints in memory and files only.
+      GENESIS_DATABASE_URL: "${GENESIS_AGENTS_DATABASE_URL:-${GENESIS_POSTGRES_PASSWORD:+postgres://genesis:${GENESIS_POSTGRES_PASSWORD}@postgres:5432/genesis}}"
+      # RCON, for the skin service (and for the bootstrap when it is run from this image)
+      GENESIS_RCON_HOST: "${GENESIS_RCON_HOST:-minecraft}"
+      GENESIS_RCON_PASSWORD: "${GENESIS_RCON_PASSWORD:-}"
+      GENESIS_WORLDEDIT_WORLD: "${GENESIS_WORLDEDIT_WORLD:-world}"
+      # Custom skins: the API key of MineSkin (an outside service: an uploaded skin is sent there to be signed, and
+      # the texture's address is public). Empty: every upload is refused, nothing leaves the machine.
+      GENESIS_MINESKIN_API_KEY: "${GENESIS_MINESKIN_API_KEY:-}"
+      # what MineSkin is asked to do with the skin in its own listing: private (the default), unlisted or public
+      GENESIS_MINESKIN_VISIBILITY: "${GENESIS_MINESKIN_VISIBILITY:-private}"
     volumes:
-      - ./settings.json:/app/genesis/settings.json:ro
-      - ./profiles:/app/genesis/profiles:ro
+      # genesis/up.sh points these at the run-time files it builds from the tracked templates and the
+      # env file (no tracked file is edited); without it they are the tracked files themselves
+      - ${GENESIS_SETTINGS_PATH:-./settings.json}:/app/genesis/settings.json:ro
+      - ${GENESIS_PROFILES_PATH:-./profiles}:/app/genesis/profiles:ro
       # agent memory, histories and logs (same folder the upstream compose file mounts);
       # the Genesis checkpoints go there too (bots/genesis_checkpoints)
       - ../bots:/app/bots
-      # The Genesis decision loop ("genesis_planning" in settings.json) needs the world config:
-      # the seed, the camp, the field, the plots, each agent's home and range, and the rules.
-      # Copy genesis.world.example.json to genesis.world.json, fill it in for the world that is
-      # running, then remove the "#" below. (While the file does not exist, leave the line
-      # commented out: Docker would create a folder in its place.)
-      # It also needs a bootstrapped world: run  node genesis/world/bootstrap.js  once against
-      # the Minecraft server. Its manifest lands in bots/genesis_world (mounted above), and the
-      # launcher refuses to switch planning on without it.
-      # - ./genesis.world.json:/app/genesis/genesis.world.json:ro
+      # The world file and the bootstrap manifest live in bots/genesis_world (mounted above):
+      # node genesis/world/bootstrap.js picks the site, writes both, and the launcher refuses to
+      # switch planning on without them.
     # The MindServer (port 8081) listens on every interface inside this container
     # ("mindserver_host": "0.0.0.0" in settings.json), so a container attached to the
     # same Docker network reaches it by service name:  http://agents:8081

@@ -68,6 +68,11 @@ export function checkManifest(manifest, config) {
     if (!(manifest.areas ?? []).some((record) => record?.kind === 'floor')) {
         problems.push('the bootstrap manifest has no record of the levelled camp (it was written before the bootstrap levelled the camp)');
     }
+    // decided after the first run: the strip one block outside the fence is levelled too. A manifest from before
+    // that has no record of it: the bootstrap is run again (it levels only the strip, once, and nothing built).
+    if ((manifest.areas ?? []).length > 0 && !(manifest.areas ?? []).some((record) => String(record?.zone ?? '').startsWith('camp.strip.'))) {
+        problems.push('the bootstrap manifest has no record of the strip outside the camp\'s fence (it was written before the bootstrap levelled it): run the bootstrap again');
+    }
     if (manifest.attributed_to !== OPERATOR || records.some((record) => record?.by !== OPERATOR)) {
         problems.push(`the bootstrap manifest attributes something to someone other than "${OPERATOR}"`);
     }

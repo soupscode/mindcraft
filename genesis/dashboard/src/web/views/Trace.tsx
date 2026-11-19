@@ -50,7 +50,8 @@ function TraceBody({ id }: { id: string }) {
     const routine = d.trigger === 'routine';
     const call = data.call;
     const change = data.goal_changes.find((event) => event.data.scope === 'short_term' && !String(event.data.reason).startsWith('replaced by')) ?? data.goal_changes[0] ?? null;
-    const thought = change ? thoughtOf(String(change.data.reason)) : null;
+    // the model's own sentence: the `thought` field of the goal change that carries the planner's decision
+    const thought = data.goal_changes.map((event) => thoughtOf(event.data)).find((sentence) => sentence !== null) ?? null;
     const end = data.events.find((event) => event.type === 'agent.state' && /^goal_(completed|failed|abandoned|dropped)$|^routine_yielded$/.test(event.data.state));
     const offered: any[] = Array.isArray(call?.options_offered) ? call!.options_offered : [];
     const chosen: string[] = Array.isArray(call?.chosen_ids) ? call!.chosen_ids : [];

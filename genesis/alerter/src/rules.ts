@@ -2,25 +2,22 @@
 //
 //   CRITICAL  an incident that needs the operator (escalated, or needs_operator).
 //             (A store that is down for 60 seconds is the other critical alert: outage.ts.)
-//   WARNING   an incident that was given up without the operator being needed; an incident
-//             still open after 10 minutes; the same thing recovering by itself 5 times in an
-//             hour; an error-level failure that is not an incident (a model call that failed
-//             while the model should be there).
+//   WARNING   ONLY what an agent gave up on (decided): an incident whose outcome is "gave_up"
+//             and that does not need the operator. Nothing else is a warning any more: not an
+//             incident that is still open after a while, not the same thing recovering by
+//             itself again and again, not an error-level failure outside an incident.
 //   NEVER     the model going away or coming back, the desktop leaving, an agent the operator
-//             holds, an intended restart, anything with is_failure false; and a chat-call
-//             failure that only says "the model is unreachable" while the model gate is not
-//             open (those are emitted as error events by design).
+//             holds, an intended restart, anything with is_failure false.
 //   LOG ONLY  everything else: it is in the dashboard's history, nobody is told.
 
 import type { AlerterState, GenesisEvent, Severity } from './ports.js';
-import { kindLabel, safeErrorName, safeName } from './text.js';
+import { kindLabel, safeName } from './text.js';
 
 export type Verdict =
     | { action: 'none'; why: 'log_only' | 'expected' | 'held' | 'gate_away' | 'state' }
     | { action: 'gate'; gate: AlerterState['gate'] }
     | { action: 'hold'; agent: string; held: boolean }
     | { action: 'open'; severity: Severity; key: string; subject: string; kind: string; title: string }
-    | { action: 'watch'; key: string; subject: string; kind: string }        // an incident began: a warning if it stays open
     | { action: 'close'; key: string; subject: string; kind: string; recovered: boolean };
 
 export const isIncident = (event: GenesisEvent) =>
@@ -54,22 +51,9 @@ export function judge(event: GenesisEvent, state: AlerterState): Verdict {
             return { action: 'open', severity: 'critical', key, subject, kind, title: `${subject} · ${label} · needs operator` };
         }
         if (d.outcome === 'gave_up') return { action: 'open', severity: 'warning', key, subject, kind, title: `${subject} · ${label} · gave up` };
-        return { action: 'watch', key, subject, kind };
+        return { action: 'none', why: 'log_only' }; // an incident that is being recovered from: history only
     }
 
-    if (event.type === 'agent.failure') {
-        if (event.severity !== 'error') return { action: 'none', why: 'log_only' };
-        const subject = safeName(event.agent);
-        const error = safeErrorName(d.error);
-        // "the model is unreachable" while the gate is not known to be open is the normal state
-        if (d.kind === 'model' && d.error === 'ModelUnavailableError' && state.gate !== 'available') return { action: 'none', why: 'gate_away' };
-        if (state.held.includes(subject)) return { action: 'none', why: 'held' };
-        const kind = typeof d.kind === 'string' ? d.kind : 'failure';
-        return {
-            action: 'open', severity: 'warning', key: `failure:${subject}:${kindLabel(kind)}:${error ?? 'error'}`, subject, kind,
-            title: `${subject} · ${kindLabel(kind)}${error ? ` · ${error}` : ''}`,
-        };
-    }
-
+    // an error-level failure outside an incident (a model call that failed): history only (decided)
     return { action: 'none', why: 'log_only' };
 }

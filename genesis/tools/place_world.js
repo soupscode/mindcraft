@@ -1,5 +1,5 @@
 // Genesis: writes a world file (genesis.world.json) from the example, moved to the spot the
-// operator picked in his own world. The example (genesis/genesis.world.example.json) lays the
+// operator picked in his own world (by hand: the bootstrap does the same for the site it picks). The example (genesis/genesis.world.example.json) lays the
 // camp, the field and the plots out around the home point 0, 64, 0; this moves every
 // coordinate by the same amount, sets the seed, and checks the result with the same checks the
 // bootstrap and the launcher run. Nothing is sent to any server.
@@ -8,13 +8,14 @@
 //       x y z   where you stand, feet on the ground, in the middle of flat land: the "Block:" line
 //               of the F3 screen. The ground under your feet becomes the camp's floor.
 //       seed    the server's level-seed (a whole number)
-//   options:  --out <file>      default ./genesis/genesis.world.json
+//   options:  --out <file>      default GENESIS_WORLD_FILE, else ./genesis/genesis.world.json
 //             --example <file>  default ./genesis/genesis.world.example.json
 //             --force           replace a world file that is already there
 //
-// The land it needs, seen from that spot: about 35 blocks west, 46 east, 31 north and 30 south
-// (printed exactly at the end). Only the camp (25 by 25) is levelled by the bootstrap; the field
-// and the plots are used as the land lies, so pick flat ground.
+// This is the MANUAL OVERRIDE: without a world file the bootstrap picks the site itself
+// (genesis/world/site.js). The land it needs, seen from that spot: about 35 blocks west, 46 east,
+// 31 north and 30 south (printed exactly at the end). The bootstrap levels the camp, the field and
+// the plots; the land between them is used as it lies.
 //
 // Depends only on Node built-ins and genesis/world/world_config.js.
 
@@ -76,7 +77,7 @@ async function main(argv) {
         return 1;
     }
     const example_file = option('--example')?.[0] ?? './genesis/genesis.world.example.json';
-    const out_file = option('--out')?.[0] ?? './genesis/genesis.world.json';
+    const out_file = option('--out')?.[0] ?? process.env.GENESIS_WORLD_FILE ?? './genesis/genesis.world.json';
     if (existsSync(out_file) && !argv.includes('--force')) {
         console.error(`${out_file} is already there. Nothing was written. Add --force to replace it.`);
         return 1;

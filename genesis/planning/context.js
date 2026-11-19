@@ -54,14 +54,30 @@ export function estimatePromptTokens({ agent, context, options }) {
 //   options            what catalog.offer() returned (measured here, listed by the broker)
 // Returns { context, options: [{ id, description }], tokens: { total, memory_reserved, limit } }.
 // Lines are dropped, least important first, until the prompt fits; the options never are.
+// The time of day in words the model cannot misread. It was "Day, 8 min of light left" at time 1993 (two
+// hours after sunrise on the game's clock): true in real minutes, and read by the model as "night is near"
+// in every plan of the live run, in a world whose clock was stopped. Now: the part of the day, how long
+// until dusk against the length of a whole day, and plainly so when the time does not move.
+//   light: ticks of daylight left (0 at night)   time_of_day: 0 sunrise, 6000 noon, 12000 dusk, or null
+export function describeDaytime({ light, time_of_day = null, stopped = false } = {}) {
+    const tick = Number.isFinite(time_of_day) ? time_of_day : (light > 0 ? 12000 - light : 18000);
+    const part = tick < 5000 ? 'morning' : tick < 7000 ? 'midday' : tick < 11000 ? 'afternoon' : tick < 12000 ? 'dusk' : 'night';
+    if (stopped) return `It is ${part} and the time does not move in this world: ${part === 'night' ? 'it stays night' : 'it will not get dark'}.`;
+    if (part === 'night') return `It is night: morning in about ${Math.max(1, Math.round((24000 - tick) / 1200))} min.`;
+    const minutes = Math.max(1, Math.round(light / 1200));
+    if (part === 'dusk') return `It is dusk: dark in about ${minutes} min.`;
+    return `It is ${part}: ${minutes >= 5 ? 'plenty of daylight, ' : ''}dusk in about ${minutes} min (a whole day of light lasts 10 min).`;
+}
+
 export function buildPlanContext({
     agent, role = null, trigger = null, view, home_distance = null, long_term = [], last_outcome = null,
-    routine = null, memory = '', options = [],
+    recent_failures = [], routine = null, memory = '', options = [],
 } = {}) {
     const listed = planOptions(options);
     const position = view.position();
     const inventory = Object.entries(view.inventory()).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
     const light = view.dayTicksLeft();
+    const daytime = describeDaytime({ light, time_of_day: view.timeOfDay?.() ?? null, stopped: view.daylightStopped?.() === true });
     const memory_text = clip(memory, Math.floor(PROMPT_LIMITS.memory_tokens * CHARS_PER_TOKEN) - 10) || MEMORY_SLOT_EMPTY;
 
     // [importance, line]: 0 always stays
@@ -71,10 +87,16 @@ export function buildPlanContext({
         [0, `At ${Math.round(position.x)}, ${Math.round(position.y)}, ${Math.round(position.z)}`
             + `${Number.isFinite(home_distance) ? `, ${Math.round(home_distance)} blocks from home` : ''}. `
             + `Health ${Math.round(view.health())}/20, food ${Math.round(view.food())}/20, ${view.freeSlots()} free slots. `
-            + `${light > 0 ? `Day, ${Math.round(light / 1200)} min of light left` : 'Night'}.`],
+            + `${daytime}`],
     ];
+    // one short line on what just failed and why: it is not among the options until something changes
+    if (recent_failures.length > 0) {
+        lines.push([1, `Not offered again until something changes: ${recent_failures.map((entry) => `${clip(entry.title, 50)} (${entry.kind === 'not_started' ? 'could not be started' : 'failed'}: ${clip(entry.reason, 40)})`).join('; ')}.`]);
+    }
     if (last_outcome) {
-        lines.push([1, `Last goal: ${clip(last_outcome.title, 60)}: ${last_outcome.outcome}${last_outcome.reason ? ` (${clip(last_outcome.reason, 60)})` : ''}.`]);
+        // (a goal whose preconditions were gone when its turn came was not tried: it is not a failure)
+        const how = last_outcome.outcome === 'dropped' ? 'not started, it was no longer possible' : last_outcome.outcome;
+        lines.push([1, `Last goal: ${clip(last_outcome.title, 60)}: ${how}${last_outcome.reason ? ` (${clip(last_outcome.reason, 60)})` : ''}.`]);
     }
     if (long_term.length > 0) {
         lines.push([2, `Long-term goals: ${long_term.slice(0, 3).map((goal, i) => `${i + 1}) ${clip(goal.title, 60)}`).join('; ')}.`]);
@@ -109,7 +131,7 @@ export function describeTrigger(trigger) {
     switch (trigger?.kind) {
         // every goal that ends asks (also while others still wait): the planner is told which one it was
         case 'goal_complete': return detail.option_id
-            ? `a goal ended (${clip(detail.option_id, 40)}, ${clip(detail.outcome ?? 'completed', 12)}).`
+            ? `a goal ended (${clip(detail.option_id, 40)}, ${detail.outcome === 'dropped' ? 'not started' : clip(detail.outcome ?? 'completed', 12)}).`
             : 'the goals you had are finished.';
         case 'step_failed': return `a goal failed (${clip(detail.reason ?? 'unknown', 40)}).`;
         // (a death only asks when a goal the planner or the operator chose was given up over it: genesis/agent/runtime.js)

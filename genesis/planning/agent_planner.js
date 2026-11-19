@@ -46,6 +46,7 @@ import { GOAL_LIMITS } from '../store/goal_store.js';
 export const PLANNER_CLIENT_DEFAULTS = Object.freeze({
     grace_ms: 20 * 1000,          // how long an idle agent waits for a reply before it turns to its routine
     backoff_ms: 3 * 60 * 1000,    // after a call that failed or was discarded: no new request for this long
+    failed_memory_ms: 10 * 60 * 1000, // proposed: an option that failed is not offered again for this long, unless what it depends on changes
 });
 
 const GATE_AVAILABLE = 'AVAILABLE';
@@ -61,7 +62,7 @@ export function createAgentPlanner({
     for (const key of Object.keys(PLANNER_CLIENT_DEFAULTS)) {
         if (options[key] !== undefined) config[key] = options[key];
     }
-    const stats = { triggers: 0, requests: 0, kept: 0, held_back: 0, replies: 0, goals_queued: 0, goals_dropped: 0, refused: 0, discarded: 0, replaced: 0, send_failed: 0, on_hold: 0 };
+    const stats = { triggers: 0, requests: 0, kept: 0, held_back: 0, replies: 0, goals_queued: 0, goals_dropped: 0, stale: 0, withheld: 0, refused: 0, discarded: 0, replaced: 0, send_failed: 0, on_hold: 0 };
 
     let gate = 'AWAY';          // until the broker says otherwise
     let pending = null;         // { local_id, request_id, kind: 'plan', trigger, queued_at (ms), since (ms) }
@@ -70,6 +71,30 @@ export function createAgentPlanner({
     let last_thought = null;    // { text, at } the model's own sentence, from its last valid reply
     let last_failure = null;    // { reason, at } of the last request that brought no goals
     let counter = 0;
+    // What just could not be done: option id -> { reason, kind, title, at, stamp }.
+    //   kind 'failed'       it was tried and failed. Not offered again until what the reason depends on changes
+    //                       (stamp), or failed_memory_ms have passed.
+    //   kind 'not_started'  its preconditions were gone when its turn came (seen on the live run: the model chose
+    //                       to store planks that the routine had stored while the model was thinking, four times
+    //                       in a row). The world changed under the planner once already: not offered again for
+    //                       failed_memory_ms, whatever changes.
+    const failed = new Map();
+    // What a reason depends on, as text: for a reason about items, how many the agent holds of the item the
+    // option names (or everything it carries); for every other reason (no way there, out of range, a chest
+    // that is not reached), roughly where the agent stands.
+    const ITEM_REASONS = /held|missing|ingredient|material|fuel|seed|ledger|contested|full|claim/;
+    const stampOf = (option_id, reason, now_state) => {
+        try {
+            if (!ITEM_REASONS.test(String(reason))) {
+                const at = now_state.view.position();
+                return `at:${Math.round(at.x / 16)},${Math.round(at.z / 16)}`;
+            }
+            const inventory = now_state.view.inventory();
+            const item = catalog.resolve?.(option_id)?.args?.item ?? null;
+            if (item) return `held:${item}:${inventory[item] ?? 0}`;
+            return JSON.stringify(Object.entries(inventory).filter(([, count]) => count > 0).sort());
+        } catch { return ''; }
+    };
     // a goal a reply leaves where it is: the goal in hand, and what the agent agreed with another agent
     const stays = (goal) => { try { return goal.id === inHand() || keeps(goal) === true; } catch { return goal.id === inHand(); } };
 
@@ -84,6 +109,16 @@ export function createAgentPlanner({
             stats.send_failed++;
             pending = null; // not connected: the next trigger tries again
         }
+    }
+
+    // A goal failed, or could not be started any more: it is not offered again while nothing it depends on has changed.
+    function noteFailure(option_id, reason, title = null, kind = 'failed') {
+        if (typeof option_id !== 'string' || option_id.length === 0) return;
+        let stamp = '';
+        try { stamp = stampOf(option_id, reason, state()); } catch { /* remembered without the stamp */ }
+        failed.delete(option_id);
+        failed.set(option_id, { reason: String(reason ?? 'failed'), kind: kind === 'not_started' ? 'not_started' : 'failed', title: title ?? option_id, at: clock.now(), stamp });
+        if (failed.size > 12) failed.delete(failed.keys().next().value);
     }
 
     return {
@@ -121,13 +156,22 @@ export function createAgentPlanner({
         onContextRequest(request, ack) {
             try {
                 const now_state = state();
-                const options = catalog.offer(now_state);
+                // what could not be done a moment ago, for a reason that has not changed, is not offered again (the same
+                // goal was chosen four times in a row on the live run): its place goes to the next candidate
+                for (const [id, entry] of failed) {
+                    const changed = entry.kind === 'failed' && entry.stamp !== stampOf(id, entry.reason, now_state);
+                    if (changed || clock.now() - entry.at > config.failed_memory_ms) failed.delete(id);
+                }
+                let options = catalog.offer(now_state, { exclude: new Set(failed.keys()) });
+                if (options.length === 0 && failed.size > 0) options = catalog.offer(now_state); // rather the same again than nothing
+                else stats.withheld += failed.size;
                 if (options.length === 0) { ack({ error: 'no_options: nothing can be started right now' }); return; }
                 const about = describe() ?? {};
                 const built = buildContext({
                     agent, role: about.role ?? null, trigger: request?.trigger ?? pending?.trigger ?? last_trigger,
                     view: now_state.view, home_distance: about.home_distance ?? null, long_term: about.long_term ?? [],
                     last_outcome: about.last_outcome ?? null, routine: about.routine ?? null, memory: about.memory ?? '', options,
+                    recent_failures: [...failed.values()].slice(-2).map((entry) => ({ title: entry.title, reason: entry.reason, kind: entry.kind })),
                 });
                 ack({ context: built.context, options: built.options, tokens: built.tokens });
             } catch (err) {
@@ -159,9 +203,25 @@ export function createAgentPlanner({
             stats.replies++;
             last_failure = null;
             last_thought = { text: String(result.reply?.thought ?? ''), at: clock.now() };
-            const wanted = (result.reply?.goals ?? []).slice(0, GOAL_LIMITS.short_term_max)
+            const wanted_all = (result.reply?.goals ?? []).slice(0, GOAL_LIMITS.short_term_max)
                 .map((goal) => ({ title: String(goal.title).slice(0, GOAL_LIMITS.title), option_id: goal.option_id }));
+            // The reply was made for the world as it was when the call went out, and the agent worked on meanwhile
+            // (its routine does not stand still): a goal that can no longer be started is left out here, quietly.
+            // It is not a failure and gets no turn (decided after the live run).
+            const stale = [];
+            let now_state = null;
+            try { now_state = state(); } catch { /* without the world nothing is left out: the executor checks at the start */ }
+            const wanted = now_state === null ? wanted_all : wanted_all.filter((goal) => {
+                let checked = null;
+                try { checked = catalog.check?.(goal.option_id, now_state) ?? null; } catch { checked = null; }
+                if (!checked || checked.ok !== false) return true;
+                stale.push({ ...goal, reason: checked.reason });
+                return false;
+            });
+            for (const goal of stale) noteFailure(goal.option_id, goal.reason, goal.title, 'not_started');
+            stats.stale += stale.length;
             const thought = last_thought.text.trim() || 'the planner chose';
+            const said = last_thought.text.trim() || null; // the model's own sentence: a field of its own on the change (decided)
             const why = asked_because ?? last_trigger?.kind ?? 'a new plan';
 
             // 1. the goals still waiting are replaced: each one goes with its own record
@@ -172,7 +232,7 @@ export function createAgentPlanner({
                 if (stays(goal)) continue; // the goal in hand is finished first; a commitment to another agent is not the plan's to drop
                 // (asked again inside the change: the executor may have taken this goal in hand a moment ago)
                 const gone = await goals.setShortTerm(agent, (queue) => queue.filter((queued) => queued.id !== goal.id || stays(queued)), {
-                    reason: `replaced by a new plan (asked because: ${why}): ${thought}`, source: 'planner', call_id: result.call_id,
+                    reason: `replaced by a new plan (asked because: ${why}): ${thought}`, source: 'planner', call_id: result.call_id, thought: said,
                 });
                 if (gone.ok) dropped.push(goal);
                 else if (gone.code !== 'no_change') return { kind: 'not_stored', code: gone.code, error: gone.error, dropped };
@@ -185,14 +245,14 @@ export function createAgentPlanner({
                 // a goal the reply names again while it is being carried out is not queued a second time
                 const fresh = wanted.filter((goal) => !kept.some((mine) => mine.option_id === goal.option_id)).slice(0, GOAL_LIMITS.short_term_max - kept.length);
                 return [...kept, ...fresh];
-            }, { reason: thought, source: 'planner', call_id: result.call_id });
+            }, { reason: thought, source: 'planner', call_id: result.call_id, thought: said });
             if (!change.ok && change.code !== 'no_change') return { kind: 'not_stored', code: change.code, error: change.error, dropped };
             const queued = change.ok ? change.goals.short_term : (await goals.get(agent)).goals?.short_term ?? [];
             // only the goals this reply put in are the planner's with this call id; the goal in hand keeps its own origin
             const added = change.ok ? queued.filter((goal) => !change.change.before.some((old) => old.id === goal.id)) : [];
             stats.goals_queued += added.length;
-            onGoals(added, { source: 'planner', call_id: result.call_id }, { dropped, kept: queued.length - added.length });
-            return { kind: 'goals', goals: queued, added, dropped, call_id: result.call_id };
+            onGoals(added, { source: 'planner', call_id: result.call_id }, { dropped, kept: queued.length - added.length, stale });
+            return { kind: 'goals', goals: queued, added, dropped, stale, call_id: result.call_id };
         },
         // The model gate changed. Returns { opened, closed }.
         onGate(message) {
@@ -208,6 +268,8 @@ export function createAgentPlanner({
             try { onGate({ state: next, before, opened, closed, reason: message?.reason ?? null }); } catch { /* the listener's problem */ }
             return { opened, closed };
         },
+        noteFailure,
+        recentFailures: () => [...failed.keys()],
         gate: () => gate,
         modelAvailable: () => gate === GATE_AVAILABLE,
         // True while an idle agent should wait a moment for its reply instead of starting routine

@@ -49,6 +49,24 @@ export interface ControlRecord {
     detail: string | null;
 }
 
+// An agent's skin as the dashboard keeps it (migrations/003_skins.sql).
+export interface SkinRecord {
+    agent: string;
+    png: Buffer;
+    width: number;
+    height: number;
+    bytes: number;
+    sha256: string;
+    variant: string;                        // classic | slim
+    set_at: string;
+    set_by: string;                         // always "Operator"
+    state: 'stored' | 'applied' | 'failed';
+    state_at: string;
+    detail: string | null;                  // why applying failed: the reason's short name (mineskin_rate_limited, no_api_key, ...)
+    message: string | null;                 // the same in the skin service's words
+    texture_url: string | null;             // where the signed texture lives outside (Mojang's texture server): PUBLIC
+}
+
 // Postgres. Every method rejects when the database cannot be reached.
 export interface Store {
     ping(): Promise<void>;
@@ -59,6 +77,12 @@ export interface Store {
     incidentEvents(since: Date): Promise<GenesisEvent[]>;
     insertControl(record: ControlRecord): Promise<void>;
     controls(limit: number): Promise<ControlRecord[]>;
+    // the agents' skins
+    skinPut(record: SkinRecord): Promise<void>;
+    skin(agent: string): Promise<SkinRecord | null>;
+    skins(): Promise<SkinRecord[]>;
+    skinState(agent: string, state: SkinRecord['state'], at: string, detail: string | null, more?: { message?: string | null; texture_url?: string | null }): Promise<void>;
+    skinClear(agent: string): Promise<boolean>;
     // tables of other services; an empty answer when the table is not there
     plannerCall(call_id: string): Promise<Record<string, any> | null>;
     agentGoals(): Promise<{ agent: string; long_term: any[]; short_term: any[]; updated_at: string }[]>;

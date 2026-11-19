@@ -23,6 +23,7 @@
 #                            example /opt/genesis/data/minecraft. Keep it outside this
 #                            repository: the agents image is built from the repository. (required)
 #   GENESIS_MINECRAFT_MEMORY the Java heap; default 6G
+#   GENESIS_MINECRAFT_VIEW_DISTANCE, GENESIS_MINECRAFT_SIMULATION_DISTANCE   in chunks; default 10 each (the game's own)
 #
 # Ports. The server listens on 25600 (decided: never 25565), inside the container as well, so
 # one number is right everywhere: the agents connect to minecraft:25600 inside the network
@@ -61,6 +62,25 @@ services:
       # the camp stands at the world spawn: with spawn protection the agents (never operators) could not use it
       SPAWN_PROTECTION: "0"
       MAX_PLAYERS: "8"
+      # View and simulation distance (the image's own variable names, from its documentation,
+      # "configuration/server-properties": VIEW_DISTANCE -> view-distance, SIMULATION_DISTANCE ->
+      # simulation-distance). 10 is the game's own default for both. Every agent's bot keeps the
+      # chunks the server sends it in memory: a larger view distance raises the memory of every
+      # agent process as well as the server's.
+      VIEW_DISTANCE: "${GENESIS_MINECRAFT_VIEW_DISTANCE:-10}"
+      SIMULATION_DISTANCE: "${GENESIS_MINECRAFT_SIMULATION_DISTANCE:-10}"
+      # Plugins (decided: they ship with the server, and their versions stay PINNED as they are: every entry
+      # names its exact version, none comes from the env file). The image installs them from Modrinth
+      # (its documentation, "mods-and-plugins/modrinth": a comma or newline separated list of
+      # "project" or "project:version"; an entry that is removed here is removed from the server).
+      #   worldedit      the bootstrap levels the site with it, from the console
+      #   skinsrestorer  the agents' skins (the server is in offline mode)
+      # Slugs and versions were read on Modrinth's own listing on 16 Nov 2026: both versions name
+      # Paper and Minecraft 1.21.6. NOT RUN: no image was started with these lines. A WorldEdit
+      # jar that was put into plugins/ by hand must be deleted first (genesis/FIRST_RUN.md).
+      MODRINTH_PROJECTS: |
+        worldedit:7.4.6
+        skinsrestorer:15.12.6
     ports:
       - "${GENESIS_MINECRAFT_BIND:?set GENESIS_MINECRAFT_BIND to this machine's LAN address}:25600:25600"
     volumes:

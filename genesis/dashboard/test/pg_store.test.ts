@@ -97,6 +97,6 @@ test('migrations run in file-name order, each once', async () => {
         return { rows: [] };
     };
     const pool: PgPool = { query, connect: async () => ({ query, release() {} }) };
-    assert.deepEqual(await runMigrations(pool, migrations_dir), ['001_events.sql', '002_incidents_controls.sql']);
+    assert.deepEqual(await runMigrations(pool, migrations_dir), ['001_events.sql', '002_incidents_controls.sql', '003_skins.sql', '004_skin_texture.sql']);
     assert.deepEqual(await runMigrations(pool, migrations_dir), []);
 });

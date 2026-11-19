@@ -9,10 +9,13 @@
 //
 // and nothing else: the model decides yes or no, never what is handed over, how many, or to
 // whom. Those stay the structured content of the message. A decision the model made is
-// recorded with source "planner". When the model is away, the limit is spent, the call fails
-// or the reply does not validate, the code rule of the message desk decides instead
-// (genesis/relay/desk.js) and is recorded with source "routine". A contested chest claim
-// goes the same way.
+// recorded with source "planner". Decided: a request or an offer WAITS for the model's answer
+// when the model is busy with another call, until the LAST 15 SECONDS of the message's life
+// (120 seconds): then the code rule of the message desk answers (genesis/relay/desk.js), so the
+// request does not expire unanswered. The code rule also decides when the model is away, the
+// limit is spent, the call fails or the reply does not validate. Whatever it decides is recorded
+// with source "routine", answered_by "code_rule" and why it was its turn. A contested chest
+// claim goes the same way.
 //
 // The model's reason is recorded (the call record, the agent's own event). It is never put
 // into a message another agent receives: nothing between agents is free text.
@@ -31,8 +34,16 @@ export const DECISION_LIMITS = Object.freeze({
     max_calls_per_hour: 20,   // proposed: decisions the model makes per agent per real hour; after that the code rule decides
     max_tokens: 80,           // proposed: the model's own token limit for a decision (Ollama's num_predict)
     timeout_ms: 15 * 1000,    // proposed: a decision that takes longer is not waited for
-    wait_ms: 20 * 1000,       // proposed: how long a decision waits for a model that is busy with another call
+    wait_ms: 120 * 1000,      // the longest a decision waits for a model that is busy with another call; in effect the message's
+                              // life less the code rule's 15 seconds (modelWaitMs below). A smaller value here is a shorter wait
 });
+
+// Decided: when the model stays busy for the whole wait, the agent's CODE RULE answers in the last 15 seconds of the
+// message's life (of a shorter-lived message: in its last eighth), so that a request is not left to expire. The
+// event of the answer says that the code rule answered, not the model.
+export const RULE_MARGIN_MS = 15 * 1000;
+// How long the model may be waited for, for a message with `remaining_ms` left to live.
+export const modelWaitMs = (remaining_ms, limit_ms = Infinity) => Math.max(0, Math.min(limit_ms, remaining_ms - Math.min(RULE_MARGIN_MS, remaining_ms / 8)));
 
 export const DECISION_REASON_MAX = 140; // decided: the reason is at most 140 characters
 export const DECISIONS = Object.freeze(['accept', 'decline']);

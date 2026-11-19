@@ -13,7 +13,9 @@
 //   skill.started   { skill, args? }
 //   skill.progress  { skill, done, total }            total may be null (not known)
 //   skill.result    { skill, ok, interrupted, timedout, output, duration_ms }
-//   goal.changed    { scope, before, after, reason, source, call_id }
+//   goal.changed    { scope, before, after, reason, source, call_id, thought? }
+//     thought: the model's own sentence, on the change that carries the planner's decision (source
+//     "planner"). A field of its own (decided): readers take it from here, never out of `reason`.
 //   agent.failure   { kind, error, message, ... }     kind "model" carries the model_failure log fields
 //   agent.recovery  { kind, message? }
 //     Both also come in the incident shape (decided, genesis/recovery/incidents.js): a `data`
@@ -27,6 +29,17 @@
 //       { msg_id, conv, from, to, type, body, chat_line, expires_at, state, reason? }
 //     state "rejected" carries the named reason and never has a chat line.
 //   agent.state     { state, detail? }
+//     States that carry a view of their own (the dashboard reads them; `detail` is checked by nobody else):
+//       goals             { long_term: [goal], short_term: [goal] }   an agent's goals as it starts: long-term
+//                         goals are emitted as events (decided), also when none has changed
+//       routine           { name, phase, phases, away, parked, deaths, bounds: { daylight_ticks_left, health, food,
+//                         free_slots, breached: [names], limits: { min_health, min_food, min_free_slots, max_deaths } } }
+//                         the role routine's phase and bounds, when the phase or a breached bound changes
+//       world_zones       the site as the world file has it (agent "world"; genesis/world/announce.js)
+//       world_bootstrap   the summary of the bootstrap manifest (agent "world")
+//       model_available | model_leaving | model_away   the model gate (agent "planner"), also once at start
+//       server_down_wait  { agent, attempt, delay_ms, waited_ms, message }   an agent process waits for the Minecraft
+//       server_back       { agent, waited_ms, message }                      server (agent "supervisor")
 
 export const EVENT_VERSION = 1;
 
@@ -131,6 +144,7 @@ const DATA_CHECKS = {
         !isFilledText(d.reason) && 'data.reason must be a non-empty string',
         !GOAL_SOURCES.includes(d.source) && `data.source must be one of ${GOAL_SOURCES.join(', ')}`,
         d.call_id !== null && !isFilledText(d.call_id) && 'data.call_id must be a non-empty string or null',
+        d.thought !== undefined && d.thought !== null && !isText(d.thought) && 'data.thought must be a string',
     ],
     'agent.failure': (d) => (d.incident_id !== undefined ? incidentProblems(d) : [
         !isFilledText(d.kind) && 'data.kind must be a non-empty string',

@@ -523,10 +523,18 @@ test('modes: Genesis switches none of upstream\'s modes (the idle reflexes) off'
     };
     walk(genesis);
     assert.ok(sources.length > 40);
+    // one exception, decided after the first run: genesis/lib/threat_modes.js switches the two THREAT modes
+    // (cowardice, self_defense) while an agent is on its routine, and nothing else
+    const threat_file = path.join(genesis, 'lib', 'threat_modes.js');
     for (const file of sources) {
         const text = readFileSync(file, 'utf8');
         for (const forbidden of [/modes\s*\.\s*setOn\s*\(/, /modes\s*\.\s*pause\s*\(/, /modes\s*\.\s*unPauseAll\s*\(/, /!setMode/, /skills\s*\.\s*stay\s*\(/]) {
+            if (file === threat_file && String(forbidden) === String(/modes\s*\.\s*setOn\s*\(/)) continue;
             assert.ok(!forbidden.test(text), `${path.relative(REPO_ROOT, file)} touches upstream's modes (${forbidden})`);
         }
     }
+    const threat = readFileSync(threat_file, 'utf8');
+    assert.equal(threat.match(/modes\s*\.\s*setOn\s*\(/g).length, 1, 'threat_modes.js switches modes in more than one place');
+    assert.match(threat, /export const THREAT_MODES = Object\.freeze\(\['cowardice', 'self_defense'\]\);/);
+    assert.match(threat, /for \(const name of THREAT_MODES\) \{\s*if \(want\[name\] !== now\[name\]\) \{ modes\.setOn\(name, want\[name\]\);/);
 });
